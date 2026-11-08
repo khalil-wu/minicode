@@ -1725,6 +1725,11 @@ class SessionAgentRunnerMixin:
         )
         if next_state is None:
             return
+        reset_fields = state_store.startup_reset_fields.get(conversation_id)
+        if reset_fields is not None:
+            field_name = {"turn.plan.updated": "plan", "task.update": "todos", "agent.progress": "agentProgress"}.get(event_type)
+            if field_name is not None:
+                reset_fields.discard(field_name)
         revision = max(revision + 1, time.time_ns())
         cache[conversation_id] = (revision, next_state)
         pending[conversation_id] = (revision, next_state)
@@ -4356,6 +4361,9 @@ class SessionAgentRunnerMixin:
             }
         run_tool_registry = request_snapshot.tool_registry
         previous_turn_aborted = _consume_previous_turn_aborted(self, conversation.id)
+        admission_ui_seed = None
+        admission_ui_base = None
+        admission_ui_fields = None
         async with self._conversation_projection_lock(conversation.id):
             await _replay_pending_conversation_projections(
                 self.conversation_repo,
@@ -4397,14 +4405,31 @@ class SessionAgentRunnerMixin:
                 if (UI_AGENT_STATE_SNAPSHOT_KEY in conversation.context_snapshot
                         and run_context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]
                         != conversation.context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]):
-                    await to_thread_cancel_safe(
-                        self.conversation_repo.commit_turn_projection,
-                        conversation.id,
-                        assistant_message=None,
-                        context_delta={"set": {UI_AGENT_STATE_SNAPSHOT_KEY: run_context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]}, "removed": []},
-                        expected_revision=conversation.revision,
-                        return_record=False,
-                    )
+                    if not any(run_metadata.get(key) for key in (
+                            "_parent_notification_only", "_goal_continuation", "resume_from_checkpoint", "_turn_admission_restored")):
+                        admission_ui_base = _coerce_ui_agent_state(conversation.context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY])
+                        admission_ui_seed = (int(conversation.context_snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0),
+                            run_context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY])
+                        admission_ui_fields = {"plan", "todos", "agentProgress"}
+                        self.ui_agent_state_store.cache[conversation.id] = admission_ui_seed
+                        self.ui_agent_state_store.startup_reset_fields[conversation.id] = admission_ui_fields
+
+                        def release_unpublished_ui_seed(_done, owner=conversation.id, seed=admission_ui_seed, fields=admission_ui_fields):
+                            if self.ui_agent_state_store.cache.get(owner) is seed:
+                                self.ui_agent_state_store.cache.pop(owner)
+                            if self.ui_agent_state_store.startup_reset_fields.get(owner) is fields:
+                                self.ui_agent_state_store.startup_reset_fields.pop(owner)
+
+                        asyncio.current_task().add_done_callback(release_unpublished_ui_seed)
+                    else:
+                        await to_thread_cancel_safe(
+                            self.conversation_repo.commit_turn_projection,
+                            conversation.id,
+                            assistant_message=None,
+                            context_delta={"set": {UI_AGENT_STATE_SNAPSHOT_KEY: run_context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]}, "removed": []},
+                            expected_revision=conversation.revision,
+                            return_record=False,
+                        )
             else:
                 # Keep the durable snapshot and retained pending projection
                 # intact until a later flush can commit it. Resetting here
@@ -5223,6 +5248,7 @@ class SessionAgentRunnerMixin:
                 await _flush_pending_reasoning()
             run_trace.mark("admission.enter")
             async with self._conversation_projection_lock(conversation.id):
+                state_store = self.ui_agent_state_store
                 latest = await asyncio.to_thread(
                     self.conversation_repo.get_projection_context,
                     conversation.id,
@@ -5237,6 +5263,24 @@ class SessionAgentRunnerMixin:
                     run_context_snapshot if run_metadata.get("_retry_projection") is not None
                     else latest[1],
                 )
+                ui_cache_at_admission = state_store.cache.get(conversation.id)
+                pending_ui = state_store.pending.get(conversation.id)
+                if pending_ui is not None and pending_ui[0] > int(saved_snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0):
+                    saved_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = pending_ui[1]
+                    saved_snapshot[UI_AGENT_STATE_REVISION_KEY] = pending_ui[0]
+                reset_with_input = (admission_ui_seed is not None
+                    and consumed_steer is None and not run_metadata.get("_turn_admitted"))
+                if reset_with_input:
+                    current_ui = _coerce_ui_agent_state(saved_snapshot.get(UI_AGENT_STATE_SNAPSHOT_KEY))
+                    empty_ui = _empty_ui_agent_state()
+                    # Keep changes published since startup, including child
+                    # completion from another window. Clear only the old fields.
+                    admitted_ui = {**current_ui, **{key: empty_ui[key]
+                        for key in admission_ui_fields if current_ui[key] == admission_ui_base[key]}}
+                    saved_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = admitted_ui
+                    if admitted_ui != current_ui:
+                        saved_snapshot[UI_AGENT_STATE_REVISION_KEY] = max(
+                            int(saved_snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0) + 1, time.time_ns())
                 admissions = dict(saved_snapshot.get("turn_admissions") or {})
                 admissions[user_message_id] = {
                     "history_start": max(0, int(history_start)),
@@ -5301,6 +5345,13 @@ class SessionAgentRunnerMixin:
                 run_trace.mark("admission.committed")
                 if committed is None:
                     raise RuntimeError("conversation disappeared during turn admission")
+                if reset_with_input and state_store.startup_reset_fields.get(conversation.id) is admission_ui_fields:
+                    state_store.startup_reset_fields.pop(conversation.id)
+                if pending_ui is not None and state_store.pending.get(conversation.id) is pending_ui:
+                    state_store.pending.pop(conversation.id)
+                if (reset_with_input or pending_ui is not None) and state_store.cache.get(conversation.id) is ui_cache_at_admission:
+                    state_store.cache[conversation.id] = (int(saved_snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0),
+                        saved_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY])
                 if consumed_steer is not None:
                     turn_state.record_user_input(user_message_id)
                 run_metadata["_turn_admitted"] = True

@@ -128,7 +128,7 @@ async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_a
         await session.event_outbox.drain_persistence()
         assert len(adapter.requests) == 1
         assert context_reads.call_count >= 2
-        assert len(reset_saves) == int(ui_state == "populated")
+        assert reset_saves == []
         admission.assert_called_once()
         accepted_snapshot = admission.call_args.kwargs["context_snapshot"]
         if ui_state == "missing":
@@ -173,21 +173,22 @@ def test_first_ui_progress_reads_only_its_retained_projection(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_changed_ui_write_failure_still_stops_before_provider_and_admission(tmp_path, monkeypatch):
+async def test_admission_write_failure_keeps_previous_ui_state_and_stops_before_provider(tmp_path, monkeypatch):
     session, conversation, adapter = session_for(tmp_path, monkeypatch)
     repo = session.conversation_repo
     original = {"ui_agent_state": {"plan": {"steps": [{"step": "Existing plan", "status": "completed"}]},
         "todos": [], "subagents": [], "agentProgress": []}}
     repo.save_context_snapshot(conversation.id, original)
-    save = Mock(side_effect=OSError("actual reset persistence failure"))
-    monkeypatch.setattr(repo, "commit_turn_projection", save)
+    save = Mock(side_effect=OSError("actual admission persistence failure"))
+    monkeypatch.setattr(repo, "commit_turn_admission", save)
     try:
         assert await session.command_dispatcher._handle_command(UserCommand("user_message", packet(conversation.id))) is False
         await asyncio.gather(*tuple(session.execution_cleanup_tasks))
         save.assert_called_once()
         assert adapter.requests == []
         saved = repo.get_conversation(conversation.id)
-        assert saved.context_snapshot == original and saved.transcript == []
+        assert saved.context_snapshot["ui_agent_state"] == original["ui_agent_state"]
+        assert not any(item["role"] == "user" for item in saved.transcript)
     finally:
         await session.session_lifecycle.shutdown(reason="ui_reset_failure_test")
 

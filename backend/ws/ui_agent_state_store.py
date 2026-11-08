@@ -19,4 +19,5 @@ class UiAgentStateStore:
     pending: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
     tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     terminal_fences: dict[str, str] = field(default_factory=dict)
+    startup_reset_fields: dict[str, set[str]] = field(default_factory=dict)
 

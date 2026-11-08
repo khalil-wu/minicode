@@ -1292,14 +1292,13 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
         "todos": [{"id": "previous-turn", "content": "Previous completed work", "status": "completed"}],
         "subagents": retained_children, "agentProgress": []}})
 
-    commit_projection = session.conversation_repo.commit_turn_projection
-    def tracked_projection(conversation_id, **kwargs):
-        if kwargs["assistant_message"] is None and "ui_agent_state" in kwargs.get("context_delta", {}).get("set", {}):
-            mutation_order.append("save")
-            assert set(kwargs["context_delta"]["set"]) == {"ui_agent_state"}
-            assert "history" not in kwargs["context_delta"]
-            assert kwargs["return_record"] is False
-        return commit_projection(conversation_id, **kwargs)
+    commit_admission = session.conversation_repo.commit_turn_admission
+    def tracked_admission(conversation_id, **kwargs):
+        mutation_order.append("admit")
+        assert kwargs["context_snapshot"]["ui_agent_state"]["todos"] == []
+        assert kwargs["context_snapshot"]["ui_agent_state"]["subagents"] == retained_children
+        assert kwargs["return_record"] is False
+        return commit_admission(conversation_id, **kwargs)
 
     monkeypatch.setattr(
         "backend.ws.agent_runner._replay_pending_conversation_projections",
@@ -1307,8 +1306,8 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
     )
     monkeypatch.setattr(
         session.conversation_repo,
-        "commit_turn_projection",
-        tracked_projection,
+        "commit_turn_admission",
+        tracked_admission,
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",
@@ -1335,7 +1334,7 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
         )
     )
 
-    assert mutation_order[:2] == ["replay", "save"]
+    assert mutation_order[:2] == ["replay", "admit"]
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
     assert saved.context_snapshot["ui_agent_state"]["subagents"] == retained_children
 
