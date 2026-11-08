@@ -714,11 +714,14 @@ class QueryEngine:
         # The observer starts before canonical tool/hook binding. A preview
         # may read instructions, but must not execute old InstructionsLoaded
         # callbacks or consume the real builder's load/compaction reason.
-        preview = clone_context_builder(turn_ctx.context_builder, copy_history=False)
-        preview.bind_hook_manager(None)
-        rendered_prompt = str(
-            preview.base_system_prompt(turn_ctx.state) or ""
-        ).strip()
+        def render_prompt() -> str:
+            preview = clone_context_builder(turn_ctx.context_builder, copy_history=False)
+            preview.bind_hook_manager(None)
+            return str(preview.base_system_prompt(turn_ctx.state) or "").strip()
+
+        # Instruction discovery reads the filesystem. Keep transport and Stop
+        # responsive while the preview's worker retains its borrowed history.
+        rendered_prompt = await to_thread_cancel_safe(render_prompt)
         if rendered_prompt:
             turn_ctx.metadata["system_prompt"] = rendered_prompt
 
