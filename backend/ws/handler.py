@@ -841,14 +841,16 @@ class WebSocketSession(
 
     def runtime_capability_snapshot(
         self, *, skill_catalog: list[dict[str, Any]] | None = None, include_catalogs: bool = True,
+        config_snapshot: AppConfig | None = None, composer_catalog: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Full per-session capability contract, including current permissions."""
         from backend.commands.catalog import get_enabled_composer_command_catalog
         from backend.config import load_config
 
         self.refresh_tool_registry_if_mcp_changed()
-        config_snapshot = load_config(
-            cwd=self.session_lifecycle.workspace_root_for_conversation(), resolve_credentials=False)
+        if config_snapshot is None:
+            config_snapshot = load_config(
+                cwd=self.session_lifecycle.workspace_root_for_conversation(), resolve_credentials=False)
         model_selection = self._llm_selection_payload()
         registry = self.tool_registry
         try:
@@ -919,10 +921,10 @@ class WebSocketSession(
         )
         snapshot["composer_commands"] = [
             *extension_commands,
-            *(command for command in get_enabled_composer_command_catalog(
+            *(command for command in (composer_catalog if composer_catalog is not None else get_enabled_composer_command_catalog(
                 active_workspace_root,
                 resolve_active_workspace=False,
-            ) if command["name"] != "goal" or config_snapshot.feature_flags.enabled("goals")),
+            )) if command["name"] != "goal" or config_snapshot.feature_flags.enabled("goals")),
         ]
         snapshot["feature_flags"] = {name: {"enabled": config_snapshot.feature_flags.enabled(name)}
             for name in config_snapshot.feature_flags.flags}
@@ -946,6 +948,7 @@ class WebSocketSession(
     def runtime_capabilities_payload(
         self, *, source: str = "session", skill_catalog: list[dict[str, Any]] | None = None,
         include_catalogs: bool = True,
+        config_snapshot: AppConfig | None = None, composer_catalog: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         conversation_id = str(self.active_conversation_id or "")
         workspace_root = str(self.session_lifecycle.workspace_root_for_conversation() or "")
@@ -955,7 +958,8 @@ class WebSocketSession(
             "source": source,
             "conversation_id": conversation_id,
             "workspace_root": workspace_root,
-            "capabilities": self.runtime_capability_snapshot(skill_catalog=skill_catalog, include_catalogs=include_catalogs),
+            "capabilities": self.runtime_capability_snapshot(skill_catalog=skill_catalog, include_catalogs=include_catalogs,
+                config_snapshot=config_snapshot, composer_catalog=composer_catalog),
         }
 
     def _mcp_summary(self) -> dict[str, Any]:

@@ -161,7 +161,7 @@ async def test_explicit_setup_inspect_refreshes_real_projection_without_changing
     permission = PermissionContext(mode=mode, workspace_root=tmp_path, conversation_id="sandbox-owner")
     owner = SimpleNamespace(
         active_conversation_id="sandbox-owner", permission_context=permission,
-        skill_manager=None, is_connected=False,
+        skill_manager=None, is_connected=False, config=object(),
     )
     lifecycle = SessionLifecycle(owner)
     owner.session_lifecycle = lifecycle

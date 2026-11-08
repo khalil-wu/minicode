@@ -1134,12 +1134,6 @@ class SessionLifecycle:
     async def send_runtime_capabilities(self, *, source: str = "session", include_catalogs: bool = True) -> None:
         if self.is_shutting_down:
             return
-        if not include_catalogs:
-            await self._session.send_payload(
-                self._session.runtime_capabilities_payload(source=source, include_catalogs=False),
-                log_context="runtime.capabilities",
-            )
-            return
         workspace = self.workspace_root_for_conversation()
         permission = self._session.permission_context
         scope = self._current_sandbox_capability_scope()
@@ -1149,6 +1143,18 @@ class SessionLifecycle:
                 not self.is_shutting_down
                 and scope == self._current_sandbox_capability_scope()
             )
+
+        if not include_catalogs:
+            from backend.config import load_config
+
+            selection_config = self._session.config
+            config = await to_thread_cancel_safe(load_config, cwd=workspace, resolve_credentials=False)
+            if scope_is_current() and self._session.config is selection_config:
+                await self._session.send_payload(
+                    self._session.runtime_capabilities_payload(source=source, include_catalogs=False, config_snapshot=config),
+                    log_context="runtime.capabilities",
+                )
+            return
 
         if self._sandbox_capability_scope != scope:
             self.invalidate_sandbox_capabilities()
@@ -1240,14 +1246,22 @@ class SessionLifecycle:
             }, log_context="runtime.capabilities")
             return
         manager = self._session.skill_manager
-        skills = (
-            await to_thread_cancel_safe(lambda: manager.snapshot(workspace).list_all())
-            if manager is not None else None
-        )
-        if not scope_is_current():
+        selection_config = self._session.config
+        def capture_catalogs():
+            from backend.config import load_config
+            from backend.commands.catalog import get_enabled_composer_command_catalog
+
+            config = load_config(cwd=workspace, resolve_credentials=False)
+            skills = manager.snapshot(workspace, config_stack=config.config_layer_stack).list_all() if manager is not None else None
+            commands = get_enabled_composer_command_catalog(workspace, resolve_active_workspace=False)
+            return config, skills, commands
+
+        config, skills, commands = await to_thread_cancel_safe(capture_catalogs)
+        if not scope_is_current() or self._session.config is not selection_config:
             return
         await self._session.send_payload(
-            self._session.runtime_capabilities_payload(source=source, skill_catalog=skills),
+            self._session.runtime_capabilities_payload(source=source, skill_catalog=skills,
+                config_snapshot=config, composer_catalog=commands),
             log_context="runtime.capabilities",
         )
 

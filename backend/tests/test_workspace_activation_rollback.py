@@ -99,7 +99,7 @@ class _Session:
         self.payloads.append(dict(payload))
         return True
 
-    def runtime_capabilities_payload(self, *, source: str = "session", skill_catalog=None) -> dict:
+    def runtime_capabilities_payload(self, *, source: str = "session", skill_catalog=None, config_snapshot=None, composer_catalog=None) -> dict:
         return {
             "type": "runtime.capabilities",
             "session_id": self.session_id,

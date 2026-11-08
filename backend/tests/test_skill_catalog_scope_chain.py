@@ -135,6 +135,7 @@ async def test_model_capability_projection_skips_skill_discovery_and_sandbox_pro
 
     owner = SimpleNamespace(
         active_conversation_id="model-owner", session_id="model-session",
+        config=object(),
         refresh_tool_registry_if_mcp_changed=Mock(), tool_registry=ToolRegistry(),
         permission_checker=None, permission_context=None, _mcp_registry_version_snapshot=0,
         runtime_toolset_policy=lambda _, **_kwargs: None,
@@ -203,7 +204,7 @@ async def test_old_sandbox_probe_never_publishes_as_new_workspace(tmp_path, monk
     root_a.mkdir()
     root_b.mkdir()
     owner = SimpleNamespace(session_id="scope-session", active_conversation_id="same-owner", root=root_a,
-                            permission_context=PermissionContext(mode="bypass"), skill_manager=None, is_connected=False)
+                            permission_context=PermissionContext(mode="bypass"), skill_manager=None, is_connected=False, config=object())
     lifecycle = SessionLifecycle(owner)
     lifecycle.workspace_root_for_conversation = lambda: owner.root
     messages = []
