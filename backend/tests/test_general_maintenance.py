@@ -222,6 +222,7 @@ def test_auto_archive_unloads_the_real_idle_core_and_notification_listener_witho
         session.window_instance_id = "fixture-window"
         session.window_owner_id = "fixture-owner"
         session.active_conversation_id = ""
+        session._model_context_prewarm = None
         session.conversation_repo = repository
         session.cleanup_tasks = set()
         session.cancel_pending_approvals = AsyncMock()
