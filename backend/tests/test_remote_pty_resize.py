@@ -157,6 +157,9 @@ async def test_remote_resize_uses_original_pty_after_detach_and_releases_only_it
             assert spawned.status_code == 200, spawned.text
             original = spawned.json()
             session = original["session_id"]
+            # xterm's Enter sends CR. The remote API preserves those bytes;
+            # do not substitute LF for an interactive Windows console input.
+            enter = "\r" if os.name == "nt" else "\n"
             command = (f"& '{sys.executable.replace(chr(39), chr(39)*2)}' -u '{str(script).replace(chr(39), chr(39)*2)}'\r"
                 if os.name == "nt" else f"'{sys.executable}' -u '{script}'\n")
             assert (await _native(client, owner, "pty:write", [session, command, conversation])).status_code == 200
@@ -164,7 +167,7 @@ async def test_remote_resize_uses_original_pty_after_detach_and_releases_only_it
             assert first["stdin_is_tty"] and first["stdout_is_tty"]
             resized = await _native(client, owner, "pty:resize", [session, 101, 31, conversation])
             assert resized.status_code == 200 and resized.json() is True, resized.text
-            assert (await _native(client, owner, "pty:write", [session, "size\n", conversation])).status_code == 200
+            assert (await _native(client, owner, "pty:write", [session, "size" + enter, conversation])).status_code == 200
             second = await _size(result, 2)
             assert second == {**first, "cols": 101, "rows": 31, "query": 2}
             await attachment.detach()
@@ -179,7 +182,7 @@ async def test_remote_resize_uses_original_pty_after_detach_and_releases_only_it
                 assert invalid.status_code == 422, invalid.text
             resized = await _native(client, owner, "pty:resize", [session, 132, 44, conversation])
             assert resized.status_code == 200 and resized.json() is True, resized.text
-            assert (await _native(client, owner, "pty:write", [session, "size\n", conversation])).status_code == 200
+            assert (await _native(client, owner, "pty:write", [session, "size" + enter, conversation])).status_code == 200
             third = await _size(result, 3)
             assert third == {**first, "cols": 132, "rows": 44, "query": 3}
             other = await _native(client, foreign, "pty:spawn", [str(workspace), "foreign-resize-conversation"])
