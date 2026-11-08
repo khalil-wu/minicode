@@ -15,7 +15,8 @@ import {
   commandWithClientCommandId,
   rejectAllPendingCommandResults,
   rejectClientCommandResult,
-  rejectPendingPromptResponseResults,
+  rejectPendingConnectionResults,
+  isLiveThreadCommandType,
   registerWebSocketSender,
   notifyClientCommandReceived,
 } from "../protocol/ws-outbox";
@@ -38,7 +39,7 @@ import { handleDiffEvent } from "../chat/diffEvents";
 import { createHeartbeatRendererObserver } from "../chat/heartbeatRendererState";
 import { handleNoticeEvent } from "../chat/noticeEvents";
 import { handleRealtimeEvent } from "../chat/realtimeEvents";
-import { REALTIME_EVENT_TYPES, isRealtimeCommand } from "../protocol/realtime-types";
+import { REALTIME_EVENT_TYPES } from "../protocol/realtime-types";
 import { realtimeController } from "../composer/realtime-controller";
 import { handleControlPlaneProjectionEvent } from "../chat/controlPlaneEvents";
 import { createStreamBuffer } from "../lib/stream-buffer";
@@ -153,8 +154,7 @@ export const shouldReplayQueuedCommand = (
   // Keep retry ownership until the server receipt. Mutations are acknowledged
   // after durable admission; read projections after producing their result.
   // Reconnect duration alone never discards a pending request.
-  void queued;
-  return true;
+  return !isLiveThreadCommandType(queued.cmd.type);
 };
 
 export interface WebSocketHandle {
@@ -292,7 +292,7 @@ export const shouldAdvanceReplayCursor = (event: ServerEvent): boolean => {
     // Process it as a legacy/transient event without moving the cursor.
     && Number.isSafeInteger(seq) && seq >= 0
     && !NON_REPLAYABLE_CURSOR_EVENT_TYPES.has(event.type)
-    && !(event.type === "command.result" && event.command.startsWith("thread/realtime/"))
+    && !(event.type === "command.result" && isLiveThreadCommandType(event.command))
     && !event.type.startsWith("session.")
     && !isTransientProviderReasoning(event);
 };
@@ -546,7 +546,7 @@ const hasPendingClientCommand = (clientCommandId: string): boolean =>
 export const getPendingClientCommandCountForTests = (): number => pendingClientCommands.size;
 
 export const shouldTrackClientCommandAck = (cmd: ClientCommand): boolean =>
-  cmd.type !== "ping" && cmd.type !== "scheduler.heartbeat.renderer_state" && !isRealtimeCommand(cmd);
+  cmd.type !== "ping" && cmd.type !== "scheduler.heartbeat.renderer_state" && !isLiveThreadCommandType(cmd.type);
 
 const clearPendingClientCommandAck = (clientCommandId: string) => {
   pendingClientCommands.delete(clientCommandId);
@@ -657,15 +657,15 @@ export const useWebSocketConnection = () => {
     };
 
     const withdrawUnconfirmedPromptResponses = () => {
-      rejectPendingPromptResponseResults("连接已断开，审批或回答尚未确认，请重新连接后重试。");
-      const isControlDecision = (command: ClientCommand) => command.type === "control_response"
-        || command.type === "control_cancel_request";
+      rejectPendingConnectionResults("连接已断开，本次请求尚未确认，请重新连接后重试。");
+      const belongsToConnection = (command: ClientCommand) => command.type === "control_response"
+        || command.type === "control_cancel_request" || isLiveThreadCommandType(command.type);
       // A result waiter may already have timed out. Its old transport entry
       // must not silently decide a still-visible prompt after reconnect either.
       for (const [id, command] of pendingClientCommands) {
-        if (isControlDecision(command)) clearPendingClientCommandAck(id);
+        if (belongsToConnection(command)) clearPendingClientCommandAck(id);
       }
-      queue.current = queue.current.filter((queued) => !isControlDecision(queued.cmd));
+      queue.current = queue.current.filter((queued) => !belongsToConnection(queued.cmd));
     };
 
     const stopReconnecting = (reason: string, message: string) => {

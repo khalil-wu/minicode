@@ -426,6 +426,21 @@ describe("useWebSocket client command ids", () => {
 
     expect(getPendingClientCommandAckIdsForTests()).toEqual([]);
   });
+
+  it.each(["thread/sample", "thread/sample/cancel", "thread/increment_elicitation", "thread/decrement_elicitation"])(
+    "keeps %s outside command replay and the durable event cursor", type => {
+      const command = { type, threadId: "source", requestId: 7, expectedTurnId: "turn", prompt: "sample",
+        client_command_id: "connection-request" } as ClientCommand;
+      expect(isQueueableWhenOffline(command)).toBe(false);
+      expect(shouldReplayQueuedCommand({ cmd: command, queuedAt: Date.now() })).toBe(false);
+      expect(shouldTrackClientCommandAck(command)).toBe(false);
+      trackPendingClientCommandAck(command);
+      expect(getPendingClientCommandAckIdsForTests()).toEqual([]);
+      const result = { type: "command.result", command: type, level: "info", message: "",
+        conversation_id: "source", seq: 20 } as ServerEvent;
+      expect(shouldAdvanceReplayCursor(result)).toBe(false);
+    },
+  );
 });
 
 describe("useWebSocket server sequence tracking", () => {

@@ -15,6 +15,10 @@ export type AwaitCommandResultOptions = {
 export const DEFAULT_COMMAND_RESULT_TIMEOUT_MS = 60_000;
 export const LONG_COMMAND_RESULT_TIMEOUT_MS = 10 * 60_000;
 
+export const isLiveThreadCommandType = (type: string): boolean =>
+  type.startsWith("thread/realtime/") || type === "thread/sample" || type === "thread/sample/cancel"
+  || type === "thread/increment_elicitation" || type === "thread/decrement_elicitation";
+
 export class CommandNotSentError extends Error {}
 /** The server explicitly rejected the command at the transport receipt boundary. */
 export class CommandRejectedError extends Error {}
@@ -171,13 +175,11 @@ export const sendPromptResponseCommand = async (
   return result;
 };
 
-/** A lost connection leaves control decisions unconfirmed, not completed.
- * Return their ids so the transport withdraws them instead of silently
- * replaying a decision after its caller has been offered an explicit retry. */
-export const rejectPendingPromptResponseResults = (reason: string): string[] => {
+/** Control decisions and live thread requests lose their response owner on disconnect. */
+export const rejectPendingConnectionResults = (reason: string): string[] => {
   const ids = Array.from(pendingCommandResults.entries())
     .filter(([, pending]) => pending.expectedCommand === "control_response"
-      || pending.expectedCommand === "control_cancel_request")
+      || pending.expectedCommand === "control_cancel_request" || isLiveThreadCommandType(pending.expectedCommand))
     .map(([id]) => id);
   for (const id of ids) rejectClientCommandResult(id, reason);
   return ids;

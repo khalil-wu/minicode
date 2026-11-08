@@ -6,7 +6,7 @@ import {
   clientCommandIsAwaitingReceipt,
   notifyClientCommandReceived,
   rejectClientCommandResult,
-  rejectPendingPromptResponseResults,
+  rejectPendingConnectionResults,
   registerWebSocketSender,
   resetPendingCommandResultsForTests,
   resolveClientCommandResult,
@@ -44,6 +44,20 @@ describe("ws-outbox", () => {
     vi.mocked(ptyKillConversation).mockResolvedValue(0);
   });
 
+  it.each(["thread/sample", "thread/sample/cancel", "thread/increment_elicitation", "thread/decrement_elicitation"])(
+    "rejects a pending %s result when its connection closes", async type => {
+      registerWebSocketSender(() => true);
+      const command = { type, requestId: 7, threadId: "source", expectedTurnId: "turn", prompt: "sample",
+        client_command_id: "live-thread" } as import("./events").ClientCommand;
+      const pending = sendClientCommandAwaitResult(command, type);
+      const rejected = expect(pending).rejects.toThrow("connection lost");
+      expect(rejectPendingConnectionResults("connection lost")).toEqual(["live-thread"]);
+      await rejected;
+      expect(resolveClientCommandResult({ type: "command.result", command: type, message: "", level: "info",
+        client_command_id: "live-thread" } as import("./events").CommandResultEvent)).toBe(false);
+    },
+  );
+
   it.each(["success", "error"])("notification resolution waits for the real %s result rather than a transport receipt", async level => {
     const hideNotifications = vi.fn(async () => 0);
     vi.mocked(isDesktop).mockReturnValue(true);
@@ -66,7 +80,7 @@ describe("ws-outbox", () => {
     vi.mocked(desktop).mockReturnValue({ hideNotifications } as never);
     registerWebSocketSender(() => true);
     const pending = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "actual-request", conversation_id: "original-conversation", client_command_id: "actual-pending" });
-    rejectPendingPromptResponseResults("Actual connection loss");
+    rejectPendingConnectionResults("Actual connection loss");
     await expect(pending).rejects.toThrow("Actual connection loss");
     expect(hideNotifications).not.toHaveBeenCalled();
   });
@@ -271,7 +285,7 @@ describe("ws-outbox", () => {
     registerWebSocketSender(() => true);
     const response = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "ask-disconnect", client_command_id: "control-disconnect" });
     const normal = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "normal-pending" }, "conversation.list");
-    expect(rejectPendingPromptResponseResults("connection lost")).toEqual(["control-disconnect"]);
+    expect(rejectPendingConnectionResults("connection lost")).toEqual(["control-disconnect"]);
     await expect(response).rejects.toThrow("connection lost");
     const result = { type: "command.result" as const, command: "conversation.list", level: "success", message: "", data: { client_command_id: "normal-pending" } };
     expect(resolveClientCommandResult(result)).toBe(true);
