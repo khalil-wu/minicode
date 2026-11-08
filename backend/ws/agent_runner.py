@@ -3719,18 +3719,21 @@ class SessionAgentRunnerMixin:
         conversation = await to_thread_cancel_safe(read, clean_id)
         if conversation is None:
             return None
+        workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+        config = await to_thread_cancel_safe(load_config, cwd=workspace_root)
         refresh = getattr(self, "refresh_tool_registry_if_mcp_changed", None)
         if callable(refresh):
-            refresh(allow_when_busy=False)
-        workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+            refresh(allow_when_busy=False, workspace_root=workspace_root, config_snapshot=config)
         tool_registry = self._conversation_tool_registry(
             clean_id,
             workspace_root=workspace_root,
+            config=config,
         )
         runner = await self._ensure_lifecycle_runtime(
             conversation_id=clean_id,
             workspace_root=workspace_root,
             tool_registry=tool_registry,
+            config=config,
         )
         if runner is None:
             return None
@@ -3765,6 +3768,7 @@ class SessionAgentRunnerMixin:
             runner,
             conversation=conversation,
             tool_registry=tool_registry,
+            config=config,
         )
         self._mark_lifecycle_runtime_host_actions_bound(clean_id, runner)
         return runner

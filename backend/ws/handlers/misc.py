@@ -1208,14 +1208,13 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
     )
     if callable(ensure_extension_commands) and conversation_id:
         await ensure_extension_commands(conversation_id, bind_command_context=False)
+    file_commands = await to_thread_cancel_safe(get_enabled_composer_command_catalog,
+        workspace_root, resolve_active_workspace=False)
     commands = [
         *session.command_registry.list_extension_slash_commands(
             scope_id=conversation_id or None
         ),
-        *get_enabled_composer_command_catalog(
-            workspace_root,
-            resolve_active_workspace=False,
-        ),
+        *file_commands,
     ]
     request_id = session.event_outbox.client_command_id
     await session.send_payload(

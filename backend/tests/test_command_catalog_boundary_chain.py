@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
+import asyncio
+import threading
 
 import pytest
 
@@ -19,14 +21,58 @@ async def test_catalog_read_reuses_published_context_but_dispatch_rebinds_curren
     bind = AsyncMock()
     monkeypatch.setattr(session, "_bind_lifecycle_runtime_command_snapshot", bind)
     monkeypatch.setattr(session, "_mark_lifecycle_runtime_host_actions_bound", Mock())
+    foreground = threading.get_ident()
+    def load(**kwargs):
+        assert threading.get_ident() != foreground
+        return session.config
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", load)
     try:
         assert await session._ensure_extension_commands_for_conversation(conversation.id, bind_command_context=False) is runner
         bind.assert_not_called()
         assert await session._ensure_extension_commands_for_conversation(conversation.id) is runner
         bind.assert_called_once()
         assert bind.call_args.kwargs["conversation"].id == conversation.id
+        assert bind.call_args.kwargs["config"] is session.config
+        assert session._ensure_lifecycle_runtime.call_args.kwargs["config"] is session.config
     finally:
         await session.session_lifecycle.shutdown(reason="catalog_audit")
+
+
+@pytest.mark.asyncio
+async def test_slow_file_command_scan_yields_and_keeps_the_requested_workspace(tmp_path, monkeypatch):
+    from backend.commands.catalog import get_enabled_composer_command_catalog
+    from backend.ws.handlers.misc import handle_commands_list
+
+    session, conversation, _ = session_for(tmp_path, monkeypatch)
+    directory = tmp_path / "workspace" / ".minicode" / "commands"
+    directory.mkdir(parents=True)
+    (tmp_path / "workspace" / ".git").mkdir()
+    (directory / "owned.md").write_text("Original workspace command", encoding="utf-8")
+    entered, release = threading.Event(), threading.Event()
+    foreground = threading.get_ident()
+    def scan(root, **kwargs):
+        assert threading.get_ident() != foreground
+        entered.set()
+        assert release.wait(5)
+        return get_enabled_composer_command_catalog(root, **kwargs)
+    monkeypatch.setattr("backend.commands.catalog.get_enabled_composer_command_catalog", scan)
+    monkeypatch.setattr(session, "_ensure_extension_commands_for_conversation", AsyncMock())
+    session.send_payload = AsyncMock()
+    task = asyncio.create_task(handle_commands_list(session, {}))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert not task.done()
+        session.active_conversation_id = "new-owner"
+        release.set()
+        await task
+        payload = session.send_payload.call_args.args[0]
+        assert payload["conversation_id"] == conversation.id
+        command, = [item for item in payload["commands"] if item["name"] == "owned"]
+        assert command["template"] == "Original workspace command"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await session.session_lifecycle.shutdown(reason="catalog-worker")
 
 
 @pytest.mark.asyncio
