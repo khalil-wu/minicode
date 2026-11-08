@@ -213,7 +213,7 @@ async def test_actual_async_http_both_windows_keep_references_and_committed_deli
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reuse_parent_compaction", [False, True])
 @pytest.mark.parametrize("content_item_kinds", [True, False])
-async def test_actual_sync_http_after_native_compaction_and_cold_restore_starts_window_with_full_body(tmp_path, reuse_parent_compaction, content_item_kinds):
+async def test_actual_openai_sync_http_after_native_compaction_and_cold_restore_starts_window_with_full_body(tmp_path, reuse_parent_compaction, content_item_kinds):
     checkpoint = raw_checkpoint(id="cmp-heartbeat")
     async def respond(request, reader, writer):
         if request.path.endswith("/compact"):
@@ -235,9 +235,12 @@ async def test_actual_sync_http_after_native_compaction_and_cold_restore_starts_
             await send_sse(writer, classifier_events(request.index, choice=answer, final=answer))
     async with http_endpoint(respond) as endpoint:
         url = endpoint.url + "/v1"
-        settings = LLMSettings(provider="custom", api_key="explicit-local-fixture", base_url=url, model="parent", wire_api="responses",
+        # This scenario exercises Source's OpenAI-only attribution metadata.
+        # The actual HTTP server remains the local fixture; third-party
+        # requests strip these fields and are covered by provider-item tests.
+        settings = LLMSettings(provider="openai", api_key="explicit-local-fixture", base_url=url, model="parent", wire_api="responses",
             native_compaction=True, comp_hash="actual-heartbeat-producer", max_tokens=512)
-        info = ModelDefinition(provider="custom", id="parent", name="parent", api="openai-responses", base_url=url,
+        info = ModelDefinition(provider="openai", id="parent", name="parent", api="openai-responses", base_url=url,
             comp_hash="actual-heartbeat-producer", context_window=128000, extra={"auto_review_model_override": "explicit-reviewer"})
         cfg = AppConfig(llm=settings, token_budget=TokenBudget(total=128000), feature_flags=FeatureFlags({
             "guardian_approval": True, "guardian_reuse_parent_compaction": reuse_parent_compaction,

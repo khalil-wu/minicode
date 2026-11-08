@@ -261,7 +261,7 @@ def test_actual_catalog_produces_host_only_metadata_and_unknown_wire_cannot_forg
     models = runtime._apply_model_config("private", (), declared)
     known, unknown = models
     assert known.source_model_metadata == source_model_metadata_source("gpt-6-sol")
-    assert known.source_model_metadata.reference_commit == "822e58cc3d666166c7446c5b1ea2e52f5d09594c"
+    assert known.source_model_metadata.reference_commit == "970111f6cb62cc02fe36a82ea7d71b37a2889c97"
     assert known.extra["node_repl_auto_review_required"] is True
     assert unknown.source_model_metadata is None
     assert "source_model_metadata" not in known.to_dict()

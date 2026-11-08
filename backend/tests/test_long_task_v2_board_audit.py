@@ -102,7 +102,7 @@ def test_only_exact_successful_provider_receipt_can_capture_production_child_v2_
     assert snapshot["multi_agent_version"] == "v2" and snapshot["board_backend"] == "local"
     assert snapshot["multi_agent_reasoning_effort"] == "xhigh"
     assert snapshot["production_model_definition"]["source_model_metadata"] == {
-        "reference_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c", "catalog_file": "codex-rs/models-manager/models.json"}
+        "reference_commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97", "catalog_file": "codex-rs/models-manager/models.json"}
     assert len(snapshot["production_definition_sha256"]) == 64
     assert profile["features"]["agent_message_board"] is True and profile["agent"]["max_turn_seconds"] == 5400
     assert profile["features"]["multi_agent_v2"]["tool_namespace"] == snapshot["namespace"] == tool_namespace

@@ -192,24 +192,35 @@ async def test_actual_memory_websocket_reuses_source_header_and_blob_after_real_
     handshakes = []
     def handshake(socket, request):
         handshakes.append(dict(request.headers))
+    generated = []
     async def respond(socket, request, index):
-        await socket.send(json.dumps(response_events(index, read=index == 1)[0]))
+        if request.get("generate") is False:
+            await socket.send(json.dumps({"type": "response.completed", "response": {
+                "id": "memory-warmup", "status": "completed", "output": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0}}}))
+            return
+        generated.append(request)
+        await socket.send(json.dumps(response_events(len(generated), read=len(generated) == 1)[0]))
     async with endpoint(respond, process_request=handshake) as (adapter, requests, connections):
         try:
             await consolidation_agent.run_memory_consolidation_agent(llm=adapter, memory_root=tmp_path,
                 prompt="Read memory-input.txt before consolidating.")
-            assert len(submissions) == 1 and len(requests) == 2 and len(connections) == 1
+            assert len(submissions) == 1 and len(generated) == 2 and len(connections) == 1
+            assert len(requests) == 3 and requests[0]["generate"] is False
             assert handshakes[0]["x-openai-subagent"] == "memory_consolidation"
             assert handshakes[0]["x-openai-memgen-request"] == "true"
-            assert requests[1]["previous_response_id"] == "actual-response-1"
-            assert requests[1]["input"][0]["type"] == "function_call_output"
-            assert "MEMORY_PROVENANCE_TOOL_INPUT" in str(requests[1]["input"])
+            assert generated[1]["previous_response_id"] == "actual-response-1"
+            assert generated[1]["input"][0]["type"] == "function_call_output"
+            assert "MEMORY_PROVENANCE_TOOL_INPUT" in str(generated[1]["input"])
+            assert len(submissions[0].state.tool_calls) == 1
+            assert submissions[0].state.tool_calls[0].status == "success"
             for request in requests:
                 client = request["client_metadata"]
                 source = json.loads(client["x-codex-turn-metadata"])
                 assert client["x-openai-subagent"] == "memory_consolidation"
                 assert source["thread_source"] == source["turn_trigger"] == "memory_consolidation"
-                assert source["request_kind"] == "turn" and "context_window_id" not in source
+                assert source["request_kind"] == ("prewarm" if request.get("generate") is False else "turn")
+                assert "context_window_id" not in source
         finally:
             for submission in submissions:
                 await submission.session.aclose()
@@ -278,8 +289,15 @@ async def test_real_guardian_websocket_keeps_custom_api_key_and_override_request
     handshakes = []
     def handshake(socket, request):
         handshakes.append(dict(request.headers))
+    generated = []
     async def respond(socket, request, index):
-        await socket.send(json.dumps(response_events(index, text='{"outcome":"allow"}')[0]))
+        if request.get("generate") is False:
+            await socket.send(json.dumps({"type": "response.completed", "response": {
+                "id": "guardian-warmup", "status": "completed", "output": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0}}}))
+            return
+        generated.append(request)
+        await socket.send(json.dumps(response_events(len(generated), text='{"outcome":"allow"}')[0]))
     async with endpoint(respond, process_request=handshake) as (parent_adapter, requests, connections):
         ctx, action = guardian_context(tmp_path)
         settings = replace(parent_adapter._settings, provider=provider, model="provenance-parent")
@@ -301,13 +319,14 @@ async def test_real_guardian_websocket_keeps_custom_api_key_and_override_request
                 answer = await reviewer.run(prompt, cancel_event=asyncio.Event(), parent_context=ctx,
                     deadline=asyncio.get_running_loop().time() + 20)
                 assert json.loads(answer)["outcome"] == "allow"
-            assert len(requests) == 3 and handshakes
+            assert len(generated) == 3 and handshakes
+            assert len(requests) == 4 and requests[0]["generate"] is False
             assert len({request["client_metadata"]["thread_id"] for request in requests}) == 1
             assert len({request["client_metadata"]["turn_id"] for request in requests}) == 3
             for headers in handshakes:
                 assert headers["x-openai-subagent"] == "guardian"
                 assert not {"x-codex-guardian", "x-openai-memgen-request", "parent_response_id"} & headers.keys()
-            for index, request in enumerate(requests):
+            for index, request in enumerate(generated):
                 assert request["model"] == reviewer_model and "metadata" not in request
                 client = request["client_metadata"]
                 assert client["x-openai-subagent"] == "guardian"

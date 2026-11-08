@@ -185,10 +185,12 @@ def test_v1_timestamp_watermarks_migrate_without_blocking_revisions(
     }
     job_columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
     schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    consolidated_limit = connection.execute("SELECT max_consolidated_threads FROM memory_state WHERE singleton=1").fetchone()[0]
     connection.close()
 
     assert "source_revision" in output_columns
     assert "selected_for_phase2_source_revision" in output_columns
     assert "input_revision" in job_columns
     assert "input_watermark" not in job_columns
-    assert schema_version == 2
+    assert schema_version == 3
+    assert consolidated_limit == 0

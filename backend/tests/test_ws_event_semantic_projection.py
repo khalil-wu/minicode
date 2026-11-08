@@ -902,6 +902,7 @@ def test_handle_rejects_non_object_json_and_continues_to_ping(
     session = object.__new__(WebSocketSession)
     session.session_id = "session-non-object-json"
     session.conversation_runtime = SimpleNamespace(active_conversation_id=None)
+    session.run_manager = SimpleNamespace(durable_client_commands=None)
     session.event_outbox = SimpleNamespace(
         websocket=_WebSocket(),
         connection_generation=1,

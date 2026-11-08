@@ -56,6 +56,7 @@ async def _admit_query_submission(submission) -> None:
         boundary_input=SimpleNamespace(consumed_steer=None),
         history_start=history_start,
         history_end=context.history_length,
+        capture_snapshot=context.export_snapshot,
     )
     await submission.runtime.metadata["report_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
     await submission.runtime.metadata["publish_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
@@ -933,8 +934,10 @@ def test_workspace_capability_probe_failure_publishes_error_snapshot(monkeypatch
 
     sent = asyncio.run(scenario())
     snapshots = [payload for payload in sent if payload.get("type") == "runtime.capabilities"]
-    assert snapshots[0]["source"] == "workspace.activate"
-    assert snapshots[-1]["source"] == "sandbox.probe"
+    # The probe may finish while the activation catalog is being captured.
+    # Both projections must report the real error for the same selected owner.
+    assert {snapshot["source"] for snapshot in snapshots} == {"workspace.activate", "sandbox.probe"}
+    assert all(snapshot["conversation_id"] == "conv_probe_failure" for snapshot in snapshots)
     assert snapshots[-1]["capabilities"]["permission"]["sandbox_status"]["probe_status"] == "error"
 
 
@@ -1942,10 +1945,10 @@ def test_durable_client_command_persistence_failure_is_rejected_before_ack(monke
         durable_queue = session.run_manager.durable_client_commands
         assert durable_queue is not None
 
-        def fail_persist(_command: UserCommand) -> bool:
+        def fail_persist() -> None:
             raise OSError("disk unavailable")
 
-        monkeypatch.setattr(durable_queue, "persist_client_command", fail_persist)
+        monkeypatch.setattr(durable_queue, "_write_current_unlocked", fail_persist)
         await session.session_lifecycle.handle()
         return websocket.sent
 
