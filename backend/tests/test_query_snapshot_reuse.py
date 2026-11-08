@@ -7,7 +7,7 @@ from backend.agent.execution_journal import ExecutionJournal
 from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.query_journal import QueryJournalRecorder
 from backend.agent.state import AgentState
-from backend.llm.base import LLMMessage
+from backend.llm.base import LLMMessage, ToolCallEvent
 
 
 def recorder(tmp_path):
@@ -293,3 +293,40 @@ def test_new_acceptance_provenance_updates_prepared_history():
     captured, _ = builder.capture_recovery_snapshot()
     assert captured == builder.export_snapshot()
     assert captured["history"][-1]["accepted_input"]["turn_id"] == "new-turn"
+
+
+@pytest.mark.parametrize("direction", ["snapshot", "live"])
+def test_exported_snapshot_owns_nested_tools_metadata_and_provider_state(direction):
+    builder = ContextBuilder()
+    message = LLMMessage("assistant", "owned answer", tool_calls=[
+        ToolCallEvent("call", "edit_file", {"changes": [{"path": "owned.py", "lines": [1, 2]}]})],
+        provider_items=[{"type": "reasoning", "encrypted_content": "opaque", "summary": [{"type": "summary_text", "text": "summary"}]}],
+        mcp_output=[{"type": "text", "text": "original"}],
+        accepted_input={"origin": "user", "parts": ["accepted"]})
+    builder._history_store.append(message)
+    builder._persistent_notes = [{"kind": "owned", "content": "note", "source": {"paths": ["original"]}}]
+    builder.extension_cursor = {"producer": {"pending": [1]}}
+    builder._turn_admissions = {"user": {"history_start": 0, "history_end": 1, "receipt": {"parts": ["accepted"]}}}
+    builder._invoked_skill_payloads = {"skill": {"path": "SKILL.md", "content": "instructions", "extra": {"roots": ["original"]}}}
+    snapshot = builder.export_snapshot()
+    before = deepcopy(snapshot)
+    if direction == "snapshot":
+        snapshot["history"][0]["tool_calls"][0]["arguments"]["changes"][0]["lines"].append(3)
+        snapshot["history"][0]["provider_items"][0]["summary"][0]["text"] = "changed"
+        snapshot["history"][0]["mcp_output"][0]["text"] = "changed"
+        snapshot["history"][0]["accepted_input"]["parts"].append("changed")
+        snapshot["persistent_notes"][0]["source"]["paths"].append("changed")
+        snapshot["extension_cursor"]["producer"]["pending"].append(2)
+        snapshot["turn_admissions"]["user"]["receipt"]["parts"].append("changed")
+        snapshot["invoked_skills"][0]["extra"]["roots"].append("changed")
+        assert builder.export_snapshot() == before
+    else:
+        message.tool_calls[0].arguments["changes"][0]["lines"].append(3)
+        message.provider_items[0]["summary"][0]["text"] = "changed"
+        message.mcp_output[0]["text"] = "changed"
+        message.accepted_input["parts"].append("changed")
+        builder._persistent_notes[0]["source"]["paths"].append("changed")
+        builder.extension_cursor["producer"]["pending"].append(2)
+        builder._turn_admissions["user"]["receipt"]["parts"].append("changed")
+        builder._invoked_skill_payloads["skill"]["extra"]["roots"].append("changed")
+        assert snapshot == before

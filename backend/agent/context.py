@@ -4376,7 +4376,7 @@ class ContextBuilder:
             groups = list(reversed(selected_reversed))
 
         def serialize_message(message: LLMMessage) -> dict[str, Any]:
-            attachment_refs = _sanitize_attachment_refs(message.attachment_refs)
+            attachment_refs = deepcopy(_sanitize_attachment_refs(message.attachment_refs))
             serialized = {
                 "role": message.role,
                 # ``export_snapshot()`` is the authoritative resume/replay
@@ -4418,7 +4418,7 @@ class ContextBuilder:
                     {
                         "id": tool_call.id,
                         "name": tool_call.name,
-                        "arguments": tool_call.arguments,
+                        "arguments": deepcopy(tool_call.arguments),
                         "native_type": tool_call.native_type,
                         "native_namespace": tool_call.native_namespace,
                         "native_name": tool_call.native_name,
@@ -4493,7 +4493,7 @@ class ContextBuilder:
         )
         from backend.conversations.context_delta import rebase_turn_admissions
         admissions = rebase_turn_admissions(
-            self._turn_admissions,
+            deepcopy(self._turn_admissions),
             removed_prefix=omitted_prefix_count if max_messages is not None or max_chars is not None else 0,
             inserted_prefix=0,
         )
@@ -4508,9 +4508,9 @@ class ContextBuilder:
             "history": sanitized_history,
             "history_frozen_count": frozen_count,
             **({"turn_admissions": admissions} if admissions else {}),
-            "persistent_notes": [dict(note) for note in self._persistent_notes],
+            "persistent_notes": deepcopy(self._persistent_notes),
             "extension_state": extension_state,
-            "extension_cursor": dict(self.extension_cursor),
+            "extension_cursor": deepcopy(self.extension_cursor),
             # Bound read-file state to 100 entries. Preserve the most recent
             # insertion order here so conversation snapshots cannot grow
             # without limit.
@@ -4519,10 +4519,7 @@ class ContextBuilder:
             "git_status_context": self._git_status_context,
             "git_status_workspace": self._git_status_workspace,
             "execution_cwd": str(self._workspace_root or ""),
-            "invoked_skills": [
-                dict(payload)
-                for payload in self._invoked_skill_payloads.values()
-            ],
+            "invoked_skills": deepcopy(list(self._invoked_skill_payloads.values())),
             "consecutive_autocompact_failures": self._consecutive_autocompact_failures,
             "context_ledger": self.context_ledger(),
             **({"context_window_state": asdict(self._context_window_state)} if self._context_window_state is not None else {}),
@@ -4532,7 +4529,7 @@ class ContextBuilder:
 
     def prepare_recovery_snapshot(self) -> None:
         """Prepare the idle thread's canonical, detached history projection."""
-        self._recovery_snapshot = (deepcopy(self.export_snapshot()), self._history_store.revision)
+        self._recovery_snapshot = (self.export_snapshot(), self._history_store.revision)
 
     def capture_recovery_snapshot(self) -> tuple[dict[str, Any], int]:
         """Project current metadata and changed history over the owned base."""
