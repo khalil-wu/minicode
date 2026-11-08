@@ -18,10 +18,11 @@ import stat
 import threading
 import time
 from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
@@ -70,6 +71,13 @@ class _DurableQueueState:
     @classmethod
     def empty(cls) -> "_DurableQueueState":
         return cls({}, {}, {}, [], {}, {}, {}, {}, set(), {}, {}, {})
+
+
+@dataclass(frozen=True, slots=True)
+class ClientCommandAdmission:
+    status: str
+    command: UserCommand | None = None
+    cancellation: dict[str, Any] | None = None
 
 
 class DurableUserMessageQueue:
@@ -1551,32 +1559,46 @@ class DurableUserMessageQueue:
         return bool(command_id and (command_id in self._client_completed or self._result_receipt_path(command_id).exists()))
 
     @_queue_locked
-    def persist_client_command(self, command: UserCommand) -> bool:
-        """Durably accept a command before its websocket ACK is emitted."""
+    def admit_client_command(self, command: UserCommand, *, accept_new: bool = True,
+                             known_completed: bool = False,
+                             prepare: Callable[[UserCommand], None] | None = None) -> ClientCommandAdmission:
+        """Read deduplication/Stop state and accept new work in one transaction."""
         self._refresh_from_disk_unlocked()
         payload = self._client_command_to_dict(command)
         if payload is None:
-            return False
+            return ClientCommandAdmission("invalid")
         command_id = _clean_command_id(command.data.get("client_command_id"))
-        if command_id in self._client_completed or self._result_receipt_path(command_id).exists():
-            return True
-        if self._cancelled_receipt_unlocked(command_id) is not None:
-            return True
-        if command_id in self._client_inflight or any(
-            self._command_id(item) == command_id
-            for item in self._client_pending
-        ):
-            return True
+        cancellation = self._cancelled_receipt_unlocked(command_id)
+        if cancellation is not None:
+            return ClientCommandAdmission("cancelled", cancellation=cancellation)
+        if known_completed or command_id in self._client_completed or self._result_receipt_path(command_id).exists():
+            return ClientCommandAdmission("completed")
+        existing = self._client_inflight.get(command_id) or next(
+            (item for item in self._client_pending if self._command_id(item) == command_id), None)
+        if existing is not None:
+            return ClientCommandAdmission("pending", command=deepcopy(existing))
+        if not accept_new:
+            return ClientCommandAdmission("backlog")
+        if prepare is not None:
+            # Only a genuinely new input captures selection revisions. A
+            # duplicate keeps the original owner even if its retry names a
+            # different or no-longer-readable conversation.
+            prepare(command)
+            payload = self._client_command_to_dict(command)
         normalized = self._dict_to_client_command(payload)
         if normalized is None:
-            return False
+            return ClientCommandAdmission("invalid")
         self._client_pending.append(normalized)
         try:
             self._write_current_unlocked()
         except Exception:
             self._client_pending.pop()
             raise
-        return True
+        return ClientCommandAdmission("accepted")
+
+    def persist_client_command(self, command: UserCommand) -> bool:
+        """Durably accept a command before its websocket ACK is emitted."""
+        return self.admit_client_command(command).status != "invalid"
 
     @_queue_locked
     def pending_client_commands(self) -> list[UserCommand]:

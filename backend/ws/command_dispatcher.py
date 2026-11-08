@@ -527,13 +527,10 @@ class SessionCommandDispatcher:
             command_id = self._client_command_id(command)
             if command.type == "user_message" and command_id:
                 command.data["_client_queue_key"] = self._session.run_manager.durable_client_commands.path.stem
-                cancellation = await self.cancelled_user_message(command_id)
-                if cancellation is not None:
-                    await self._send_client_command_ack(command, duplicate=True)
-                    await self.emit_cancelled_user_message(command)
-                    continue
             refresh = command.type in READ_ONLY_REFRESH_COMMAND_TYPES
-            if not refresh and await to_thread_cancel_safe(self._client_command_seen, command):
+            durable_queue = self._session.run_manager.durable_client_commands
+            durable_admission = bool(command_id and durable_queue is not None and not refresh and command.type != "ping")
+            if not refresh and not durable_admission and await to_thread_cancel_safe(self._client_command_seen, command):
                 await self._send_client_command_ack(command, duplicate=True)
                 logger.info(
                     "Skipping duplicate client command %s in session %s",
@@ -552,6 +549,64 @@ class SessionCommandDispatcher:
             command_backlog_full = len(self._command_tasks) + len(self._execution_command_tasks) >= self._max_command_tasks
             command_can_bypass_backlog = command.type in COMMAND_BACKLOG_BYPASS_TYPES
             command_is_droppable_refresh = command.type in COMMAND_BACKLOG_DROPPABLE_TYPES
+            if durable_admission:
+                if (_requires_selected_conversation(command.type)
+                        and not (command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
+                                 or command.data.get("conversation_id"))
+                        and self._session.active_conversation_id
+                        and not getattr(self._session.session_lifecycle, "_foreground_navigation_pending", False)):
+                    # Persist the selected owner with commands whose wire
+                    # shape permits omission. Replay must not reinterpret a
+                    # formerly owner-relative action in another conversation.
+                    command.data["owner_conversation_id"] = self._session.active_conversation_id
+                try:
+                    input_scope = self._user_message_input_scope(command) if command.type == "user_message" else None
+                    # The durable write fsyncs; keep it off the event loop so
+                    # other sessions' streams are not paused behind the disk.
+                    admission = await to_thread_cancel_safe(self._admit_client_command, command,
+                        accept_new=not command_backlog_full or command_can_bypass_backlog,
+                        known_completed=command_id in self._recent_client_command_id_set,
+                        input_scope=input_scope)
+                except Exception:
+                    logger.exception(
+                        "Failed to persist client command %s in session %s",
+                        command_id,
+                        self._session.session_id,
+                    )
+                    await self._send_client_command_ack(
+                        command,
+                        accepted=False,
+                        reason="command.persistence",
+                        envelope=False,
+                    )
+                    continue
+                if admission.status == "cancelled":
+                    await self._send_client_command_ack(command, duplicate=True)
+                    await self.emit_cancelled_user_message(command, cancellation=admission.cancellation)
+                    continue
+                if admission.status == "completed":
+                    await self._send_client_command_ack(command, duplicate=True)
+                    continue
+                if admission.status == "pending":
+                    original = admission.command
+                    await self._send_client_command_ack(original, duplicate=True)
+                    if self._recovered_command_owner_ready(original):
+                        self._schedule_durable_client_command(command_id, connection_generation,
+                            command_type=original.type, command=original, recovered=True)
+                    continue
+                if admission.status == "invalid":
+                    await self._send_client_command_ack(
+                        command,
+                        accepted=False,
+                        reason="command.not_serializable",
+                    )
+                    continue
+                if admission.status == "accepted":
+                    # ACK follows the same durable publish used by replay.
+                    await self._send_client_command_ack(command)
+                    self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command)
+                    continue
+
             if command_backlog_full and not command_can_bypass_backlog:
                 reason = (
                     "command.dropped_refresh"
@@ -592,66 +647,24 @@ class SessionCommandDispatcher:
                 self._schedule_transient_client_command(command, connection_generation)
                 continue
 
-            command_id = self._client_command_id(command)
-            durable_queue = self._session.run_manager.durable_client_commands
-            if command_id and durable_queue is not None:
-                if await to_thread_cancel_safe(durable_queue.has_client_command, command_id):
-                    await self._send_client_command_ack(command, duplicate=True)
-                    if self._recovered_command_owner_ready(command):
-                        self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command, recovered=True)
-                    continue
-                if (_requires_selected_conversation(command.type)
-                        and not (command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
-                                 or command.data.get("conversation_id"))
-                        and self._session.active_conversation_id
-                        and not getattr(self._session.session_lifecycle, "_foreground_navigation_pending", False)):
-                    # Persist the selected owner with commands whose wire
-                    # shape permits omission. Replay must not reinterpret a
-                    # formerly owner-relative action in another conversation.
-                    command.data["owner_conversation_id"] = self._session.active_conversation_id
-                try:
-                    if command.type == "user_message":
-                        self._bind_user_message_input_owner(command)
-                    # The durable write fsyncs; keep it off the event loop so
-                    # other sessions' streams are not paused behind the disk.
-                    persisted = await asyncio.to_thread(durable_queue.persist_client_command, command)
-                except Exception:
-                    logger.exception(
-                        "Failed to persist client command %s in session %s",
-                        command_id,
-                        self._session.session_id,
-                    )
-                    await self._send_client_command_ack(
-                        command,
-                        accepted=False,
-                        reason="command.persistence",
-                        envelope=False,
-                    )
-                    continue
-                if not persisted:
-                    await self._send_client_command_ack(
-                        command,
-                        accepted=False,
-                        reason="command.not_serializable",
-                    )
-                    continue
-                # ACK means the server durably owns the command. A crash before
-                # task creation leaves it pending for replay.
-                await self._send_client_command_ack(command)
-                self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command)
-                continue
-
             if command.type == "user_message":
                 self._bind_user_message_input_owner(command)
             self._schedule_transient_client_command(command, connection_generation)
 
     def _bind_user_message_input_owner(self, command: UserCommand) -> None:
+        self._bind_user_message_input_scope(command, self._user_message_input_scope(command))
+
+    def _user_message_input_scope(self, command: UserCommand) -> str | None:
         explicit_owner = str(command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
                              or command.data.get("conversation_id") or "")
         if not explicit_owner and getattr(self._session.session_lifecycle, "_foreground_navigation_pending", False):
             # A selection still in flight decides this input's owner at admission.
+            return None
+        return explicit_owner or str(self._session.active_conversation_id or "")
+
+    def _bind_user_message_input_scope(self, command: UserCommand, input_owner: str | None) -> None:
+        if input_owner is None:
             return
-        input_owner = explicit_owner or str(self._session.active_conversation_id or "")
         record = self._session.conversation_repo.get_conversation_summary(input_owner) if input_owner else None
         if record is not None:
             command.data["conversation_id"] = input_owner
@@ -1024,11 +1037,31 @@ class SessionCommandDispatcher:
             return record
         return await to_thread_cancel_safe(resolve)
 
-    async def emit_cancelled_user_message(self, command: UserCommand) -> None:
+    def _admit_client_command(self, command: UserCommand, *, accept_new: bool, known_completed: bool,
+                              input_scope: str | None):
+        from backend.ws.durable_user_queue import ClientCommandAdmission
+
+        client = self._session.run_manager.durable_client_commands
+        shared = self._session.run_manager.durable_queue
+        if command.type == "user_message" and shared is not None:
+            record = shared.cancelled_client_command(self._client_command_id(command), client_queue_key=client.path.stem)
+            if record is not None:
+                client.cancel_client_command(UserCommand(**record["command"]), reason=record["reason"], cancellation=record)
+                return ClientCommandAdmission("cancelled", cancellation=record)
+        admission = client.admit_client_command(command, accept_new=accept_new, known_completed=known_completed,
+            prepare=(lambda accepted: self._bind_user_message_input_scope(accepted, input_scope))
+                if command.type == "user_message" else None)
+        if admission.cancellation is not None and shared is not None:
+            record = {**admission.cancellation, "client_queue_key": client.path.stem}
+            shared.cancel_client_command(UserCommand(**record["command"]), reason=record["reason"], cancellation=record)
+        return admission
+
+    async def emit_cancelled_user_message(self, command: UserCommand, *, cancellation=None) -> None:
         command_id = self._client_command_id(command)
         if not command_id:
             return
-        cancellation = await self.cancelled_user_message(command_id, client_queue_key=str(command.data.get("_client_queue_key") or ""))
+        if cancellation is None:
+            cancellation = await self.cancelled_user_message(command_id, client_queue_key=str(command.data.get("_client_queue_key") or ""))
         if cancellation is None:
             raise RuntimeError(f"Cancelled input {command_id} has no durable Stop receipt")
         data = cancellation["command"]["data"]

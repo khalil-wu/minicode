@@ -182,12 +182,12 @@ async def test_empty_control_response_returns_error(session):
 async def test_durable_ack_then_semantic_receipt_and_negative_ack_retry_close_the_loop(session, monkeypatch):
     future = register(session)
     queue = session.run_manager.durable_client_commands
-    persist = queue.persist_client_command
+    persist = queue.admit_client_command
 
-    def fail_write(_command):
+    def fail_write(_command, **_kwargs):
         raise OSError('injected durable write failure')
 
-    monkeypatch.setattr(queue, 'persist_client_command', fail_write)
+    monkeypatch.setattr(queue, 'admit_client_command', fail_write)
     cmd = command()
     raw = json.dumps({'type': cmd.type, **cmd.data})
     run = asyncio.create_task(session.command_dispatcher.run(session.connection_generation))
@@ -200,7 +200,7 @@ async def test_durable_ack_then_semantic_receipt_and_negative_ack_retry_close_th
         assert session.ws.results.empty()
         assert not session.command_dispatcher.command_tasks
 
-        monkeypatch.setattr(queue, 'persist_client_command', persist)
+        monkeypatch.setattr(queue, 'admit_client_command', persist)
         session.ws.inbound.put_nowait(raw)
         admitted_ack = await asyncio.wait_for(session.ws.acks.get(), timeout=1)
         assert admitted_ack.get('accepted') is not False
