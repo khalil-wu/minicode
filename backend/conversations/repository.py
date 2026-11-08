@@ -803,10 +803,14 @@ class ConversationRepository:
             normalize_conversation_type(conversation_type) if conversation_type is not None else None)
 
     def store_instance_id(self) -> str:
-        """Return the durable identity of this conversation store."""
-
-        with self._store_lock():
-            return self._read_or_create_store_instance_id_unlocked()
+        """Read the atomically published identity without waiting on history writers."""
+        try:
+            return self._read_store_instance_id()
+        except FileNotFoundError:
+            # Only first creation changes storage. Recheck under the existing
+            # cross-process lock so concurrent openers publish one identity.
+            with self._store_lock():
+                return self._read_or_create_store_instance_id_unlocked()
 
     def _list_conversations_unlocked(
         self,
@@ -2842,22 +2846,19 @@ class ConversationRepository:
             raise ValueError(f"Conversation store revision is malformed: {raw!r}")
         return revision
 
+    def _read_store_instance_id(self) -> str:
+        raw = self._store_instance_path.read_text(encoding="utf-8").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{32}", raw):
+            return raw
+        raise ValueError(f"Conversation store instance id is malformed: {raw!r}")
+
     def _read_or_create_store_instance_id_unlocked(self) -> str:
-        if self._store_instance_path.exists():
-            raw = self._safe_read_text(
-                self._store_instance_path,
-                encoding="utf-8",
-            ).strip().lower()
-            if re.fullmatch(r"[0-9a-f]{32}", raw):
-                return raw
-            raise ValueError(f"Conversation store instance id is malformed: {raw!r}")
-        instance_id = uuid.uuid4().hex
-        self._safe_write_text(
-            self._store_instance_path,
-            f"{instance_id}\n",
-            encoding="utf-8",
-        )
-        return instance_id
+        try:
+            return self._read_store_instance_id()
+        except FileNotFoundError:
+            instance_id = uuid.uuid4().hex
+            self._safe_write_text(self._store_instance_path, f"{instance_id}\n", encoding="utf-8")
+            return instance_id
 
     def _advance_store_revision_unlocked(self) -> int:
         with self._store_lock():

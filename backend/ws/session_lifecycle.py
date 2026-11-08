@@ -12,7 +12,6 @@ from typing import Any
 from fastapi import WebSocketDisconnect
 
 from backend.agent.message import AgentEvent
-from backend.atomic_io import canonical_file_path_key
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     await_with_deadline,
@@ -189,7 +188,7 @@ class SessionLifecycle:
 
     @workspace_root.setter
     def workspace_root(self, value: Path | None) -> None:
-        self._workspace_root = value
+        self._workspace_root = value.resolve() if value is not None else None
 
     @property
     def background_recovery_lock(self) -> asyncio.Lock:
@@ -1109,10 +1108,9 @@ class SessionLifecycle:
 
     def _current_sandbox_capability_scope(self) -> tuple[Any, ...]:
         workspace = self.workspace_root_for_conversation()
-        workspace_key = canonical_file_path_key(workspace) if workspace is not None else ""
         return (
             str(self._session.active_conversation_id or ""),
-            workspace_key,
+            workspace,
             self._session.permission_context,
         )
 
@@ -1323,16 +1321,21 @@ class SessionLifecycle:
         if owner:
             target = self._session.conversation_repo.get_conversation_summary(owner)
             if target is not None:
-                directory = self.workspace_path_for_conversation(target)
-                if directory.startswith("file:"):
+                directory = self.workspace_root_for_conversation(target)
+                if directory is None:
                     return None
                 mounted = self._workspace_context.root_path if self._workspace_context is not None else self._workspace_root
-                if not directory or mounted is None or Path(directory).expanduser().resolve() != mounted.resolve():
+                if mounted is None:
                     return None
-                return Path(directory).expanduser().resolve()
+                resolved_mounted = self._workspace_root if mounted == self._workspace_root else mounted.resolve()
+                if directory != resolved_mounted:
+                    return None
+                return directory
         # Prefer workspace_context if available (for active conversation)
         workspace_context = self._workspace_context
         if workspace_context is not None:
+            if workspace_context.root_path == self._workspace_root:
+                return self._workspace_root
             resolved = workspace_context.root_path.resolve()
             self._workspace_root = resolved
             return resolved
@@ -1383,14 +1386,19 @@ class SessionLifecycle:
             return None
         if workspace_path.startswith("file:"):
             return None
-        return Path(workspace_path).expanduser().resolve()
+        candidate = Path(workspace_path).expanduser()
+        if candidate == self._workspace_root:
+            return self._workspace_root
+        return candidate.resolve()
 
     def workspace_context_for_conversation(self, conversation: Any | None = None) -> Any | None:
         workspace_root = self.workspace_root_for_conversation(conversation)
         if workspace_root is None:
             return None
         workspace_context = self._workspace_context
-        if workspace_context is not None and workspace_context.root_path.resolve() == workspace_root:
+        if workspace_context is not None and (
+            workspace_context.root_path == workspace_root or workspace_context.root_path.resolve() == workspace_root
+        ):
             return workspace_context
         return None
 
