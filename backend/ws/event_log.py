@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -59,7 +60,7 @@ def _path_lock(path: Path) -> threading.RLock:
 
 
 def _process_lock(path: Path) -> FileLock:
-    return FileLock(str(path.with_name(f".{path.name}.mutation.lock")), timeout=60)
+    return FileLock(str(path.with_name(f".{path.name}.mutation.lock")), timeout=60, preserve_lock_file=os.name == "nt")
 
 
 def _is_data_url(value: str) -> bool:

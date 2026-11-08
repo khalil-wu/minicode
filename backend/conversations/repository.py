@@ -116,7 +116,7 @@ class ConversationRepository:
         self.thread_resources = ThreadResourceReferences(self)
         from backend.conversations.directory import ConversationDirectory
         self.directory = ConversationDirectory(self)
-        self._store_file_lock = FileLock(self._store_lock_path, timeout=60)
+        self._store_file_lock = FileLock(self._store_lock_path, timeout=60, preserve_lock_file=os.name == "nt")
         # Individual metadata reads populate this cache too. Directory pages
         # no longer call the legacy full inventory loader before using it.
         self._summary_index: dict[str, ConversationSummary] = {}

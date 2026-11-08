@@ -100,7 +100,10 @@ def file_mutation_locks(paths: Iterable[Path]) -> Iterator[None]:
                 lock_name = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()
                 entry = _MutationLockEntry(
                     lock=threading.RLock(),
-                    process_lock=FileLock(str(_MUTATION_LOCK_ROOT / f"{lock_name}.lock"), timeout=60),
+                    # Native Windows locks release through the handle. Keep
+                    # the pathname instead of deleting/recreating it per write.
+                    process_lock=FileLock(str(_MUTATION_LOCK_ROOT / f"{lock_name}.lock"), timeout=60,
+                        preserve_lock_file=os.name == "nt"),
                 )
                 _MUTATION_LOCKS[key] = entry
             entry.users += 1

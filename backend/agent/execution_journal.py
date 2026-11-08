@@ -324,6 +324,7 @@ def _process_lock_for(path: Path) -> FileLock:
     return FileLock(
         str(path.parent.parent / f".{path.parent.name}.mutation.lock"),
         timeout=60,
+        preserve_lock_file=os.name == "nt",
     )
 
 

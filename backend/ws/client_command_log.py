@@ -35,7 +35,7 @@ def _path_lock(path: Path) -> threading.RLock:
 
 
 def _process_lock(path: Path) -> FileLock:
-    return FileLock(str(path.with_name(f".{path.name}.mutation.lock")), timeout=60)
+    return FileLock(str(path.with_name(f".{path.name}.mutation.lock")), timeout=60, preserve_lock_file=os.name == "nt")
 
 
 class ClientCommandDedupStore:
