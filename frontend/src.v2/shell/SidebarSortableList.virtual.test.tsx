@@ -47,6 +47,23 @@ it("renders the viewport, keeps the full scroll extent, and navigates to later r
   expect(screen.getAllByRole("listitem").length).toBeLessThan(25);
 });
 
+it("keeps layout stable when scrolling introduces fractional coordinate jitter", () => {
+  let measurement = 0;
+  vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockImplementation(function () {
+    const viewport = document.querySelector<HTMLElement>('[data-testid="viewport"]');
+    // Chromium at 125% display scaling reports these offsets for the same
+    // stationary list as viewport coordinates are combined with scrollTop.
+    const margins = [120, 119.9998779296875, 120.00003051757812];
+    const top = this.dataset.sidebarSortList ? margins[measurement++ % margins.length] - (viewport?.scrollTop ?? 0) : 0;
+    return new DOMRect(0, top, 280, this.offsetHeight);
+  });
+  render(<Harness />);
+  fireEvent.scroll(screen.getByTestId("viewport"), { target: { scrollTop: 2400.8 } });
+  fireEvent.click(screen.getByRole("button", { name: "thread-80", exact: true }));
+  expect(navigate).toHaveBeenCalledExactlyOnceWith("thread-80");
+  expect(screen.getByRole("list", { name: "Threads" }).style.height).toBe("3600px");
+});
+
 it("retains menu, rename and focused rows while scrolling and reorders using the complete list", async () => {
   render(<Harness retainedIds={["thread-4"]} renamingId="thread-5" />);
   const focused = screen.getByRole("button", { name: "thread-2", exact: true });

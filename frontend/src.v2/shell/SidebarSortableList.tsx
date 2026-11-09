@@ -87,7 +87,10 @@ export const SidebarSortableList = ({ identifiers: canonicalIds, scope, ariaLabe
     if (!virtual) return;
     const list = listRef.current!;
     const scroll = getScrollElement()!;
-    setScrollMargin(list.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop);
+    // Match the virtualizer's integer row and viewport measurements. Combining
+    // fractional viewport coordinates with scrollTop can otherwise feed tiny
+    // rounding differences back into this layout effect on every render.
+    setScrollMargin(Math.round(list.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop));
   });
   const rows = virtual ? virtualizer.getVirtualItems().map(item => ({ identifier: identifiers[item.index], index: item.index, start: item.start - scrollMargin }))
     : identifiers.map((identifier, index) => ({ identifier, index, start: 0 }));
