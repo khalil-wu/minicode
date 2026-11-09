@@ -22,6 +22,9 @@ from backend.agent.provider_stream_runtime import (
     ProviderStreamResult,
     stream_provider_response,
 )
+from backend.agent.policies.stream_retry import StreamRetryState
+from backend.agent.provider_attempt import provider_progress_id
+from backend.agent.provider_stream_error_event import ProviderErrorEventResult, handle_provider_error_event
 from backend.agent.stream_attempt import StreamTextState
 from backend.agent.streaming_tool_execution import StreamingToolExecution
 from backend.agent.stream_sanitizer import scrub_thinking_tags
@@ -133,6 +136,7 @@ class TurnIterationExecutor:
         self.turn_start_tool_call_count = turn_start_tool_call_count
         self.turn_started_at = turn_started_at
         self.stream_retry_policy = stream_retry_policy
+        self.stream_retry_state = StreamRetryState()
         self.error_controller = error_controller
         self.user_message = user_message
         self.chain = chain
@@ -267,6 +271,7 @@ class TurnIterationExecutor:
                 degrade_and_finish=degrade_and_finish,
                 recover_withheld_error=recover_withheld_error,
                 tool_stream=streaming_tools,
+                retry_state=self.stream_retry_state,
             ))) as owned_events:
                 async for update in owned_events:
                     if isinstance(update, ProviderStreamResult):
@@ -288,6 +293,44 @@ class TurnIterationExecutor:
         if provider_stream_result.action != "retry":
             self._ack_consumed_swarm_messages()
             self._ack_consumed_parent_notifications()
+        if provider_stream_result.recovery_error is not None:
+            # StreamingToolExecution has drained and journaled every committed
+            # call. Apply the ordinary request policy now, without resetting
+            # that retained history or spending the unrelated loop-repair fuse.
+            recovery = None
+            async for update in handle_provider_error_event(
+                provider_stream_result.recovery_error, state=self.agent_state,
+                context_builder=self.context_builder, turn_kernel=self.turn_kernel,
+                provider_attempt=provider_stream_result.provider_attempt, stream_state=stream_state,
+                stream_text=stream_text, pending_tool_calls=stream_state.tool_calls,
+                usage=provider_stream_result.usage, turn_usage=execution_state.turn_usage,
+                stream_retry_policy=self.stream_retry_policy, stream_attempt=self.stream_retry_state.request_attempt,
+                stream_recovery_attempted=False, budget_runtime=self.budget_runtime,
+                error_controller=self.error_controller, iteration_id_value=iteration_id,
+                cancel_event=self.tool_context.cancel_event, degrade_and_finish=degrade_and_finish,
+                recover_withheld_error=recover_withheld_error, max_retries=self.settings.stream_max_attempts,
+                query_source=str(self.llm_request_metadata.get("query_source") or "user"),
+                retry_state=self.stream_retry_state, progress_id=provider_progress_id(iteration_id, self.run_record.run_id),
+                switch_transport=getattr(self.llm, "try_fallback_transport", lambda: False), retained_tools=True,
+                connection_retries_enabled=False,
+                retry_after_deadline=provider_stream_result.retry_after_deadline,
+            ):
+                if isinstance(update, ProviderErrorEventResult):
+                    recovery = update
+                else:
+                    yield update
+            if recovery is None:
+                raise RuntimeError("Committed response recovery returned without a result")
+            if recovery.action != "retry":
+                yield IterationExecutionResult(action="terminate", state=execution_state, stream_text=stream_text)
+                return
+            self.stream_retry_state.request_attempt = recovery.stream_attempt
+            self.context_builder.append_user_context(
+                "The provider response stopped after completed tool calls were accepted. Their results are retained. "
+                "Continue from those results; do not repeat successful operations just to replay the interrupted response."
+            )
+        else:
+            self.stream_retry_state = StreamRetryState()
         if provider_stream_result.action != "proceed":
             yield IterationExecutionResult(
                 action=provider_stream_result.action,

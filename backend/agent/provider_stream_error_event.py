@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import monotonic
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -16,7 +17,6 @@ from backend.agent.loop_runtime_helpers import (
 from backend.agent.policies.stream_retry import plan_connection_retry
 from backend.agent.message import AgentEvent
 from backend.agent.progress import provider_failure_detail_progress, provider_stream_error_progress
-from backend.agent.first_byte_waiter import ProviderStreamFailure
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.provider_stream_control import (
@@ -32,8 +32,6 @@ from backend.llm.errors import (
     LLMErrorType,
     ProviderErrorType,
     classify_llm_error,
-    llm_error_raw,
-    llm_error_status_code,
     sanitize_llm_error_message,
 )
 from backend.secret_redaction import redact_secrets
@@ -43,43 +41,6 @@ logger = logging.getLogger(__name__)
 
 Degrade = Callable[..., AsyncIterator[AgentEvent | TurnTerminalProjection]]
 ErrorRecovery = Callable[..., Awaitable[bool]]
-
-
-async def committed_provider_error(failure, *, state, turn_kernel, provider_attempt, progress_id):
-    """Report the real failure while retaining tools that already executed."""
-    if isinstance(failure, BaseException):
-        cause = failure.cause if isinstance(failure, ProviderStreamFailure) else failure
-        classification = classify_llm_error("timeout" if isinstance(cause, asyncio.TimeoutError) else cause)
-        failure_data = llm_error_raw(cause, provider="")
-        failure_data["status_code"] = llm_error_status_code(cause, allow_text=False)
-        message = sanitize_llm_error_message(cause, classification, include_provider_details=False,
-            provider_error_message=failure_data.get("provider_error_message", ""),
-            status_code=failure_data.get("status_code"))
-    else:
-        _, classification, failure_data = provider_error_details(failure)
-        message = failure.content
-    await turn_kernel.close_provider_attempt(provider_attempt, status="failed",
-        summary="Provider stream failed after committed tools", data={
-            **failure_data, "error_type": classification.error_type,
-            "provider_error_type": classification.provider_error_type,
-            "error_message": message,
-        }, project_progress=classification.fatal)
-    if classification.fatal:
-        _set_terminal_reason(state, terminal_reason_from_error_type(classification.error_type), status="failed")
-        if failure_data.get("provider_error_message"):
-            yield provider_failure_detail_progress(str(failure_data["provider_error_message"]), attempt=provider_attempt, progress_id=progress_id)
-        yield AgentEvent.error(message, recoverable=False, error_type=classification.error_type,
-            provider_error_type=classification.provider_error_type)
-        return
-    state.mark_transition("provider_stream_after_tools", error_type=classification.error_type,
-        provider_error_type=classification.provider_error_type, error_message=message)
-    yield provider_stream_error_progress(
-        "模型连接中断，保留已完成的工具结果后继续。", attempt=provider_attempt, progress_id=progress_id,
-        detail=redact_secrets(str(failure_data.get("provider_error_message") or message)),
-        error_message=redact_secrets(str(failure_data.get("provider_error_message") or message)),
-        status_code=failure_data.get("status_code"),
-        provider_error_code=failure_data.get("provider_error_code", ""),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,12 +158,16 @@ async def handle_provider_error_event(
     switch_transport: Callable[[], bool] | None = None,
     refresh_auth: Callable[[], Awaitable[bool]] | None = None,
     connection_retries_enabled: bool = True,
+    retained_tools: bool = False,
+    retry_after_deadline: float | None = None,
 ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | ProviderErrorEventResult]:
     """Resolve a provider-declared stream error through the bounded ladder."""
 
     classification_input, classification, provider_failure_data = provider_error_details(event)
     raw = getattr(event, "raw", {}) or {}
     server_delay = max(0.0, float(raw["retry_after_seconds"])) if raw.get("retry_after_seconds") is not None else None
+    if retry_after_deadline is not None:
+        server_delay = max(0.0, retry_after_deadline - monotonic())
     incomplete_tool_stream = stream_state.incomplete_tool_stream
     if (
         raw.get("status_code") == 401 and refresh_auth is not None
@@ -238,7 +203,7 @@ async def handle_provider_error_event(
             yield ProviderErrorEventResult("retry", stream_attempt + 1, None, stream_recovery_attempted)
             return
     if (
-        not stream_state.committed_tool_ids
+        (not stream_state.committed_tool_ids or retained_tools)
         and not stream_state.has_non_text_result
         and not classification.fatal
         and classification.error_type not in {"prompt_too_long", "media_size"}
@@ -389,6 +354,22 @@ async def handle_provider_error_event(
                 stream_recovery_attempted=stream_recovery_attempted,
             )
             return
+
+    if retained_tools:
+        # The stream owner already drained and journaled these tools. A final
+        # provider error must not replay their effects or become a final answer.
+        _set_terminal_reason(state, terminal_reason_from_error_type(classification.error_type), status="failed")
+        message = sanitize_llm_error_message(classification_input, classification, include_provider_details=False,
+            provider_error_message=provider_failure_data.get("provider_error_message", ""),
+            status_code=provider_failure_data.get("status_code"))
+        if provider_failure_data.get("provider_error_message"):
+            yield provider_failure_detail_progress(str(provider_failure_data["provider_error_message"]),
+                attempt=provider_attempt, progress_id=progress_id)
+        yield AgentEvent.error(message, recoverable=not classification.fatal, error_type=classification.error_type,
+            provider_error_type=classification.provider_error_type,
+            error_code=str(raw.get("protocol_error_code") or raw.get("provider_error_code") or ""))
+        yield ProviderErrorEventResult("finish", stream_attempt, None, stream_recovery_attempted)
+        return
 
     if not stream_recovery_attempted and not incomplete_tool_stream:
         recovered = await await_preflight(recover_withheld_error(
@@ -549,15 +530,6 @@ async def run_provider_error_branch(
     connection_retries_enabled: bool,
 ) -> AsyncIterator[Any]:
     """Run the error-action retry ladder and report how the caller continues."""
-    if stream_state.committed_tool_ids:
-        async for update in committed_provider_error(event, state=state,
-            turn_kernel=turn_kernel, provider_attempt=provider_attempt,
-            progress_id=progress_id):
-            yield update
-        yield ProviderErrorBranchResult(action="terminal", stream_attempt=stream_attempt,
-            retry_budget_boundary=None,
-            stream_recovery_attempted=stream_recovery_attempted, usage=usage, llm=llm)
-        return
     error_result = None
     async for error_update in handle_provider_error_event(
         event, state=state, context_builder=context_builder, turn_kernel=turn_kernel,

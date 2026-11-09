@@ -33,6 +33,9 @@ class StreamRetryState:
     """Mutable counters owned by one foreground provider operation."""
 
     auth_recovery_attempted: bool = False
+    # Failed responses with committed tools keep their retry ordinal across
+    # the next loop iteration, which consumes the retained tool results.
+    request_attempt: int = 0
     # The connect phase keeps its own schedule. Its delays double from a short
     # initial value to a long cap because the cause is usually the user's
     # network rather than the request, and its attempts are deliberately not

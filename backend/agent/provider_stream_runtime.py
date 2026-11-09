@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import copy_context
 from functools import partial
+from time import monotonic
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -28,7 +29,7 @@ from backend.agent.provider_stream_error_event import (
     run_provider_error_branch,
     ProviderErrorEventResult,
     handle_provider_error_event,
-    committed_provider_error,
+    provider_error_details,
 )
 from backend.agent.provider_stream_control import (
     ProviderRetryReset,
@@ -67,6 +68,7 @@ from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.turn_trace import turn_trace_shared
 from backend.agent.tool_stream_tracker import StreamingToolTracker
 from backend.llm.base import (
+    StreamEvent,
     StreamEventType,
     UsageInfo,
     safe_stream_chat_with_request_metadata,
@@ -107,6 +109,7 @@ async def stream_provider_response(
     degrade_and_finish: Degrade,
     recover_withheld_error: ErrorRecovery,
     tool_stream: Any | None = None,
+    retry_state: StreamRetryState | None = None,
 ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | ProviderStreamResult]:
     """Consume one provider response, including bounded retries and recovery."""
 
@@ -119,10 +122,12 @@ async def stream_provider_response(
     usage = stream_state.usage
     finish_reason = ""
     provider_raw_done = stream_state.raw_done
-    stream_attempt = 0
+    retry_state = retry_state if retry_state is not None else StreamRetryState()
+    stream_attempt = retry_state.request_attempt
     max_retries = max(0, settings.stream_max_attempts)
     provider_progress_key = provider_progress_id(iteration_id_value, turn_kernel.run_record.run_id)
-    retry_state = StreamRetryState()
+    recovery_error = None
+    failure_received_at = None
     query_source = str(llm_request_metadata.get("query_source") or "user").strip()
     stream_recovery_attempted = False
     retry_budget_boundary = None
@@ -210,10 +215,10 @@ async def stream_provider_response(
                     await model_hooks.settle("failed", error=str(cause) or "Provider request timed out",
                                              usage=usage, reported=provider_attempt.usage_reported, tool_stream=tool_stream)
                     if stream_state.committed_tool_ids:
-                        async for update in committed_provider_error(failure, state=state,
-                            turn_kernel=turn_kernel, provider_attempt=provider_attempt,
-                            progress_id=provider_progress_key):
-                            yield update
+                        from backend.llm.errors import llm_error_raw
+                        recovery_error = StreamEvent(type=StreamEventType.ERROR,
+                            content=str(cause) or "Provider request timed out", raw=llm_error_raw(cause, provider=""))
+                        failure_received_at = monotonic()
                         break
                     transport_result = None
                     async for transport_update in handle_provider_transport_failure(
@@ -317,6 +322,10 @@ async def stream_provider_response(
                         await model_hooks.settle("cancelled", usage=usage, reported=provider_attempt.usage_reported)
                     break
                 if dispatch_result.action == "error":
+                    if stream_state.committed_tool_ids:
+                        recovery_error = event
+                        failure_received_at = monotonic()
+                        break
                     error_branch = None
                     async for error_update in run_provider_error_branch(
                         event, llm=llm, tool_context=tool_context, state=state, context_builder=context_builder,
@@ -389,6 +398,13 @@ async def stream_provider_response(
     else:
         # Settle EOF before consumer-close cancellation.
         settle_attempt_usage()
+        if recovery_error is not None:
+            _, classification, details = provider_error_details(recovery_error)
+            await turn_kernel.close_provider_attempt(provider_attempt, status="failed",
+                summary="Provider stream failed after committed tools",
+                data={**details, "error_type": classification.error_type,
+                    "provider_error_type": classification.provider_error_type,
+                    "error_message": recovery_error.content}, project_progress=False)
         async for event in settle_provider_eof(turn_kernel=turn_kernel, provider_attempt=provider_attempt,
             stream_state=stream_state, finish_reason=finish_reason, tool_tracker=tool_tracker,
             iteration_id=iteration_id_value):
@@ -401,6 +417,12 @@ async def stream_provider_response(
         settle_attempt_usage()
         await finish_provider_stream(_close_stream, turn_kernel, provider_attempt)
 
+    if stream_state.committed_tool_ids and not stream_state.provider_done and not provider_stream_steered and not state.stopped_reason:
+        retry_state.request_attempt = stream_attempt
+        if recovery_error is None:
+            recovery_error = StreamEvent(type=StreamEventType.ERROR,
+                content="stream closed before response.completed",
+                raw={"error_type": "stream_error", "provider_error_code": "provider_terminal_missing"})
     async for update in complete_provider_response(
         retry_budget_boundary=retry_budget_boundary, budget_runtime=budget_runtime, turn_kernel=turn_kernel,
         provider_attempt=provider_attempt, finish_reason=finish_reason, provider_stream_steered=provider_stream_steered,
@@ -408,5 +430,8 @@ async def stream_provider_response(
         provider_raw_done=provider_raw_done, visible_text_sanitizer=visible_text_sanitizer, stream_state=stream_state,
         stream_text=stream_text, context_builder=context_builder, usage=usage, turn_usage=turn_usage,
         tool_tracker=tool_tracker, response_phase=provider_response_phase, thinking_chars=thinking_chars,
+        recovery_error=recovery_error,
+        retry_after_deadline=(failure_received_at + max(0.0, float(recovery_error.raw["retry_after_seconds"]))
+            if failure_received_at is not None and recovery_error.raw.get("retry_after_seconds") is not None else None),
     ):
         yield update

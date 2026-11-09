@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.agent.message import AgentEvent
+from backend.agent.provider_attempt import ProviderAttempt
 from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
 from backend.agent.tool_stream_tracker import StreamingToolTracker
 from backend.agent.stream_sanitizer import scrub_thinking_tags
-from backend.llm.base import UsageInfo
+from backend.llm.base import StreamEvent, UsageInfo
 from backend.agent.loop_runtime_helpers import epoch_ms
 from backend.agent.provider_protocol import add_usage
 from backend.agent.tool_events import abandoned_tool_announcement_events, cancelled_pending_tool_events
@@ -55,6 +56,9 @@ class ProviderStreamResult:
     finish_reason: str
     response_phase: str
     thinking_chars: int
+    recovery_error: StreamEvent | None = None
+    provider_attempt: ProviderAttempt | None = None
+    retry_after_deadline: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,11 +228,9 @@ async def complete_provider_response(*, retry_budget_boundary, budget_runtime, t
     provider_attempt, finish_reason, provider_stream_steered, rebuild_context_and_retry,
     state, pending_tool_calls, provider_raw_done, visible_text_sanitizer, stream_state,
     stream_text, context_builder, usage, turn_usage, tool_tracker, response_phase,
-    thinking_chars) -> AsyncIterator[AgentEvent | ProviderStreamResult]:
+    thinking_chars, recovery_error=None, retry_after_deadline=None) -> AsyncIterator[AgentEvent | ProviderStreamResult]:
     """Own completed acquisition's usage, context and iteration result."""
-    if stream_state.committed_tool_ids and not state.stopped_reason and (
-        not stream_state.provider_done or is_max_output_finish_reason(finish_reason)
-    ):
+    if stream_state.committed_tool_ids and not state.stopped_reason and is_max_output_finish_reason(finish_reason):
         retry_budget_boundary = budget_runtime.consume_retry("provider_stream_after_tools")
         context_builder.append_user_context(
             "The provider response stopped after completed tool calls were accepted. Their results are retained. "
@@ -252,4 +254,5 @@ async def complete_provider_response(*, retry_budget_boundary, budget_runtime, t
     yield ProviderStreamResult(action=settlement.action, stream_state=stream_state,
         stream_text=stream_text, tool_tracker=tool_tracker, turn_usage=settlement.turn_usage,
         usage=usage, finish_reason=settlement.finish_reason, response_phase=response_phase,
-        thinking_chars=thinking_chars)
+        thinking_chars=thinking_chars, recovery_error=recovery_error, provider_attempt=provider_attempt,
+        retry_after_deadline=retry_after_deadline)
