@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from contextlib import aclosing
 from pathlib import Path, PurePosixPath
 import re
 from urllib.parse import quote
@@ -21,6 +23,34 @@ from backend.workspace.executor_tool_io import executor_candidate_files
 from backend.workspace.models import (WorkspaceFileResponse, WorkspaceTreeEntry, WorkspaceTreeResponse,
     WorkspacePathResponse, WorkspaceDeleteResponse, WorkspaceProjectIndexResponse, WorkspaceProjectIndexFile, WorkspaceProjectIndexIssue)
 from backend.workspace.service import WorkspaceService, WORKSPACE_MAX_FILE_BYTES, WORKSPACE_MAX_PREVIEW_BYTES, WORKSPACE_IGNORED_NAMES, WORKSPACE_IGNORED_SUFFIXES
+
+
+async def _ordered_reads(entries, read):
+    # Like the controller's project index, bound both queued work and I/O.
+    # Keep results ordered so latency cannot change search limits or issues.
+    entries = iter(entries)
+    pending = deque()
+    exhausted = False
+    try:
+        while pending or not exhausted:
+            while len(pending) < 8 and not exhausted:
+                entry = next(entries, None)
+                if entry is None:
+                    exhausted = True
+                else:
+                    pending.append((entry, asyncio.create_task(read(entry))))
+            if not pending:
+                break
+            entry, task = pending[0]
+            result = await task
+            pending.popleft()
+            yield entry, result
+    finally:
+        # The caller closes this iterator before releasing its captured lease,
+        # including on HTTP cancellation and a search result limit.
+        for _, task in pending:
+            task.cancel()
+        await asyncio.gather(*(task for _, task in pending), return_exceptions=True)
 
 
 class ExecutorEditorService(ExecutorWorkspaceService):
@@ -271,7 +301,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
     async def project_index(self, *, include_dependencies=False, include_dependency_paths=False, **_revision):
         from backend.workspace.project_index import _file_kind, _DEPENDENCY_IGNORED_DIRS
         outcome = await self.walk(self.cwd)
-        files, issues, dependencies = [], [], []
+        files, issues, dependencies, entries = [], [], [], []
         for entry in outcome["entries"]:
             if entry["kind"] != "file":
                 continue
@@ -285,12 +315,22 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                 dependencies.append(relative)
                 if not include_dependencies:
                     continue
+            entries.append((path, relative, kind))
+
+        async def read_entry(entry):
+            path, relative, kind = entry
             try:
                 file = await self.read_file(path.uri)
             except HTTPException as error:
-                issues.append(WorkspaceProjectIndexIssue(path=relative, status_code=error.status_code, message=str(error.detail)))
-            else:
-                files.append(WorkspaceProjectIndexFile(**file.model_dump(), kind=kind))
+                return WorkspaceProjectIndexIssue(path=relative, status_code=error.status_code, message=str(error.detail))
+            return WorkspaceProjectIndexFile(**file.model_dump(), kind=kind)
+
+        async with aclosing(_ordered_reads(entries, read_entry)) as completed:
+            async for _, result in completed:
+                if isinstance(result, WorkspaceProjectIndexIssue):
+                    issues.append(result)
+                else:
+                    files.append(result)
         issues.extend(WorkspaceProjectIndexIssue(path=entry["path"], status_code=500, message=str(entry)) for entry in outcome["errors"])
         if outcome["truncated"]:
             issues.append(WorkspaceProjectIndexIssue(path=".", status_code=413, message="Executor walk was truncated."))
@@ -395,41 +435,53 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         for buffer in request.buffers:
             paths[await self.allowed(buffer.path)] = buffer
         files, issues, count, truncated = [], [], 0, False
-        for path, buffer in sorted(paths.items(), key=lambda pair: pair[0].uri):
-            relative = self.display(path)
-            if includes and not any(test(relative) for test in includes) or any(test(relative) for test in excludes):
-                continue
+
+        def entries():
+            for path, buffer in sorted(paths.items(), key=lambda pair: pair[0].uri):
+                relative = self.display(path)
+                if includes and not any(test(relative) for test in includes) or any(test(relative) for test in excludes):
+                    continue
+                yield path, buffer, relative
+
+        async def read_entry(entry):
+            path, buffer, _ = entry
             if buffer is not None:
-                content, original, content_hash, read_only = buffer.content, buffer.original, buffer.content_hash, buffer.read_only
-            else:
-                try:
-                    snapshot = await self.read_file(path.uri)
-                except HTTPException as error:
+                return buffer
+            try:
+                return await self.read_file(path.uri)
+            except HTTPException as error:
+                return error
+
+        async with aclosing(_ordered_reads(entries(), read_entry)) as completed:
+            async for (path, buffer, relative), snapshot in completed:
+                if isinstance(snapshot, HTTPException):
+                    error = snapshot
                     issues.append({"path": relative, "message": str(error.detail)})
                     continue
-                content = original = snapshot.content
+                content = snapshot.content
+                original = buffer.original if buffer is not None else content
                 content_hash, read_only = snapshot.content_hash, snapshot.read_only
-            if "\0" in content:
-                continue
-            utf16, starts = _text_index(content)
-            matches = []
-            for match in pattern.finditer(content):
-                if request.whole_word and ((match.start() and re.match(r"\w", content[match.start() - 1])) or (match.end() < len(content) and re.match(r"\w", content[match.end()]))):
+                if "\0" in content or pattern.search(content) is None:
                     continue
-                if count == request.limit:
-                    truncated = True
+                utf16, starts = _text_index(content)
+                matches = []
+                for match in pattern.finditer(content):
+                    if request.whole_word and ((match.start() and re.match(r"\w", content[match.start() - 1])) or (match.end() < len(content) and re.match(r"\w", content[match.end()]))):
+                        continue
+                    if count == request.limit:
+                        truncated = True
+                        break
+                    line, column = _position(match.start(), utf16, starts)
+                    end_line, end_column = _position(match.end(), utf16, starts)
+                    offset, length = utf16[match.start()], utf16[match.end()] - utf16[match.start()]
+                    groups = [None if match.start(index) < 0 else {"offset": utf16[match.start(index)], "length": utf16[match.end(index)] - utf16[match.start(index)]} for index in range(1, pattern.groups + 1)]
+                    matches.append({"id": f"{relative}:{offset}:{length}:{len(matches)}", "offset": offset, "length": length, "line": line, "column": column,
+                        "end_line": end_line, "end_column": end_column, "snippet": _snippet(content, match.start(), starts[line - 1]),
+                        "groups": groups, "named_groups": {name: groups[index - 1] for name, index in pattern.groupindex.items()}})
+                    count += 1
+                if matches:
+                    files.append({"path": relative, "content": content, "original": original, "content_hash": content_hash,
+                        "size_bytes": len(content.encode("utf-8")), "read_only": read_only, "from_buffer": buffer is not None, "matches": matches, **self.identity(path)})
+                if truncated:
                     break
-                line, column = _position(match.start(), utf16, starts)
-                end_line, end_column = _position(match.end(), utf16, starts)
-                offset, length = utf16[match.start()], utf16[match.end()] - utf16[match.start()]
-                groups = [None if match.start(index) < 0 else {"offset": utf16[match.start(index)], "length": utf16[match.end(index)] - utf16[match.start(index)]} for index in range(1, pattern.groups + 1)]
-                matches.append({"id": f"{relative}:{offset}:{length}:{len(matches)}", "offset": offset, "length": length, "line": line, "column": column,
-                    "end_line": end_line, "end_column": end_column, "snippet": _snippet(content, match.start(), starts[line - 1]),
-                    "groups": groups, "named_groups": {name: groups[index - 1] for name, index in pattern.groupindex.items()}})
-                count += 1
-            if matches:
-                files.append({"path": relative, "content": content, "original": original, "content_hash": content_hash,
-                    "size_bytes": len(content.encode("utf-8")), "read_only": read_only, "from_buffer": buffer is not None, "matches": matches, **self.identity(path)})
-            if truncated:
-                break
         return {"workspace_root": self.workspace_root_value, "files": files, "match_count": count, "truncated": truncated, "issues": issues, **self.identity()}

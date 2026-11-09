@@ -318,11 +318,13 @@ def create_workspace_router() -> APIRouter:
     @router.post("/search-content")
     async def workspace_text_search_api(
         request: WorkspaceTextSearchRequest,
+        http_request: Request,
         workspace_root: str = Query(..., min_length=1),
         service=Depends(_request_service),
     ) -> dict:
         if isinstance(service, ExecutorEditorService):
-            return await service.search_content(request)
+            from .executor_commands import workbench_http_request
+            return await workbench_http_request(http_request, service.search_content(request))
         return await asyncio.to_thread(search_workspace_text, service, request)
 
     @router.post("/language")

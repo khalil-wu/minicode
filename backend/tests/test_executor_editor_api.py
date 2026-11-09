@@ -155,6 +155,46 @@ async def test_http_editor_bytes_hash_rename_preview_and_dirty_search_use_accept
     assert removed.status_code == 200 and not (server.host.workspace / "new-folder").exists(), removed.text
 
 
+@pytest.mark.asyncio
+async def test_http_search_disconnect_drains_the_original_captured_scan(editor_server, monkeypatch):
+    server = editor_server
+    for number in range(20):
+        (server.host.workspace / f"scan-{number:02}.ts").write_text("NEEDLE\n", encoding="utf-8")
+    original = ExecutorEditorService.read_bytes
+    entered, released = [], []
+    batch = asyncio.Event()
+    drained = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def read_bytes(service, path, **kwargs):
+        result = await original(service, path, **kwargs)
+        entered.append((service.environment, path.uri))
+        if len(entered) == 8:
+            batch.set()
+        try:
+            await blocked.wait()
+            return result
+        finally:
+            released.append(path.uri)
+            if len(released) == 8:
+                drained.set()
+
+    monkeypatch.setattr(ExecutorEditorService, "read_bytes", read_bytes)
+    request = asyncio.create_task(server.client.post("/api/workspace/search-content", params=server.params, json={"query": "NEEDLE"}))
+    try:
+        await asyncio.wait_for(batch.wait(), 10)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await asyncio.wait_for(drained.wait(), 10)
+        assert len(entered) == len(released) == 8
+        assert len({id(environment) for environment, _ in entered}) == 1
+        assert all(uri.startswith(server.host.workspace.as_uri() + "/") for _, uri in entered)
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+
+
 async def _owned_worktree_repository(service):
     async def git(*args):
         result = await service.run(["git", *args])
