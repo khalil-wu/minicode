@@ -56,20 +56,20 @@ def metadata(value, *, is_symlink: bool = False) -> dict:
             "createdAtMs": max(0, created_ms), "modifiedAtMs": max(0, value.st_mtime_ns // 1_000_000)}
 
 
-def _read_file(path: Path, follow: bool, cancelled) -> bytes:
+def _read_file(path: Path, follow: bool, cancelled, max_bytes: int = MAX_READ_FILE_BYTES) -> bytes:
     descriptor = open_regular(path, "read", follow=follow)
     try:
-        if os.fstat(descriptor).st_size > MAX_READ_FILE_BYTES:
-            raise OSError(errno.EINVAL, f"file is too large to read: limit is {MAX_READ_FILE_BYTES} bytes", str(path))
+        if os.fstat(descriptor).st_size > max_bytes:
+            raise OSError(errno.EINVAL, f"file is too large to read: limit is {max_bytes} bytes", str(path))
         result = bytearray()
         while True:
             _cancelled(cancelled)
-            block = os.read(descriptor, min(FILE_CHUNK_SIZE, MAX_READ_FILE_BYTES + 1 - len(result)))
+            block = os.read(descriptor, min(FILE_CHUNK_SIZE, max_bytes + 1 - len(result)))
             if not block:
                 return bytes(result)
             result.extend(block)
-            if len(result) > MAX_READ_FILE_BYTES:
-                raise OSError(errno.EINVAL, f"file is too large to read: limit is {MAX_READ_FILE_BYTES} bytes", str(path))
+            if len(result) > max_bytes:
+                raise OSError(errno.EINVAL, f"file is too large to read: limit is {max_bytes} bytes", str(path))
     finally:
         os.close(descriptor)
 
@@ -228,7 +228,8 @@ def execute(request: dict, handles: dict, cancelled=None):
     path = Path(request["path"]) if "path" in request else None
     follow = request.get("followSymlinks", True)
     if operation == "readFile":
-        return {"dataBase64": base64.b64encode(_read_file(path, follow, cancelled)).decode("ascii")}
+        return {"dataBase64": base64.b64encode(_read_file(path, follow, cancelled,
+            request.get("maxBytes", MAX_READ_FILE_BYTES))).decode("ascii")}
     if operation == "writeFile":
         contents = base64.b64decode(request["dataBase64"], validate=True)
         if follow:

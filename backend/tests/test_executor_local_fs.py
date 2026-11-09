@@ -4,6 +4,7 @@ import asyncio
 import os
 from pathlib import Path
 import subprocess
+import threading
 
 import psutil
 import pytest
@@ -28,6 +29,93 @@ def require_actual_sandbox(sandbox: dict):
     if not capability.available or not capability.filesystem_isolated:
         pytest.skip(f"actual platform filesystem sandbox unavailable: {capability.reason}")
     return capability
+
+
+@pytest.mark.asyncio
+async def test_bounded_native_read_checks_growth_and_closes_original_file(tmp_path, monkeypatch):
+    from backend.workspace import executor_fs_helper as helper
+
+    path = tmp_path / "growing.txt"
+    path.write_bytes(b"1234")
+    fs = LocalExecutorFileSystem()
+    try:
+        assert await fs.read_bytes(path.as_uri(), sandbox=None, limit=4) == b"1234"
+        with pytest.raises(OSError, match="limit is 3 bytes"):
+            await fs.read_bytes(path.as_uri(), sandbox=None, limit=3)
+        original_read = os.read
+        original_open = helper.open_regular
+        descriptors = []
+        reads = []
+
+        def opened(*args, **kwargs):
+            descriptor = original_open(*args, **kwargs)
+            descriptors.append(descriptor)
+            return descriptor
+
+        def growing(descriptor, length):
+            if descriptor in descriptors:
+                reads.append(length)
+                if len(reads) == 1:
+                    with path.open("ab") as writer:
+                        writer.write(b"56789")
+            return original_read(descriptor, length)
+
+        monkeypatch.setattr(helper, "open_regular", opened)
+        monkeypatch.setattr(helper.os, "read", growing)
+        with pytest.raises(OSError, match="limit is 4 bytes"):
+            await fs.read_bytes(path.as_uri(), sandbox=None, limit=4)
+        assert reads == [5]
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+        assert not fs.operations
+    finally:
+        await fs.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_native_read_waits_for_block_and_releases_the_original_descriptor(tmp_path, monkeypatch):
+    from backend.workspace import executor_fs_helper as helper
+
+    path = tmp_path / "cancelled.txt"
+    path.write_bytes(b"retained bytes")
+    fs = LocalExecutorFileSystem()
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    descriptors = []
+    original_open, original_read = helper.open_regular, os.read
+
+    def opened(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        descriptors.append(descriptor)
+        return descriptor
+
+    def read(descriptor, length):
+        if descriptor in descriptors:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(10)
+        return original_read(descriptor, length)
+
+    monkeypatch.setattr(helper, "open_regular", opened)
+    monkeypatch.setattr(helper.os, "read", read)
+    task = asyncio.create_task(fs.read_bytes(path.as_uri(), sandbox=None, limit=128))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(descriptors) == 1
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+        assert not fs.operations
+        assert path.read_bytes() == b"retained bytes"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await fs.close()
 
 
 @pytest.mark.asyncio
@@ -81,10 +169,13 @@ async def test_walk_retains_native_uri_and_metadata_for_escaped_names_and_direct
 
 
 @pytest.mark.asyncio
-async def test_filesystem_rechecks_changed_policy_after_direct_read_and_preserves_denial(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bounded", [False, True])
+async def test_filesystem_rechecks_changed_policy_after_direct_read_and_preserves_denial(tmp_path, monkeypatch, bounded):
     from backend.workspace.executor_local_fs import _SandboxHelper
 
     fs = LocalExecutorFileSystem()
+    async def read(path, *, sandbox):
+        return await fs.read_bytes(path, sandbox=sandbox, limit=128) if bounded else await fs.read_file(path, sandbox=sandbox)
     target = tmp_path / "owned.txt"
     target.write_bytes(b"retained")
     policy = sandbox_for(tmp_path)
@@ -96,16 +187,16 @@ async def test_filesystem_rechecks_changed_policy_after_direct_read_and_preserve
 
     monkeypatch.setattr(_SandboxHelper, "start", denied)
     try:
-        assert await fs.read_file(target.as_uri(), sandbox=policy) == b"retained"
+        assert await read(target.as_uri(), sandbox=policy) == b"retained"
         target.write_bytes(b"new bytes")
-        assert await fs.read_file(target.as_uri(), sandbox=policy) == b"new bytes"
+        assert await read(target.as_uri(), sandbox=policy) == b"new bytes"
         policy["permissions"]["file_system"]["entries"].append({
             "path": {"type": "path", "path": target.as_uri()}, "access": "deny"})
         with pytest.raises(PermissionError, match="could not be acquired"):
-            await fs.read_file(target.as_uri(), sandbox=policy)
+            await read(target.as_uri(), sandbox=policy)
         assert len(helper_starts) == 1
         policy["permissions"]["file_system"]["entries"].pop()
-        assert await fs.read_file(target.as_uri(), sandbox=policy) == b"new bytes"
+        assert await read(target.as_uri(), sandbox=policy) == b"new bytes"
         assert target.read_bytes() == b"new bytes"
     finally:
         await fs.close()
@@ -427,8 +518,13 @@ async def test_actual_platform_helper_enforces_original_read_write_scope_and_str
     try:
         await fs.write_file(path.as_uri(), b"owned", sandbox=sandbox)
         assert await fs.read_file(path.as_uri(), sandbox=sandbox) == b"owned"
+        assert await fs.read_bytes(path.as_uri(), sandbox=sandbox, limit=5) == b"owned"
+        with pytest.raises(OSError, match="limit is 4 bytes"):
+            await fs.read_bytes(path.as_uri(), sandbox=sandbox, limit=4)
         with pytest.raises(OSError):
             await fs.read_file(secret.as_uri(), sandbox=sandbox)
+        with pytest.raises(OSError):
+            await fs.read_bytes(secret.as_uri(), sandbox=sandbox, limit=128)
         writer = await fs.open(path.as_uri(), sandbox=sandbox, mode="replace")
         assert writer.helper is not None
         assert writer.helper.runner.capability().backend == capability.backend

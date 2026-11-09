@@ -152,15 +152,7 @@ class ExecutorWorkspaceService:
 
     async def read_bytes(self, value: str | ExecutorPath, *, limit: int = 10 * 1024 * 1024) -> bytes:
         path = self.resolve(value) if isinstance(value, str) else value
-        result = bytearray()
-        async with await self.filesystem.open(path.uri, sandbox=self.sandbox) as handle:
-            while True:
-                chunk, eof = await handle.read_block(len(result), min(1024 * 1024, limit + 1 - len(result)))
-                result.extend(chunk)
-                if len(result) > limit:
-                    raise ValueError(f"File is too large; limit is {limit} bytes")
-                if eof:
-                    return bytes(result)
+        return await self.filesystem.read_bytes(path.uri, sandbox=self.sandbox, limit=limit)
 
     async def read_text(self, value: str | ExecutorPath, *, limit: int = 10 * 1024 * 1024) -> str:
         return (await self.read_bytes(value, limit=limit)).decode("utf-8")

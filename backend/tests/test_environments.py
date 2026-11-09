@@ -129,6 +129,10 @@ async def test_stdio_actual_fs_process_stdin_output_and_normal_owned_close(tmp_p
     target = (tmp_path / "读写文件.bin").as_uri()
     await environment.filesystem.write_file(target, b"first\x00\xff", sandbox=None)
     assert await environment.filesystem.read_file(target, sandbox=None) == b"first\x00\xff"
+    assert await environment.filesystem.read_bytes(target, sandbox=None, limit=7) == b"first\x00\xff"
+    with pytest.raises(ValueError, match="limit is 6 bytes"):
+        await environment.filesystem.read_bytes(target, sandbox=None, limit=6)
+    assert not environment.client.files
     with pytest.raises(TypeError):
         await environment.filesystem.read_file(target)
     with pytest.raises(ExecutorRpcError, match="sandbox denied"):

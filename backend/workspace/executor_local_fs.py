@@ -267,6 +267,12 @@ class LocalExecutorFileSystem:
         result = await self._request("readFile", sandbox, path=path, followSymlinks=follow_symlinks)
         return base64.b64decode(result["dataBase64"], validate=True)
 
+    async def read_bytes(self, path: str, *, sandbox: dict | None, limit: int) -> bytes:
+        # One cancellable native operation, under the same captured sandbox.
+        # The consumer's limit also bounds reads if the file grows after stat.
+        result = await self._request("readFile", sandbox, path=path, maxBytes=limit, followSymlinks=True)
+        return base64.b64decode(result["dataBase64"], validate=True)
+
     async def write_file(self, path: str, contents: bytes, *, sandbox: dict | None, follow_symlinks: bool = True) -> None:
         await self._request("writeFile", sandbox, path=path, dataBase64=base64.b64encode(contents).decode("ascii"), followSymlinks=follow_symlinks)
 

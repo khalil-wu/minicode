@@ -70,12 +70,14 @@ async def test_search_preserves_order_unicode_buffers_and_issues_when_reads_fini
 @pytest.mark.asyncio
 @pytest.mark.parametrize("executor_host", ["local"], indirect=True)
 @pytest.mark.parametrize(("operation", "finish"), [("search", "cancel"), ("index", "cancel"), ("search", "limit"), ("index", "error")])
-async def test_scan_bounds_real_open_files_and_drains_on_exit(executor_host, monkeypatch, operation, finish):
+async def test_scan_bounds_block_protocol_handles_and_drains_on_exit(executor_host, monkeypatch, operation, finish):
     host = executor_host
     for number in range(40):
         (host.workspace / f"{number:02}.ts").write_text("NEEDLE NEEDLE\n", encoding="utf-8")
     async with ExecutorEditorService(editor_context(host)) as service:
         filesystem = service.filesystem
+        from backend.environments.filesystem import ExecutorFileSystem
+        monkeypatch.setattr(filesystem, "read_bytes", ExecutorFileSystem.read_bytes.__get__(filesystem))
         original_open = filesystem.open
         handles = []
         batch_open = asyncio.Event()

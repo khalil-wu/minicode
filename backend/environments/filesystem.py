@@ -108,6 +108,19 @@ class ExecutorFileSystem:
         result = await self._path_call("fs/readFile", path, sandbox, **self._follow(follow_symlinks))
         return decode_bytes(result["dataBase64"], "dataBase64")
 
+    async def read_bytes(self, path: str, *, sandbox: dict | None, limit: int) -> bytes:
+        # Source's fs/readFile has a fixed 512 MiB bound. Smaller consumer
+        # limits use its existing block protocol without widening that read.
+        result = bytearray()
+        async with await self.open(path, sandbox=sandbox) as handle:
+            while True:
+                chunk, eof = await handle.read_block(len(result), min(FILE_CHUNK_SIZE, limit + 1 - len(result)))
+                result.extend(chunk)
+                if len(result) > limit:
+                    raise ValueError(f"File is too large; limit is {limit} bytes")
+                if eof:
+                    return bytes(result)
+
     async def write_file(self, path: str, contents: bytes, *, sandbox: dict | None, follow_symlinks: bool = True) -> None:
         await self._path_call("fs/writeFile", path, sandbox, dataBase64=base64.b64encode(contents).decode("ascii"),
                               **self._follow(follow_symlinks))
