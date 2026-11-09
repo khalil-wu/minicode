@@ -15,7 +15,7 @@ const commands: ClientCommand[] = [];
 beforeEach(() => {
   commands.length = 0; mocks.clipboard.mockClear(); mocks.toast.mockClear();
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: mocks.clipboard } });
-  useAppStore.setState({ ...initial, appMode: "cowork", conversationId: "owner", workingDirectory: "C:/project", isConnected: true,
+  useAppStore.setState({ ...initial, appMode: "cowork", conversationId: "owner", workingDirectory: "C:/project", conversations: [{ id: "owner", title: "owner", updatedAt: "", workspaceRoot: "C:/project" }], isConnected: true,
     messages: [{ id: "user", role: "user", content: "Actual request", timestamp: 1 }, { id: "answer", role: "assistant", content: "Literal answer", timestamp: 2 }],
   }, true);
   registerWebSocketSender(command => { commands.push(command); return true; });

@@ -1,0 +1,383 @@
+/* @vitest-environment jsdom */
+
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { UserMessageCell } from "./UserMessageCell";
+import { useAppStore } from "../../stores";
+
+const { sendMock, cancelQueuedMessageMock, openAttachmentPreviewMock, openLocalFilePreviewMock, socket } = vi.hoisted(() => {
+  Object.defineProperty(globalThis, "__MINICODE_RUNTIME__", { configurable: true,
+    value: { runtimeToken: "attachment-thumbnail-test-token", apiBaseUrl: "http://127.0.0.1:8000" } });
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: () => ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+  return {
+    socket: { sessionId: "" },
+    sendMock: vi.fn(),
+    cancelQueuedMessageMock: vi.fn(async () => ({
+      type: "command_result",
+      ok: true,
+      status: "success",
+    })),
+    openAttachmentPreviewMock: vi.fn(() => true),
+    openLocalFilePreviewMock: vi.fn(() => true),
+  };
+});
+
+vi.mock("../../hooks/useWebSocket", () => ({
+  getWebSocket: () => ({ send: sendMock, sessionId: socket.sessionId }),
+}));
+
+vi.mock("../../protocol/ws-outbox", () => ({
+  sendClientCommand: sendMock,
+  sendClientCommandAwaitResult: cancelQueuedMessageMock,
+  commandResultSucceeded: vi.fn(() => true),
+}));
+
+vi.mock("../../overlays/DialogService", () => ({
+  showConfirm: vi.fn(async () => true),
+}));
+
+vi.mock("../openAttachmentPreview", () => ({
+  openAttachmentPreview: openAttachmentPreviewMock,
+  openLocalFilePreview: openLocalFilePreviewMock,
+}));
+
+afterEach(() => {
+  cleanup();
+  sendMock.mockClear();
+  cancelQueuedMessageMock.mockClear();
+  openAttachmentPreviewMock.mockClear();
+  openLocalFilePreviewMock.mockClear();
+  useAppStore.setState({
+    isConnected: false,
+    conversationId: null,
+    messages: [],
+    conversationStreaming: {},
+    isStreaming: false,
+  });
+  vi.restoreAllMocks();
+  socket.sessionId = "";
+});
+
+describe("UserMessageCell", () => {
+  it("keeps signed thumbnail URLs stable across turn rebuilds and refreshes them for a new session", () => {
+    let now = 100_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    socket.sessionId = "session-a";
+    useAppStore.setState({ isConnected: true });
+    const cell = () => ({ kind: "user_message" as const, id: "image-owner", content: "图片", createdAt: 1,
+      attachments: [{ id: "image", artifactId: "image-artifact", name: "image.png", type: "image/png", size: 1 }] });
+    const view = render(<UserMessageCell cell={cell()} conversationId="owner-A" />);
+    const image = screen.getByRole("img", { name: "image.png" });
+    const first = image.getAttribute("src");
+    now += 15_000;
+    view.rerender(<UserMessageCell cell={cell()} conversationId="owner-A" />);
+    expect(image.getAttribute("src")).toBe(first);
+    socket.sessionId = "session-b";
+    view.rerender(<UserMessageCell cell={cell()} conversationId="owner-A" />);
+    expect(image.getAttribute("src")).not.toBe(first);
+    expect(image.getAttribute("src")).toContain("owner-A");
+  });
+  it("places image thumbnails and files above a separate message bubble", () => {
+    const { container } = render(<UserMessageCell conversationId="owner" cell={{
+      kind: "user_message", id: "attachments-above", createdAt: 1, content: "核对这两份资料",
+      attachments: [
+        { id: "img", name: "diagram.png", type: "image/png", size: 1, dataUrl: "data:image/png;base64,AA==" },
+        { id: "doc", name: "brief.pdf", type: "application/pdf", size: 1, artifactId: "pdf-artifact" },
+      ],
+    }} />);
+    const attachments = container.querySelector(".user-cell-attachments")!;
+    const bubble = container.querySelector(".edit-bubble-wrap")!;
+    expect(attachments.nextElementSibling).toBe(bubble);
+    expect(bubble.querySelector(".user-cell-attachments")).toBeNull();
+    expect(screen.getByRole("img", { name: "diagram.png" }).getAttribute("src")).toBe("data:image/png;base64,AA==");
+    expect(screen.getByRole("button", { name: "brief.pdf" }).closest(".user-cell-attachments")).toBe(attachments);
+    fireEvent.click(screen.getByRole("button", { name: "diagram.png" }));
+    expect(openLocalFilePreviewMock).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "owner", id: "img" }));
+  });
+  it("labels messages initiated by a scheduled task", () => {
+    render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "scheduled-user",
+          content: "nightly check",
+          createdAt: 1,
+          messageSource: {
+            kind: "scheduled_task",
+            taskId: "task-nightly",
+            runId: "run-2026-09-03",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("定时任务")).toBeTruthy();
+    expect(screen.queryByText("运行 run-2026-09-03")).toBeNull();
+    expect(screen.queryByTitle("定时任务 · 任务 task-nightly · 运行 run-2026-09-03")).toBeNull();
+    expect(screen.getByTitle("定时任务")).toBeTruthy();
+  });
+
+  it("collapses long user messages by default and allows expanding them", () => {
+    const longMessage = Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n");
+    const { container } = render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-long",
+          content: longMessage,
+          createdAt: 1,
+        }}
+      />,
+    );
+
+    expect(container.querySelector(".user-cell-content")?.getAttribute("data-collapsed")).toBe("true");
+    const expand = screen.getByRole("button", { name: "展开消息" });
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(expand);
+
+    expect(container.querySelector(".user-cell-content")?.getAttribute("data-collapsed")).toBe("false");
+    expect(screen.getByRole("button", { name: "收起消息" }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("keeps short user messages expanded without a toggle", () => {
+    const { container } = render(
+      <UserMessageCell
+        cell={{ kind: "user_message", id: "user-short", content: "short message", createdAt: 1 }}
+      />,
+    );
+
+    expect(container.querySelector(".user-cell-content")?.getAttribute("data-collapsed")).toBe("false");
+    expect(screen.queryByRole("button", { name: "展开消息" })).toBeNull();
+  });
+
+  it("keeps admitted steer content without an extra delivery status", () => {
+    const { container } = render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-steer",
+          content: "change direction",
+          createdAt: 1,
+          steeredIntoMessageId: "assistant-current",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("change direction")).toBeTruthy();
+    expect(container.querySelector(".user-cell-queue-status")).toBeNull();
+  });
+
+  it("does not render an empty text row for attachment-only prompts", () => {
+    const { container } = render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-attachment-only",
+          content: "   ",
+          createdAt: 1,
+          steeredIntoMessageId: "assistant-current",
+          attachments: [
+            { id: "att-doc", artifactId: "artifact-doc", name: "brief.md", type: "text/markdown" },
+          ],
+        }}
+      />,
+    );
+
+    expect(container.querySelector(".user-cell-content")).toBeNull();
+    expect(container.querySelector(".user-cell-bubble")).toBeNull();
+    expect(container.querySelector(".user-cell-attachments-only")).toBeTruthy();
+    expect(screen.getByText("brief.md")).toBeTruthy();
+  });
+
+  it("renders repeated attachment names without duplicate React keys", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-1",
+          content: "see images",
+          createdAt: 1,
+          attachments: [
+            { id: "att-1", artifactId: "artifact-1", name: "image.png", type: "image/png" },
+            { id: "att-2", artifactId: "artifact-2", name: "image.png", type: "image/png" },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getAllByText("image.png")).toHaveLength(2);
+    expect(errorSpy.mock.calls.flat().join("\n")).not.toContain("Encountered two children with the same key");
+  });
+
+  it("opens a local image attachment in the unified Preview panel", () => {
+    render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-2",
+          content: "see image",
+          createdAt: 1,
+          attachments: [
+            {
+              id: "att-1",
+              name: "image.png",
+              type: "image/png",
+              dataUrl: "data:image/png;base64,AA==",
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "image.png" }));
+
+    expect(openLocalFilePreviewMock).toHaveBeenCalledWith({
+      id: "att-1",
+      name: "image.png",
+      mediaType: "image/png",
+      kind: "image",
+      url: "data:image/png;base64,AA==",
+    });
+  });
+
+  it("opens an already-uploaded image by artifact id when no local dataUrl remains", async () => {
+    render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-3",
+          content: "see uploaded image",
+          createdAt: 1,
+          attachments: [
+            {
+              id: "att-1",
+              artifactId: "artifact-image-1",
+              name: "uploaded.png",
+              type: "image/png",
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "uploaded.png" }));
+
+    expect(openAttachmentPreviewMock).toHaveBeenCalledWith({
+      artifactId: "artifact-image-1",
+      name: "uploaded.png",
+      mediaType: "image/png",
+      kind: "image",
+    });
+  });
+
+  it("keeps multiple uploaded images individually addressable by artifact id", async () => {
+    render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-4",
+          content: "see uploaded images",
+          createdAt: 1,
+          attachments: [
+            { id: "att-1", artifactId: "artifact-image-1", name: "image.png", type: "image/png" },
+            { id: "att-2", artifactId: "artifact-image-2", name: "image.png", type: "image/png" },
+          ],
+        }}
+      />,
+    );
+
+    const chips = screen.getAllByRole("button", { name: "image.png" });
+    fireEvent.click(chips[1]);
+
+    expect(openAttachmentPreviewMock).toHaveBeenCalledWith({
+      artifactId: "artifact-image-2",
+      name: "image.png",
+      mediaType: "image/png",
+      kind: "image",
+    });
+  });
+
+  it("cancels a queued message against its transcript owner instead of the active conversation", async () => {
+    useAppStore.setState({ conversationId: "conv-active" });
+    render(
+      <UserMessageCell
+        conversationId="conv-queue-owner"
+        cell={{
+          kind: "user_message",
+          id: "user-queued-owner",
+          content: "queued prompt",
+          createdAt: 1,
+          queueState: "queued",
+          queueMessageId: "queue-message-owner",
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "取消排队消息" }));
+
+    await waitFor(() => expect(cancelQueuedMessageMock).toHaveBeenCalledWith({
+      type: "user_message.queue.cancel",
+      conversation_id: "conv-queue-owner",
+      message_id: "queue-message-owner",
+      user_message_id: "user-queued-owner",
+    }, "user_message.queue.cancel"));
+  });
+
+  it("requests Stop and waits for its terminal event before recalling", async () => {
+    const focusListener = vi.fn();
+    window.addEventListener("composer:focus", focusListener);
+    useAppStore.setState({
+      conversationId: "conv-recall",
+      messages: [
+        { id: "user-5", role: "user", content: "old prompt", artifacts: [], timestamp: 1 },
+        { id: "assistant-5", role: "assistant", content: "", blocks: [], artifacts: [], timestamp: 2, isStreaming: true },
+      ],
+      conversationMessages: {
+        "conv-recall": [
+          { id: "user-5", role: "user", content: "old prompt", artifacts: [], timestamp: 1 },
+          { id: "assistant-5", role: "assistant", content: "", blocks: [], artifacts: [], timestamp: 2, isStreaming: true },
+        ],
+      },
+      conversationStreaming: { "conv-recall": true },
+      isStreaming: true,
+    });
+
+    render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "user-5",
+          content: "old prompt",
+          createdAt: 1,
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "撤回到输入框" }));
+
+    await waitFor(() => expect(sendMock).toHaveBeenCalledWith({
+      type: "interrupt",
+      conversation_id: "conv-recall",
+      message_id: "assistant-5",
+    }));
+    expect(focusListener).not.toHaveBeenCalled();
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    window.removeEventListener("composer:focus", focusListener);
+  });
+});

@@ -1,0 +1,582 @@
+/* @vitest-environment jsdom */
+/**
+ * Session gate: replay a captured real-backend WebSocket session through the
+ * renderer's transport hook and assert the end state.
+ *
+ * The fixture is produced by scripts/capture_session_gate.py against a live
+ * backend + model (see docs/session-gate.md). It covers, on one session id:
+ *
+ *   connection 0  launch -> conversation.create (workspace bound)
+ *                 -> user_message (six tool calls, one failing pytest, an edit)
+ *                 -> second user_message; while it streams:
+ *                    conversation.create (activates the new conversation)
+ *                    -> conversation.switch back -> interrupt (turn fenced)
+ *                 -> socket dropped without a close handshake
+ *   connection 1  reconnect -> session.restore(last_seq, last_conversation_id)
+ *                 -> user_message -> done
+ *
+ * The renderer sends its own commands here (store actions, not hand-written
+ * payloads). Captured events that answer a client command are re-keyed from the
+ * capture's command id to the id the renderer actually generated, matched by
+ * command type and order on the same connection.
+ */
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import { gunzipSync } from "node:zlib";
+
+vi.hoisted(() => {
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: () => ({
+      matches: false, media: "", onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {},
+      addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    }),
+  });
+});
+vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+
+import { useAppStore } from "../stores";
+import { initialSessionSyncSnapshot } from "../../test/initial-session-sync";
+import type { ClientCommand } from "../protocol/events";
+import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { sendChatMessage } from "../chat/sendChatMessage";
+import { buildInterruptCommand } from "../lib/interrupt-command";
+import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
+import { projectMessagesToTurns } from "../chat/chatSurfaceState";
+import {
+  getLastReceivedServerSeqForTests,
+  resetPendingClientCommandAcksForTests,
+  resetRecentInboundEventIdsForTests,
+  isSupersededCommandProjection,
+  useWebSocketConnection,
+} from "./useWebSocket";
+
+type Listener = (e: Event | MessageEvent) => void;
+type Wire = Record<string, unknown>;
+type CapturedCommand = { sent_after_events: number; command: Wire };
+type CapturedConnection = { index: number; commands: CapturedCommand[]; events: Wire[]; cursor_after: number };
+type Fixture = {
+  workspace_root: string;
+  conversation_a: string;
+  conversation_b: string;
+  conversation_c: string;
+  approval_request_ids: { first: string; approved: string[]; rejected: string[] };
+  turn_id_second: string;
+  assistant_message_ids: Record<string, string>;
+  user_message_ids: Record<string, string>;
+  prompts: Record<string, string>;
+  connections: CapturedConnection[];
+};
+
+class MockWebSocket {
+  static readonly CONNECTING = 0; static readonly OPEN = 1; static readonly CLOSING = 2; static readonly CLOSED = 3;
+  static instances: MockWebSocket[] = [];
+  readyState = 0;
+  sent: Wire[] = [];
+  private listeners = new Map<string, Set<Listener>>();
+  constructor(public url: string) { MockWebSocket.instances.push(this); }
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+    const cb: Listener = typeof listener === "function" ? (listener as Listener) : (e) => listener.handleEvent(e);
+    const set = this.listeners.get(type) ?? new Set<Listener>();
+    set.add(cb);
+    this.listeners.set(type, set);
+  }
+  send = vi.fn((raw: string) => { this.sent.push(JSON.parse(raw) as Wire); });
+  close = vi.fn(() => { this.readyState = 3; });
+  emit(type: "open" | "close", code = 1000) {
+    this.readyState = type === "open" ? 1 : 3;
+    const event = Object.assign(new Event(type), { code });
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+  emitMessage(data: unknown) {
+    for (const listener of this.listeners.get("message") ?? []) {
+      listener(new MessageEvent("message", { data: JSON.stringify(data) }));
+    }
+  }
+}
+
+const Harness = () => { useWebSocketConnection(); return <InlineAgentPrompt />; };
+
+// Flush at client interaction boundaries, not once per SSE delta. Otherwise
+// a large capture invents minutes of idle time and trips the heartbeat timeout.
+const FLUSH_MS = 60;
+
+const loadFixture = (name: string): Fixture => {
+  const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, name), "utf8")) as Fixture;
+  if (!process.env.MINICODE_SESSION_GATE_FIXTURE
+    && ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"].includes(name)) {
+    // These two captures predate durable user-input presentation metadata.
+    // Supply only its canonical empty defaults at the legacy fixture boundary;
+    // existing values and live captures still participate in exact wire equality.
+    for (const connection of fixture.connections) {
+      for (const captured of connection.commands) {
+        if (captured.command.type === "user_message") {
+          captured.command = {
+            display_content: captured.command.content,
+            context_refs: [],
+            quoted_message: null,
+            ...captured.command,
+          };
+        }
+      }
+    }
+  }
+  return fixture;
+};
+
+/** Re-key one captured event from the capture's command ids to the renderer's. */
+const rekeyEvent = (
+  event: Wire,
+  captured: CapturedConnection,
+  socket: MockWebSocket,
+  unmapped: Set<string>,
+): Wire => {
+  const rekey = (id: unknown): unknown => {
+    if (typeof id !== "string" || !id) return id;
+    const commandIndex = captured.commands.findIndex((c) => c.command.client_command_id === id);
+    if (commandIndex < 0) return id;
+    const source = captured.commands[commandIndex].command;
+    const type = String(source.type);
+    // A nonempty initial inventory can make the renderer activate an older
+    // conversation on its own. It must not consume this conversation's slot.
+    const matches = (command: Wire) => command.type === type
+      && (!source.conversation_id || command.conversation_id === source.conversation_id);
+    const ordinal = captured.commands
+      .slice(0, commandIndex)
+      .filter((c) => matches(c.command)).length;
+    const rendererCommand = socket.sent.filter(matches)[ordinal];
+    if (!rendererCommand) {
+      unmapped.add(`${type}#${ordinal}`);
+      return id;
+    }
+    return rendererCommand.client_command_id ?? id;
+  };
+  const next: Wire = { ...event, client_command_id: rekey(event.client_command_id) };
+  if (next.data && typeof next.data === "object" && !Array.isArray(next.data)) {
+    const data = next.data as Wire;
+    if ("client_command_id" in data) next.data = { ...data, client_command_id: rekey(data.client_command_id) };
+  }
+  if (!("client_command_id" in event)) delete next.client_command_id;
+  return next;
+};
+
+const messagesFor = (conversationId: string) => {
+  const state = useAppStore.getState();
+  return state.conversationId === conversationId ? state.messages : state.conversationMessages[conversationId] ?? [];
+};
+
+describe("session gate replay", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    MockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    localStorage.clear();
+    resetPendingClientCommandAcksForTests();
+    resetRecentInboundEventIdsForTests();
+    useAppStore.setState({
+      isConnected: false, conversationId: null, conversations: [], messages: [], conversationMessages: {},
+      conversationStreaming: {}, isStreaming: false, connectionPhase: "connecting", reconnectAttempt: 0,
+      reconnectMaxAttempts: null, connectionError: null,
+      pendingApproval: null, approvalQueue: [], pendingAskUser: null, askUserQueue: [],
+      pendingDiffReview: null, diffReviewQueue: [],
+    });
+  });
+  afterEach(() => { cleanup(); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it("recovers the captured d6 skills gap through completed snapshot 170 and the full replay 172", async () => {
+    const fixture = JSON.parse(gunzipSync(fs.readFileSync(path.resolve(__dirname,
+      "../../test/fixtures/ui-reconnect-d6b825b3-20261023.json.gz"))).toString("utf8")) as {
+      before_failure: Wire[]; recovery: Wire[];
+    };
+    const initial = fixture.before_failure[0];
+    const recovered = fixture.recovery[0];
+    const owner = String(initial.active_conversation_id);
+    const root = String(initial.working_directory);
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args); });
+    useAppStore.setState({ conversationId: owner, workingDirectory: root, draft: "Retain recovery draft", appMode: "cowork",
+      pendingConversationSwitchId: null, pendingConversationCreateId: null, conversationHistoryPages: {}, conversationAgentStates: {},
+      conversations: [{ id: owner, title: "Reconnect owner", workspaceRoot: root, updatedAt: "today" }] });
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const first = MockWebSocket.instances[0];
+    await act(async () => first.emit("open"));
+    const firstRestore = first.sent.find(command => command.type === "session.restore")!;
+    const rekey = (event: Wire, snapshot: Wire, command: Wire) => event.client_command_id === snapshot.client_command_id
+      ? { ...event, client_command_id: command.client_command_id } : event;
+    for (const event of fixture.before_failure) {
+      await act(async () => first.emitMessage(rekey(event, initial, firstRestore)));
+    }
+    expect(getLastReceivedServerSeqForTests()).toBe(124);
+    expect(first.close).toHaveBeenCalledWith(4002, "event replay required");
+    expect(errors).toHaveLength(1);
+    expect(errors[0][1]).toMatchObject({ type: "skills.list", seq: 143,
+      error: { message: "Durable event does not continue the active replay chain.", stack: expect.stringContaining("assertInboundReplayCursorContinuity") } });
+    expect(useAppStore.getState().isStreaming).toBe(true);
+
+    act(() => first.emit("close", 4002));
+    act(() => vi.advanceTimersByTime(1_250));
+    const second = MockWebSocket.instances[1];
+    await act(async () => second.emit("open"));
+    const secondRestore = second.sent.find(command => command.type === "session.restore")!;
+    expect(secondRestore).toMatchObject({ last_seq: 124, last_conversation_id: owner, last_workspace_root: root });
+    const replay = fixture.recovery.find(event => event.type === "session.replay")!;
+    const replayEvents = replay.events as Wire[];
+    expect(replayEvents.map(event => event.seq)).toEqual([127, 143, 145, 146, 147, 149, 150, 151, 153, 155, 156, 157, 158, 159, 160, 161, 162, 164]);
+    // A completion from the retired connection must still be fenced out.
+    act(() => first.emitMessage(replayEvents.find(event => event.seq === 160)));
+    expect(getLastReceivedServerSeqForTests()).toBe(124);
+    expect(useAppStore.getState().messages.find(message => message.role === "assistant")?.content).not.toBe("HARNESS_RECONNECT_COMPLETE");
+    for (const event of fixture.recovery) {
+      await act(async () => second.emitMessage(rekey(event, recovered, secondRestore)));
+    }
+
+    const state = useAppStore.getState();
+    expect(errors).toHaveLength(1);
+    expect(second.close).not.toHaveBeenCalled();
+    expect(getLastReceivedServerSeqForTests()).toBe(164);
+    expect(state).toMatchObject({ conversationId: owner, draft: "Retain recovery draft", isStreaming: false, isConnected: true });
+    const turns = projectMessagesToTurns(state.messages, state.isStreaming, root);
+    expect(turns.at(-1)?.finalAnswerCell?.markdownSource).toBe("HARNESS_RECONNECT_COMPLETE");
+    const assistant = state.messages.find(message => message.role === "assistant");
+    expect(assistant).toMatchObject({ terminalStatus: "completed" });
+    expect(assistant?.isStreaming).not.toBe(true);
+
+    // This old capture contains only the prior renderer's Skill request ids.
+    // Current restore/switch handling sends a fresh scoped read. Historical
+    // data still fills the durable chain, while only that actual read may
+    // rebuild the executable catalog after recovery.
+    const capturedCatalogs = replayEvents.filter(event => event.type === "skills.list");
+    const freshRead = second.sent.filter(command => command.type === "skills.list").at(-1)!;
+    expect(freshRead).toBeDefined();
+    expect(typeof freshRead.client_command_id).toBe("string");
+    expect(capturedCatalogs.map(event => event.client_command_id)).not.toContain(freshRead.client_command_id);
+    expect(capturedCatalogs.every(event => isSupersededCommandProjection(event as never))).toBe(true);
+    expect(state.availableSkills).toEqual([]);
+    const capturedCatalog = capturedCatalogs.at(-1)!;
+    const capturedResult = replayEvents.find(event => event.type === "command.result" && event.client_command_id === capturedCatalog.client_command_id)!;
+    const { replayed: _replayed, ...liveCatalog } = capturedCatalog;
+    const { replayed: _resultReplayed, ...liveResult } = capturedResult;
+    const freshAckSeq = Math.max(...fixture.recovery.map(event => Number(event.seq))) + 1;
+    const freshSeq = freshAckSeq + 1;
+    const freshId = String(freshRead.client_command_id);
+    await act(async () => second.emitMessage({ type: "client.command.ack", client_command_id: freshId, command_type: "skills.list", accepted: true,
+      seq: freshAckSeq, event_id: `session-gate-fresh:${freshAckSeq}`, timestamp: new Date().toISOString() }));
+    expect(getLastReceivedServerSeqForTests()).toBe(164);
+    await act(async () => second.emitMessage({ ...liveCatalog, client_command_id: freshId, client_command_type: "skills.list",
+      seq: freshSeq, previous_replay_seq: 164, event_id: `session-gate-fresh:${freshSeq}`, timestamp: new Date().toISOString() }));
+    expect(getLastReceivedServerSeqForTests()).toBe(freshSeq);
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["browser", "code-review", "plugin-creator", "skill-creator", "verify"]);
+    await act(async () => second.emitMessage({ ...liveResult, client_command_id: freshId, client_command_type: "skills.list",
+      data: { ...(liveResult.data as Wire), request_id: freshId, client_command_id: freshId },
+      seq: freshSeq + 1, previous_replay_seq: freshSeq, event_id: `session-gate-fresh:${freshSeq + 1}`, timestamp: new Date().toISOString() }));
+    expect(getLastReceivedServerSeqForTests()).toBe(freshSeq + 1);
+    expect(errors).toHaveLength(1);
+    expect(second.close).not.toHaveBeenCalled();
+  });
+
+  it.each(process.env.MINICODE_SESSION_GATE_FIXTURE
+    ? [process.env.MINICODE_SESSION_GATE_FIXTURE]
+    : ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"])("replays captured session behavior (legacy receipt adaptation): %s", async (name) => {
+    const fixture = loadFixture(name);
+    const [c0, c1, c2, c3] = fixture.connections;
+    const logs: string[] = [];
+    const fmt = (args: unknown[]) => args.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))).join(" ");
+    vi.spyOn(console, "error").mockImplementation((...args) => { logs.push("ERR " + fmt(args)); });
+    vi.spyOn(console, "warn").mockImplementation((...args) => { logs.push("WARN " + fmt(args)); });
+    const unmapped = new Set<string>();
+    const pendingResults: Promise<unknown>[] = [];
+    let interruptCommand: ClientCommand | null = null;
+
+    const usesLegacyPermissionOverride = !process.env.MINICODE_SESSION_GATE_FIXTURE
+      && ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"].includes(name);
+
+    const drive = async (captured: CapturedCommand): Promise<void> => {
+      const command = captured.command;
+      switch (command.type) {
+        case "conversation.list":
+        case "commands.list":
+        case "skills.list":
+        case "session.restore":
+        case "session.sync":
+          return; // the transport hook sends these itself
+        case "conversation.create":
+          pendingResults.push(
+            sendClientCommandAwaitResult(command as unknown as ClientCommand, "conversation.create").catch(() => null),
+          );
+          return;
+        case "user_message":
+          if (usesLegacyPermissionOverride) {
+            // The recorded backend snapshots already establish this owner's
+            // mode before each send. Current clients inherit that stored mode
+            // instead of repeating the capture's redundant message override.
+            expect(useAppStore.getState().runtimeSession).toMatchObject({
+              active_conversation_id: command.conversation_id,
+              permission_mode: command.permission_mode,
+            });
+          }
+          expect(sendChatMessage({
+            displayContent: String(command.content),
+            conversationId: String(command.conversation_id),
+            assistantMessageId: String(command.assistant_message_id),
+            userMessageId: String(command.user_message_id),
+          })).toBe(true);
+          return;
+        case "conversation.switch":
+          useAppStore.getState().requestConversationSwitch(String(command.conversation_id));
+          return;
+        case "interrupt":
+          interruptCommand = buildInterruptCommand(useAppStore.getState());
+          expect(sendClientCommand(interruptCommand)).toBe(true);
+          return;
+        case "control_response": {
+          const request = useAppStore.getState().pendingApproval;
+          expect(request?.requestId).toBe(command.request_id);
+          expect(useAppStore.getState().approvalQueue).toEqual([]);
+          expect(screen.getAllByRole("region", { name: "Agent is waiting for input" })).toHaveLength(1);
+          const response = (command.response as { response: { action: string; feedback?: string } }).response;
+          if (response.action === "approve") {
+            await step(() => { fireEvent.click(screen.getByRole("button", { name: "允许使用工具" })); });
+          } else {
+            await step(() => { fireEvent.click(screen.getByRole("button", { name: "拒绝使用工具" })); });
+          }
+          // These captures predate correlated control command results. Sending
+          // the decision is not semantic acceptance: keep the card until the
+          // captured permission/tool terminal event settles the original request.
+          expect(useAppStore.getState().pendingApproval?.requestId).toBe(command.request_id);
+          return;
+        }
+        default:
+          throw new Error(`capture drove an unexpected command ${String(command.type)}`);
+      }
+    };
+
+    // Coalesced client commands are flushed on a microtask, so every step
+    // awaits one: the renderer must have sent a command before the captured
+    // answer to it can be re-keyed.
+    const step = async (fn: () => void | Promise<void>): Promise<void> => {
+      await act(async () => { await fn(); });
+    };
+    const replayConnection = async (captured: CapturedConnection, socket: MockWebSocket): Promise<void> => {
+      const earlyCatalogAcks: Wire[] = [];
+      for (const [index, event] of captured.events.entries()) {
+        for (const command of captured.commands) {
+          if (command.sent_after_events === index) {
+            await step(() => vi.advanceTimersByTime(FLUSH_MS));
+            if (command.command.type === "control_response") await drive(command);
+            else await step(() => drive(command));
+          }
+        }
+        const ackedCommand = captured.commands.find(entry => entry.command.client_command_id === event.client_command_id)?.command;
+        if (usesLegacyPermissionOverride && event.type === "client.command.ack"
+          && (ackedCommand?.type === "commands.list" || ackedCommand?.type === "skills.list")
+          && !socket.sent.some(command => command.type === ackedCommand.type)) {
+          // The old client sent catalogs before restore. Current initialization
+          // requests them after the canonical snapshot; only move their pure
+          // transport ACKs until those actual requests exist, never durable data.
+          expect(event.previous_replay_seq).toBeUndefined();
+          earlyCatalogAcks.push(event);
+          continue;
+        }
+        await step(() => socket.emitMessage(rekeyEvent(event, captured, socket, unmapped)));
+        for (const ack of [...earlyCatalogAcks]) {
+          const original = captured.commands.find(entry => entry.command.client_command_id === ack.client_command_id)!.command;
+          if (socket.sent.some(command => command.type === original.type)) {
+            await step(() => socket.emitMessage(rekeyEvent(ack, captured, socket, unmapped)));
+            earlyCatalogAcks.splice(earlyCatalogAcks.indexOf(ack), 1);
+          }
+        }
+        // This named historical capture predates control command.result.
+        // Its matching tool_result proves the request was semantically resolved,
+        // unlike its admission ACK. Adapt only that legacy fixture's missing
+        // receipt; live captures supplied through MINICODE_SESSION_GATE_FIXTURE
+        // must carry their own real backend receipts and are not enriched.
+        if (name === "__fixtures__approval_gate.json" && event.type === "tool_result") {
+          const response = captured.commands.find((entry) => entry.sent_after_events <= index
+            && entry.command.type === "control_response" && entry.command.request_id === event.id);
+          if (response) {
+            await step(() => socket.emitMessage(rekeyEvent({
+              type: "command.result", command: "control_response", level: "success", message: "",
+              client_command_id: response.command.client_command_id,
+              data: { client_command_id: response.command.client_command_id },
+            }, captured, socket, unmapped)));
+          }
+        }
+      }
+      expect(earlyCatalogAcks).toEqual([]);
+      await step(() => vi.advanceTimersByTime(FLUSH_MS));
+      for (const command of captured.commands) {
+        if (command.sent_after_events >= captured.events.length) await step(() => drive(command));
+      }
+    };
+
+    render(<Harness />);
+    await step(() => vi.advanceTimersByTime(0));
+    const first = MockWebSocket.instances[0];
+    await step(() => first.emit("open"));
+    if (usesLegacyPermissionOverride) {
+      // These named captures predate cold-start sync. Use their actual initial
+      // canonical session to answer the new handshake, then replay unchanged.
+      const session = c0.events.find(event => event.type === "conversation.list" && event.session)!.session;
+      const sync = first.sent.find(command => command.type === "session.sync")!;
+      await step(() => first.emitMessage(initialSessionSyncSnapshot(new URL(first.url).searchParams.get("session_id")!,
+        sync.client_command_id as string, session as Parameters<typeof initialSessionSyncSnapshot>[2])));
+    }
+    await step(() => vi.advanceTimersByTime(0));
+
+    await replayConnection(c0, first);
+
+    // ── assertions at the moment the transport drops ──
+    const A = fixture.conversation_a;
+    const B = fixture.conversation_b;
+    expect(getLastReceivedServerSeqForTests()).toBe(c0.cursor_after);
+    expect(useAppStore.getState().conversationId).toBe(A);
+    expect(interruptCommand).toMatchObject({
+      type: "interrupt",
+      conversation_id: A,
+      turn_id: fixture.turn_id_second,
+      message_id: fixture.assistant_message_ids.second,
+    });
+    const rendererUserMessages = first.sent.filter((c) => c.type === "user_message");
+    const capturedUserMessages = c0.commands.filter((c) => c.command.type === "user_message").map((c) => c.command);
+    expect(rendererUserMessages.length).toBe(capturedUserMessages.length);
+    rendererUserMessages.forEach((sent, i) => {
+      const { client_command_id: _sentId, ...sentRest } = sent;
+      const { client_command_id: _capturedId, ...capturedRest } = capturedUserMessages[i];
+      if (usesLegacyPermissionOverride) {
+        expect(sentRest).not.toHaveProperty("permission_mode");
+        delete capturedRest.permission_mode;
+      }
+      expect(sentRest).toEqual(capturedRest);
+    });
+
+    // ── network cut: no close handshake, then the bounded reconnect ladder ──
+    await step(() => first.emit("close", 1006));
+    expect(useAppStore.getState().connectionPhase).toBe("reconnecting");
+    await step(() => vi.advanceTimersByTime(2_000));
+    const second = MockWebSocket.instances[1];
+    expect(second).toBeDefined();
+    await step(() => second.emit("open"));
+    await step(() => vi.advanceTimersByTime(0));
+    const restore = second.sent.find((c) => c.type === "session.restore");
+    const capturedRestore = c1.commands.find((c) => c.command.type === "session.restore")?.command;
+    expect(restore).toBeDefined();
+    expect(restore?.last_seq).toBe(capturedRestore?.last_seq);
+    expect(restore?.last_conversation_id).toBe(A);
+    expect(restore?.last_workspace_root).toBe(fixture.workspace_root);
+
+    await replayConnection(c1, second);
+    await act(async () => { await Promise.all(pendingResults); });
+
+    // ── terminal state ──
+    const state = useAppStore.getState();
+    expect(logs.filter((l) => l.startsWith("ERR"))).toEqual([]);
+    expect(unmapped).toEqual(new Set());
+    expect(getLastReceivedServerSeqForTests()).toBe(c1.cursor_after);
+    expect(state.connectionPhase).toBe("connected");
+    expect(state.conversationId).toBe(A);
+    expect(state.conversations.map((c) => c.id)).toEqual(expect.arrayContaining([A, B]));
+    expect(state.isStreaming).toBe(false);
+    expect(Object.values(state.conversationStreaming).some(Boolean)).toBe(false);
+    expect(second.close).not.toHaveBeenCalled();
+
+    const assistants = messagesFor(A).filter((m) => m.role === "assistant");
+    const byId = new Map(assistants.map((m) => [m.id, m]));
+    const ids = fixture.assistant_message_ids;
+    const firstTurn = byId.get(ids.first);
+    const secondTurn = byId.get(ids.second);
+    const thirdTurn = byId.get(ids.third);
+    expect(firstTurn?.terminalStatus).toBe("completed");
+    expect(firstTurn?.isStreaming).toBeFalsy();
+    expect(firstTurn?.content.trim().length).toBeGreaterThan(0);
+    const toolRecords = (firstTurn?.blocks ?? [])
+      .filter((b): b is Extract<typeof b, { type: "tool_call" }> => b.type === "tool_call")
+      .map((b) => b.record);
+    const capturedToolIds = new Set(
+      c0.events.filter((e) => e.type === "tool_result" && e.message_id === ids.first).map((e) => String(e.id)),
+    );
+    expect(new Set(toolRecords.map((r) => r.id))).toEqual(capturedToolIds);
+    expect(toolRecords.every((r) => r.status !== "running" && r.status !== "pending")).toBe(true);
+    if (!c2) expect(toolRecords.some((r) => r.name === "edit_file")).toBe(true);
+    expect(secondTurn?.terminalStatus).toBe("interrupted");
+    expect(secondTurn?.isStreaming).toBeFalsy();
+    expect(thirdTurn?.terminalStatus).toBe("completed");
+    expect(thirdTurn?.content).toMatch(/OK/);
+    expect(messagesFor(A).filter((m) => m.role === "user").map((m) => m.id))
+      .toEqual([fixture.user_message_ids.first, fixture.user_message_ids.second, fixture.user_message_ids.third]);
+
+    if (!c2) return;
+    const reconnect = async (previous: MockWebSocket, captured: CapturedConnection, conversationId: string) => {
+      await step(() => previous.emit("close", 1006));
+      expect(useAppStore.getState().connectionPhase).toBe("reconnecting");
+      await step(() => vi.advanceTimersByTime(2_000));
+      const socket = MockWebSocket.instances[captured.index];
+      await step(() => socket.emit("open"));
+      await step(() => vi.advanceTimersByTime(0));
+      expect(socket.sent.find((c) => c.type === "session.restore")).toMatchObject({
+        last_seq: captured.commands.find((c) => c.command.type === "session.restore")!.command.last_seq,
+        last_conversation_id: conversationId,
+      });
+      return socket;
+    };
+    const third = await reconnect(second, c2, A);
+    await replayConnection(c2, third);
+    const C = fixture.conversation_c;
+    expect(useAppStore.getState().pendingApproval).toMatchObject({
+      requestId: fixture.approval_request_ids.first, conversationId: C,
+    });
+    expect(useAppStore.getState().approvalQueue).toEqual([]);
+    expect(third.sent.filter((c) => c.type === "control_response")).toEqual([]);
+    expect(getLastReceivedServerSeqForTests()).toBe(c2.cursor_after);
+
+    const fourth = await reconnect(third, c3, C);
+    await replayConnection(c3, fourth);
+    await act(async () => { await Promise.all(pendingResults); });
+    const responses = fourth.sent.filter((c) => c.type === "control_response");
+    const expected = c3.commands.filter((c) => c.command.type === "control_response");
+    expect(responses).toHaveLength(expected.length);
+    responses.forEach((response, index) => {
+      const { client_command_id: _sent, ...sent } = response;
+      const { client_command_id: _captured, ...captured } = expected[index].command;
+      if (name === "__fixtures__approval_gate.json") {
+        // These responses predate digest-bound decisions. Preserve the actual
+        // captured request authority while removing the retired feedback field.
+        const envelope = captured.response as { subtype: string; response: { action: string; feedback?: string } };
+        const request = c3.events.find(event => event.type === "control_request"
+          && event.request_id === captured.request_id)!.request as { request_digest: string };
+        const { feedback: _feedback, ...decision } = envelope.response;
+        captured.response = { ...envelope, response: { ...decision, request_digest: request.request_digest } };
+      }
+      expect(sent).toEqual(captured);
+    });
+    const final = useAppStore.getState();
+    expect(final.pendingApproval).toBeNull();
+    expect(final.approvalQueue).toEqual([]);
+    expect(screen.queryByRole("region", { name: "Agent is waiting for input" })).toBeNull();
+    expect(final.connectionPhase).toBe("connected");
+    expect(final.conversationId).toBe(C);
+    expect(final.isStreaming).toBe(false);
+    expect(Object.values(final.conversationStreaming).some(Boolean)).toBe(false);
+    expect(getLastReceivedServerSeqForTests()).toBe(c3.cursor_after);
+    expect(fourth.close).not.toHaveBeenCalled();
+    expect(unmapped).toEqual(new Set());
+    expect(logs.filter((l) => l.startsWith("ERR"))).toEqual([]);
+    for (const [turn, requestIds, status] of [
+      ["fourth", fixture.approval_request_ids.approved, "success"],
+      ["fifth", fixture.approval_request_ids.rejected, "failed"],
+    ] as const) {
+      const message = messagesFor(C).find((m) => m.id === ids[turn])!;
+      expect(message.terminalStatus).toBe("completed");
+      const records = message.blocks!.filter((b) => b.type === "tool_call").map((b) => b.record);
+      for (const id of requestIds) {
+        expect(records.find((r) => r.id === id)).toMatchObject({ name: "run_command", status });
+      }
+      expect(records.every((r) => r.status !== "running" && r.status !== "pending")).toBe(true);
+      if (turn === "fifth") expect(records.find((r) => r.id === requestIds[0])?.summary).toMatch(/Operation rejected/);
+    }
+  });
+});

@@ -1,0 +1,98 @@
+/* @vitest-environment jsdom */
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { installAppThemeTokens } from "../../test/app-theme-tokens";
+import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
+import { emptyAppearanceThemes } from "../lib/appearance-themes";
+import { loadCodeTheme } from "../lib/code-themes";
+import { readAppearanceStorage } from "../lib/appearance-storage";
+import { exportThemeString, parseThemeString } from "../lib/theme-sharing";
+import { LS, initialAppearanceColors, initialAppearanceThemes, applyTheme } from "./shared-helpers";
+import { useAppStore } from ".";
+
+let removeTokens: () => void;
+beforeEach(() => {
+  localStorage.clear(); removeTokens = installAppThemeTokens();
+  useAppStore.setState({ appearanceColors: emptyAppearanceColors(), appearanceThemes: emptyAppearanceThemes() });
+  useAppStore.getState().setThemeMode("dark");
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  useAppStore.setState({ appearanceColors: emptyAppearanceColors(), appearanceThemes: emptyAppearanceThemes() });
+  applyAppearanceColors("dark", emptyAppearanceColors());
+  localStorage.clear(); removeTokens();
+});
+
+it("commits the real theme seed together, retains both variants and leaves drafts and typography untouched", async () => {
+  const state = useAppStore.getState();
+  const draft = state.draft, tabs = state.editorTabs, hidden = state.workspaceComposerDrafts, attachments = state.attachments;
+  document.documentElement.style.setProperty("--app-text-scale", "1.125");
+  document.documentElement.style.setProperty("--editor-font-family", "Authored font");
+  await state.setCodeThemeId("dark", "github");
+  const seed = (await loadCodeTheme("github", "dark")).chromeSeed;
+  expect(initialAppearanceColors().dark).toEqual({ accent: seed.accent, surface: seed.surface, ink: seed.ink });
+  expect(initialAppearanceThemes().dark).toMatchObject({ codeThemeId: "github", contrast: 60, semanticColors: seed.semanticColors });
+  expect(document.documentElement.dataset.codeTheme).toBe("github");
+  expect(document.documentElement.style.getPropertyValue("--diff-added-foreground")).toBe(seed.semanticColors.diffAdded);
+  await state.setCodeThemeId("light", "one");
+  expect(document.documentElement.dataset.codeTheme).toBe("github");
+  state.setThemeMode("light");
+  expect(document.documentElement.dataset.codeTheme).toBe("one");
+  state.setThemeMode("dark");
+  expect(document.documentElement.style.getPropertyValue("--surface-base")).toBe(seed.surface);
+  expect(useAppStore.getState()).toMatchObject({ draft, editorTabs: tabs, workspaceComposerDrafts: hidden, attachments });
+  expect(useAppStore.getState().editorTabs).toBe(tabs);
+  expect(document.documentElement.style.getPropertyValue("--app-text-scale")).toBe("1.125");
+  expect(document.documentElement.style.getPropertyValue("--editor-font-family")).toBe("Authored font");
+});
+
+it("imports contrast and semantic colors, restores them on startup and never writes font preferences", async () => {
+  const { chromeSeed } = await loadCodeTheme("github", "dark");
+  const snapshot = { codeThemeId: "github" as const, theme: { ...chromeSeed, contrast: 85, opaqueWindows: true } };
+  const share = JSON.parse(exportThemeString(snapshot, "dark").slice(15));
+  share.theme.fonts = { code: "Other code font", ui: "Other UI font" };
+  expect(await useAppStore.getState().importAppearanceTheme("dark", parseThemeString(`codex-theme-v1:${JSON.stringify(share)}`, "dark"))).toBe(true);
+  expect(initialAppearanceThemes().dark).toMatchObject({ contrast: 85, opaqueWindows: true });
+  expect(localStorage.getItem(LS.textScale)).toBeNull();
+  expect(localStorage.getItem(LS.codeTextScale)).toBeNull();
+  expect(localStorage.getItem(LS.appearanceDark)).not.toContain("Other");
+  const selectedBackground = document.documentElement.style.getPropertyValue("--surface-base");
+  applyAppearanceColors("dark", emptyAppearanceColors());
+  expect(document.documentElement.dataset.codeTheme).toBeUndefined();
+  expect(document.documentElement.style.getPropertyValue("--text-info")).toBe("");
+  applyTheme("dark", readAppearanceStorage());
+  expect(document.documentElement.dataset.codeTheme).toBe("github");
+  expect(document.documentElement.style.getPropertyValue("--surface-base")).toBe(selectedBackground);
+  expect(document.documentElement.style.getPropertyValue("--text-info")).not.toBe("");
+});
+
+it("propagates a failed persistence write without claiming a committed import", async () => {
+  const { chromeSeed } = await loadCodeTheme("github", "dark");
+  const failure = new Error("appearance storage write failed");
+  const original = Storage.prototype.setItem;
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+    if (key === LS.appearanceDark) throw failure;
+    original.call(this, key, value);
+  });
+  await expect(useAppStore.getState().importAppearanceTheme("dark", {
+    codeThemeId: "github", theme: { ...chromeSeed, contrast: 60, opaqueWindows: false },
+  })).rejects.toBe(failure);
+  expect(initialAppearanceThemes().dark).toBeNull();
+  expect(useAppStore.getState().appearanceThemes.dark).toBeNull();
+});
+
+it("lets content follow a chosen UI font, retains an explicit content face, and preserves the default typography on reset", async () => {
+  const { chromeSeed } = await loadCodeTheme("github", "dark");
+  const state = useAppStore.getState();
+  const draft = state.draft, tabs = state.editorTabs;
+  const theme = { ...chromeSeed, contrast: 60, opaqueWindows: false };
+  await state.importAppearanceTheme("dark", { codeThemeId: "github", theme: { ...theme, fonts: { ui: "Fixture UI", content: null, code: "Fixture Mono" } } });
+  expect(document.documentElement.style.getPropertyValue("--font-prose")).toBe("var(--font-ui)");
+  expect(document.documentElement.style.getPropertyValue("--font-ui")).toContain('"Fixture UI"');
+  await state.importAppearanceTheme("dark", { codeThemeId: "github", theme: { ...theme, fonts: { ui: "Fixture UI", content: "Fixture Content", code: "Fixture Mono" } } });
+  expect(document.documentElement.style.getPropertyValue("--font-prose")).toContain('"Fixture Content"');
+  state.setThemeMode("light");
+  expect(document.documentElement.style.getPropertyValue("--font-ui")).toBe("");
+  expect(document.documentElement.style.getPropertyValue("--font-prose")).toBe("");
+  expect(document.documentElement.style.getPropertyValue("--font-mono")).toBe("");
+  expect(useAppStore.getState()).toMatchObject({ draft, editorTabs: tabs });
+});

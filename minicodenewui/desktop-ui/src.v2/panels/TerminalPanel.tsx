@@ -1,0 +1,1308 @@
+import { useI18n, type Translate } from "../i18n";
+import { useEffect, useRef, useState } from "react";
+import { formatHex8 } from "culori";
+import { Copy, ExternalLink, Globe, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
+import "@xterm/xterm/css/xterm.css";
+import { getWebSocket } from "../hooks/useWebSocket";
+import { useAppStore } from "../stores";
+import { useShallow } from "zustand/react/shallow";
+import { desktop, isDesktop, ptyAckExit, ptyClear, ptyKill, ptyList, ptyResize, ptyRestart, ptySnapshot, ptySpawn, ptyWrite } from "../desktop/runtime";
+import type { TerminalSessionInfo } from "../stores/types";
+import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { openWebInBrowser } from "../chat/openWebInBrowser";
+import { codeFontFamily, prepareThemeFonts } from "../lib/theme-fonts";
+
+type XtermLike = {
+  cols: number;
+  rows: number;
+  clear: () => void;
+  reset: () => void;
+  clearSelection?: () => void;
+  dispose: () => void;
+  focus?: () => void;
+  getSelection?: () => string;
+  getSelectionPosition: () => { start: { x: number; y: number }; end: { x: number; y: number } } | undefined;
+  select: (column: number, row: number, length: number) => void;
+  scrollToLine: (line: number) => void;
+  scrollToBottom: () => void;
+  buffer: { active: { viewportY: number; baseY: number } };
+  hasSelection?: () => boolean;
+  attachCustomKeyEventHandler?: (handler: (event: KeyboardEvent) => boolean) => void;
+  loadAddon: (addon: unknown) => void;
+  onData: (handler: (input: string) => void) => void;
+  open: (element: HTMLElement) => void;
+  write: (data: string, onParsed?: () => void) => void;
+  writeln: (data: string) => void;
+};
+
+type FitAddonLike = {
+  fit: () => void;
+};
+
+type XtermWithOptions = XtermLike & {
+  options: {
+    theme?: Record<string, string>;
+    fontFamily?: string;
+    fontSize?: number;
+    convertEol?: boolean;
+  };
+};
+
+type TerminalView = {
+  owner: string;
+  term: XtermWithOptions;
+  fit: FitAddonLike;
+  host: HTMLDivElement;
+  hydrated: boolean;
+  output: string;
+  cursor?: number;
+};
+
+const DEV_SERVER_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?#][^\s'"<>]*)?/gi;
+const TERMINAL_OUTPUT_BUFFER_CHARS = 80_000;
+
+export const mergeTerminalOutputByCursor = (
+  snapshot: string,
+  snapshotStartCursor: number | undefined,
+  snapshotEndCursor: number | undefined,
+  live: string,
+  liveEndCursor: number | undefined,
+): { output: string; endCursor?: number } => {
+  if (snapshotStartCursor == null || snapshotEndCursor == null) {
+    return { output: snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS) };
+  }
+  // A cleared buffer retains its cursor; an older snapshot must not bring
+  // cleared output back. Chunks received after the clear remain in `live`.
+  if (liveEndCursor != null && snapshotEndCursor <= liveEndCursor && !live) {
+    return { output: live, endCursor: liveEndCursor };
+  }
+  if (liveEndCursor == null || liveEndCursor <= snapshotEndCursor) {
+    return { output: snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS), endCursor: snapshotEndCursor };
+  }
+  const liveStartCursor = liveEndCursor - live.length;
+  const liveSuffixOffset = Math.max(0, snapshotEndCursor - liveStartCursor);
+  return {
+    output: `${snapshot}${live.slice(liveSuffixOffset)}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS),
+    endCursor: liveEndCursor,
+  };
+};
+
+const normalizeDetectedUrl = (url: string): string =>
+  url.replace(/^https?:\/\/0\.0\.0\.0/i, (prefix) => prefix.replace("0.0.0.0", "localhost"));
+
+const portFromUrl = (url: string): number | null => {
+  try {
+    const parsed = new URL(url);
+    const port = Number.parseInt(parsed.port, 10);
+    return Number.isFinite(port) ? port : null;
+  } catch {
+    return null;
+  }
+};
+
+export const terminalSessionLabel = (
+  tr: Translate,
+  session: TerminalSessionInfo,
+  index: number,
+  sessionCount: number,
+): string => {
+  const name = session.shell?.split(/[/\\]/).pop()?.replace(/\.(exe|cmd|ps1)$/i, "") || "shell";
+  const indexedName = sessionCount > 1 ? `${name} ${index + 1}` : name;
+  return session.terminalMode === "pipe" ? tr("{v0}（基础）", { v0: indexedName }) : indexedName;
+};
+
+export const terminalExitCodeLabel = (exitCode: unknown): string =>
+  typeof exitCode === "number" && Number.isSafeInteger(exitCode)
+    ? String(exitCode)
+    : "unknown";
+
+const terminalStatusLabel = (tr: Translate, status: TerminalSessionInfo["status"]): string =>
+  status === "exited" ? tr("已退出") : tr("运行中");
+
+/* Font: resolve from the same tokens every other code surface uses so the
+ * terminal follows --font-mono and the Appearance-tab code zoom setting. */
+const terminalFontFamily = (): string => {
+  return codeFontFamily();
+};
+
+const TERMINAL_BASE_FONT_SIZE = 13;
+
+const terminalFontSize = (): number => {
+  return Math.max(9, Math.round(TERMINAL_BASE_FONT_SIZE * useAppStore.getState().codeTextScale));
+};
+
+const terminalTheme = (isLight: boolean): Record<string, string> => {
+  // Keep the default ANSI palette; selected chrome colors also reach xterm's canvas.
+  const palette = isLight
+    ? {
+        background: "#ffffff",
+        foreground: "#191b1d",
+        cursor: "#1467c2",
+        selectionBackground: "#cbdbed",
+        black: "#121416",
+        red: "#b33830",
+        green: "#207e18",
+        yellow: "#995800",
+        blue: "#0070ba",
+        magenta: "#7f4bb1",
+        cyan: "#008285",
+        white: "#737577",
+        brightBlack: "#595b5e",
+        brightRed: "#941d19",
+        brightGreen: "#006400",
+        brightYellow: "#7e4000",
+        brightBlue: "#00569c",
+        brightMagenta: "#663294",
+        brightCyan: "#00686b",
+        brightWhite: "#040405",
+      }
+    : {
+        background: "#050606",
+        foreground: "#e6e8ea",
+        cursor: "#0f92f7",
+        selectionBackground: "#2b343d",
+        black: "#030304",
+        red: "#f2897c",
+        green: "#79bf72",
+        yellow: "#d7a03d",
+        blue: "#52b5f4",
+        magenta: "#be95ec",
+        cyan: "#00c4c4",
+        white: "#bcbec0",
+        brightBlack: "#83868a",
+        brightRed: "#ffafa2",
+        brightGreen: "#a1df99",
+        brightYellow: "#f5c372",
+        brightBlue: "#82d6ff",
+        brightMagenta: "#ddb9ff",
+        brightCyan: "#60e4e3",
+        brightWhite: "#fcfdff",
+      };
+  if (useAppStore.getState().appearanceColors[isLight ? "light" : "dark"] === null) return palette;
+  const style = getComputedStyle(document.documentElement);
+  const color = (token: string) => formatHex8(style.getPropertyValue(token).trim())!;
+  return { ...palette, background: color("--surface-base"), foreground: color("--text-primary"),
+    cursor: color("--accent-primary"), selectionBackground: color("--editor-selection") };
+};
+
+export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) => {
+  const { t: tr } = useI18n();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<XtermLike | null>(null);
+  const fitRef = useRef<FitAddonLike | null>(null);
+  const activeRef = useRef<string | null>(null);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const terminalViewsRef = useRef(new Map<string, TerminalView>());
+  const terminalModulesRef = useRef<{ Terminal: typeof import("@xterm/xterm").Terminal; FitAddon: typeof import("@xterm/addon-fit").FitAddon } | null>(null);
+  const outputBufferRef = useRef<Record<string, string>>({});
+  const outputCursorRef = useRef<Record<string, number>>({});
+  const refreshEpochRef = useRef(0);
+  const inputQueueRef = useRef<Record<string, string[]>>({});
+  const webLineRef = useRef("");
+  const mountedRef = useRef(true);
+  const refreshSessionsRef = useRef<() => Promise<void>>(async () => {});
+  const terminalSessions = useAppStore(useShallow((s) => s.terminalSessions
+    .filter((session) => session.conversationId === s.conversationId)));
+  const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
+  const conversationId = useAppStore((s) => s.conversationId);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const resolvedTheme = useAppStore((s) => s.resolvedTheme);
+  const terminalSnapshots = useAppStore(useShallow((s) => Object.values(s.terminalSnapshots)
+    .filter((snapshot) => snapshot.conversationId === s.conversationId)));
+  // The terminal only needs conversation identity for retiring orphaned
+  // xterm views. Subscribing to the full conversation objects makes every
+  // streamed message re-render this panel, even while it is hidden.
+  const conversationIdsKey = useAppStore((s) => s.conversations.map((conversation) => conversation.id).join("\0"));
+  const [booting, setBooting] = useState(true);
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
+  const [autoCreating, setAutoCreating] = useState(false);
+  const creatingRef = useRef(false);
+  const [terminalReady, setTerminalReady] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [removalFeedback, setRemovalFeedback] = useState<{ conversationId: string; message: string } | null>(null);
+  const removalMessage = removalFeedback?.conversationId === conversationId ? removalFeedback.message : "";
+  const [terminatingSessionIds, setTerminatingSessionIds] = useState<Set<string>>(() => new Set());
+  const terminatingSessionIdsRef = useRef(new Set<string>());
+  const [detectedUrls, setDetectedUrls] = useState<string[]>([]);
+  const autoCreateAttemptedRef = useRef(false);
+
+  const activeSession = terminalSessions.find((session) => (
+    session.id === activeTerminalSessionId && session.conversationId === conversationId
+  )) ?? null;
+  const liveUrl = detectedUrls[0];
+  const isCurrentConversation = (owner: string) => mountedRef.current
+    && useAppStore.getState().conversationId === owner;
+
+  const removeMirroredTerminal = (sessionId: string, conversationOwner: string) => {
+    if (!isDesktop() || !conversationOwner) return;
+    // The Electron process owns and kills the real PTY. The backend only owns
+    // its reconnectable mirror, so delete that mirror through the existing
+    // terminal.kill lifecycle after the local PTY has been removed. Without
+    // this, deleted/restarted PowerShell tabs remain visible to agent tools as
+    // stale external terminal sessions.
+    sendClientCommand(
+      {
+        type: "terminal.kill",
+        session_id: sessionId,
+        conversation_id: conversationOwner,
+      },
+      { silent: true },
+    );
+  };
+
+  useEffect(() => {
+    activeRef.current = activeTerminalSessionId;
+  }, [activeTerminalSessionId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    let disposed = false;
+    Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")])
+      .then(([{ Terminal }, { FitAddon }]) => {
+        if (disposed || !containerRef.current) return;
+        terminalModulesRef.current = { Terminal, FitAddon };
+        redrawActiveSession();
+        setTerminalReady(true);
+        requestAnimationFrame(() => {
+          safeFit();
+          if (visibleRef.current) termRef.current?.focus?.();
+        });
+      })
+      .catch((error) => {
+        setStatusMessage(`终端界面加载失败：${String(error)}`);
+      });
+
+    return () => {
+      disposed = true;
+      mountedRef.current = false;
+      refreshEpochRef.current += 1;
+      for (const view of terminalViewsRef.current.values()) view.term.dispose();
+      terminalViewsRef.current.clear();
+      terminalModulesRef.current = null;
+      setTerminalReady(false);
+    };
+  }, []);
+
+  const appearanceColors = useAppStore((s) => s.appearanceColors);
+  const appearanceThemes = useAppStore((s) => s.appearanceThemes);
+  useEffect(() => {
+    let current = true;
+    const apply = () => {
+      if (!current) return;
+      const theme = terminalTheme(resolvedTheme === "light");
+      for (const view of terminalViewsRef.current.values()) { view.term.options.theme = theme; view.term.options.fontFamily = terminalFontFamily(); }
+      void redrawActiveSession(); safeFit();
+    };
+    void prepareThemeFonts(appearanceThemes[resolvedTheme]?.fonts).then(apply);
+    return () => { current = false; };
+  }, [resolvedTheme, appearanceColors, appearanceThemes]);
+
+  // Follow the Appearance-tab code zoom: xterm needs a numeric px, so re-read
+  // the scaled token and re-fit the grid.
+  const codeTextScale = useAppStore((s) => s.codeTextScale);
+  useEffect(() => {
+    for (const view of terminalViewsRef.current.values()) view.term.options.fontSize = terminalFontSize();
+    safeFit();
+  }, [codeTextScale]);
+
+  useEffect(() => {
+    const resizeObserver = new ResizeObserver(() => {
+      if (!visibleRef.current) return;
+      safeFit();
+      const sessionId = activeRef.current;
+      const term = termRef.current;
+      if (!sessionId || !term) return;
+      resizeSession(sessionId, term.cols, term.rows);
+    });
+    if (containerRef.current) resizeObserver.observe(containerRef.current);
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible || !terminalReady) return;
+    safeFit();
+    const term = termRef.current!;
+    if (activeRef.current) resizeSession(activeRef.current, term.cols, term.rows);
+  }, [visible, terminalReady]);
+
+  useEffect(() => {
+    const ws = getWebSocket();
+    const unsub = ws?.subscribe((msg) => {
+      const e = msg as {
+        type?: string;
+        session_id?: string;
+        data?: string;
+        start_cursor?: number;
+        end_cursor?: number;
+        output?: string;
+        command?: string;
+        exit_code?: number;
+        name?: string;
+        args?: { command?: string };
+        result_kind?: string;
+        status?: string;
+        summary?: string;
+        conversation_id?: string;
+      };
+      const eventOwner = e.conversation_id?.trim() || "";
+      const activeOwner = useAppStore.getState().conversationId || "";
+      if (
+        e.type?.startsWith("terminal.")
+        && (!eventOwner || !activeOwner || eventOwner !== activeOwner)
+      ) return;
+      if (e.type === "terminal.output" && e.session_id && e.data) {
+        appendOutput(e.session_id, e.data, e.start_cursor, e.end_cursor, eventOwner);
+      } else if (e.type === "terminal.output" && e.output != null) {
+        appendOutput("web-fallback", `${e.output}\r\n[exit ${terminalExitCodeLabel(e.exit_code)}]\r\n$ `);
+      } else if (e.type === "terminal.exit" && e.session_id) {
+        appendOutput(e.session_id, `\r\n[Process exited with code ${terminalExitCodeLabel(e.exit_code)}]\r\n`);
+      } else if (e.type === "terminal.killed" && e.session_id) {
+        delete outputBufferRef.current[e.session_id];
+        delete outputCursorRef.current[e.session_id];
+        disposeTerminalView(e.session_id);
+      } else if (e.type === "terminal.list") {
+        if (mountedRef.current) setBooting(false);
+      }
+    });
+
+    let desktopDataCleanup: (() => void) | undefined;
+    if (isDesktop()) {
+      const d = desktop();
+      desktopDataCleanup = d?.pty.onData(({ sessionId, conversationId: owner, data, startCursor, endCursor }) => {
+        if (!owner) return;
+        const acceptedCursor = outputCursorRef.current[sessionId];
+        if (endCursor != null && acceptedCursor != null && endCursor <= acceptedCursor) return;
+        appendOutput(sessionId, data, startCursor, endCursor, owner);
+      }) as (() => void) | undefined;
+    }
+
+    return () => {
+      unsub?.();
+      desktopDataCleanup?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    autoCreateAttemptedRef.current = false;
+    setRemovalFeedback(null);
+    webLineRef.current = "";
+    delete outputBufferRef.current["web-fallback"];
+    disposeTerminalView(`fallback:${conversationId || ""}`);
+    setDetectedUrls([]);
+    // restoreWorkbenchState has already projected the target conversation's
+    // cached sessions and preferred terminal. Keep them visible until the
+    // authoritative list for this owner arrives and reconciles the cache.
+    void refreshSessionsRef.current();
+  }, [conversationId, workingDirectory]);
+
+  useEffect(() => {
+    if (!activeTerminalSessionId && terminalSessions.length > 0) {
+      useAppStore.getState().setActiveTerminalSession(terminalSessions[0].id);
+    }
+  }, [activeTerminalSessionId, terminalSessions]);
+
+  useEffect(() => {
+    redrawActiveSession();
+    requestAnimationFrame(() => {
+      safeFit();
+      if (visibleRef.current) termRef.current?.focus?.();
+    });
+  }, [activeTerminalSessionId, activeSession?.terminalMode, workingDirectory, conversationId]);
+
+  useEffect(() => {
+    if (activeSession && statusMessage === "正在启动后端 Shell...") {
+      setStatusMessage("");
+    }
+  }, [activeSession, statusMessage]);
+
+  useEffect(() => {
+    const onVisibilityFit = () => {
+      requestAnimationFrame(() => {
+        safeFit();
+        if (visibleRef.current) termRef.current?.focus?.();
+      });
+    };
+    window.addEventListener("focus", onVisibilityFit);
+    document.addEventListener("visibilitychange", onVisibilityFit);
+    return () => {
+      window.removeEventListener("focus", onVisibilityFit);
+      document.removeEventListener("visibilitychange", onVisibilityFit);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!visible || !terminalReady || booting || autoCreating || loadedConversationId !== conversationId
+      || terminalSessions.length > 0 || autoCreateAttemptedRef.current) return;
+    if (!termRef.current) return;
+    autoCreateAttemptedRef.current = true;
+    void createSession();
+  }, [visible, terminalReady, booting, autoCreating, loadedConversationId, conversationId, terminalSessions.length]);
+
+  const refreshSessions = async () => {
+    const refreshEpoch = ++refreshEpochRef.current;
+    const ownerConversationId = useAppStore.getState().conversationId || "";
+    const isCurrent = () => isCurrentConversation(ownerConversationId) && refreshEpoch === refreshEpochRef.current;
+    setBooting(true);
+    setLoadedConversationId(null);
+    setStatusMessage("");
+    try {
+      if (!ownerConversationId) {
+        useAppStore.getState().setTerminalSessions([]);
+        setStatusMessage("请先选择会话，再打开终端。");
+        return;
+      }
+      if (isDesktop()) {
+        const listedSessions = await ptyList(ownerConversationId);
+        const sessions = (await Promise.all(listedSessions.map((session) => (
+          ptySnapshot(session.sessionId, ownerConversationId, TERMINAL_OUTPUT_BUFFER_CHARS)
+        )))).filter((session) => session !== null);
+        if (!isCurrent()) return;
+        for (const session of sessions) {
+          if (session.output === undefined) continue;
+          const merged = mergeTerminalOutputByCursor(
+            session.output,
+            session.outputStartCursor,
+            session.outputEndCursor,
+            outputBufferRef.current[session.sessionId] ?? "",
+            outputCursorRef.current[session.sessionId],
+          );
+          outputBufferRef.current[session.sessionId] = merged.output;
+          if (merged.endCursor != null) outputCursorRef.current[session.sessionId] = merged.endCursor;
+          applySnapshotToView(session.sessionId, merged.output, merged.endCursor);
+        }
+        const normalized: TerminalSessionInfo[] = sessions.map((session) => ({
+          id: session.sessionId,
+          conversationId: session.conversationId,
+          pid: session.pid,
+          shell: session.shell,
+          cwd: session.cwd,
+          status: session.isAlive === false ? "exited" : "running",
+          exitCode: session.exitCode,
+          exitSignal: session.exitSignal,
+          exitedAt: session.exitedAt,
+          terminalMode: "pty",
+        }));
+        useAppStore.getState().setTerminalSessions(
+          normalized.filter((session) => session.conversationId === ownerConversationId),
+        );
+        redrawActiveSession();
+      } else {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.list",
+            conversation_id: ownerConversationId,
+            workspace_root: useAppStore.getState().workingDirectory || undefined,
+          },
+          "terminal.list",
+        );
+        if (!isCurrent()) return;
+        if (!commandResultSucceeded(result)) {
+          setStatusMessage(result.message || "刷新终端失败。");
+          return;
+        }
+      }
+      setLoadedConversationId(ownerConversationId);
+    } catch (error) {
+      if (isCurrent()) setStatusMessage(`刷新终端失败：${String(error)}`);
+    } finally {
+      if (mountedRef.current && refreshEpoch === refreshEpochRef.current) setBooting(false);
+    }
+  };
+  refreshSessionsRef.current = refreshSessions;
+
+  const createSession = async () => {
+    if (creatingRef.current) return;
+    const ownerConversationId = useAppStore.getState().conversationId || "";
+    if (!ownerConversationId) {
+      setStatusMessage("请先选择会话，再打开终端。");
+      return;
+    }
+    const cwd = useAppStore.getState().workingDirectory;
+    if (!cwd) {
+      setStatusMessage("请先打开工作区，再启动终端或运行命令。");
+      return;
+    }
+    const isCurrent = () => isCurrentConversation(ownerConversationId)
+      && useAppStore.getState().workingDirectory === cwd;
+    creatingRef.current = true;
+    setAutoCreating(true);
+    setStatusMessage("");
+    try {
+      if (isDesktop()) {
+        const session = await ptySpawn(cwd, ownerConversationId);
+        if (!session) {
+          if (!isCurrent()) return;
+          setStatusMessage("命令运行器已就绪。输入命令后按 Enter。");
+          if (!outputBufferRef.current["web-fallback"]) {
+            outputBufferRef.current["web-fallback"] = "命令运行器。命令在当前工作区运行，不支持交互式操作。\r\n$ ";
+          }
+          useAppStore.getState().setActiveTerminalSession(null);
+          redrawActiveSession();
+          requestAnimationFrame(() => { if (visibleRef.current) termRef.current?.focus?.(); });
+          return;
+        }
+        const terminalSession: TerminalSessionInfo = {
+          id: session.sessionId,
+          conversationId: session.conversationId,
+          pid: session.pid,
+          shell: session.shell,
+          cwd: session.cwd,
+          status: "running",
+          createdAt: Date.now(),
+          terminalMode: "pty",
+        };
+        if (!isCurrent()) return;
+        useAppStore.getState().upsertTerminalSession(terminalSession);
+        useAppStore.getState().setActiveTerminalSession(session.sessionId);
+        requestAnimationFrame(() => {
+          safeFit();
+          const term = termRef.current;
+          if (term && session.sessionId) {
+            resizeSession(session.sessionId, term.cols, term.rows);
+          }
+          if (visibleRef.current) term?.focus?.();
+        });
+      } else {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.create",
+            cwd,
+            shell: "system",
+            conversation_id: ownerConversationId,
+            workspace_root: useAppStore.getState().workingDirectory || undefined,
+          },
+          "terminal.create",
+        );
+        if (!isCurrent()) return;
+        if (commandResultSucceeded(result)) {
+          setStatusMessage("正在启动后端 Shell...");
+        } else {
+          setStatusMessage(result.message || "命令运行器已就绪。输入命令后按 Enter。");
+          useAppStore.getState().setActiveTerminalSession(null);
+          if (!outputBufferRef.current["web-fallback"]) {
+            outputBufferRef.current["web-fallback"] = "命令运行器。命令在当前工作区运行，不支持交互式操作。\r\n$ ";
+          }
+          redrawActiveSession();
+        }
+        requestAnimationFrame(() => {
+          safeFit();
+          if (visibleRef.current) termRef.current?.focus?.();
+        });
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      setStatusMessage(`启动终端失败：${String(error)}`);
+      useAppStore.getState().setActiveTerminalSession(null);
+      redrawActiveSession();
+    } finally {
+      creatingRef.current = false;
+      if (mountedRef.current) setAutoCreating(false);
+    }
+  };
+
+  const killSession = async (sessionId: string): Promise<boolean> => {
+    if (terminatingSessionIdsRef.current.has(sessionId)) return false;
+    terminatingSessionIdsRef.current.add(sessionId);
+    setTerminatingSessionIds((current) => new Set(current).add(sessionId));
+    const owner = useAppStore.getState().conversationId || "";
+    setRemovalFeedback(null);
+    try {
+      if (isDesktop()) {
+        const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+        if (!session?.conversationId) return false;
+        setStatusMessage("");
+        try {
+          const removed = session.status === "exited"
+            ? await ptyAckExit(sessionId, session.conversationId)
+            : await ptyKill(sessionId, session.conversationId);
+          if (!removed) {
+            if (isCurrentConversation(owner)) {
+              setRemovalFeedback({ conversationId: owner, message: tr("未能确认终端已删除，请重试。") });
+              await refreshSessionsRef.current();
+            }
+            return false;
+          }
+          delete outputBufferRef.current[sessionId];
+          delete outputCursorRef.current[sessionId];
+      disposeTerminalView(sessionId);
+          removeMirroredTerminal(sessionId, session.conversationId);
+          if (isCurrentConversation(owner)) useAppStore.getState().removeTerminalSession(sessionId);
+          return true;
+        } catch (error) {
+          if (isCurrentConversation(owner)) setRemovalFeedback({ conversationId: owner, message: `停止终端失败：${String(error)}` });
+          return false;
+        }
+      }
+      const state = useAppStore.getState();
+      try {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.kill",
+            session_id: sessionId,
+            conversation_id: state.conversationId || undefined,
+            workspace_root: state.workingDirectory || undefined,
+          },
+          "terminal.kill",
+        );
+        if (!commandResultSucceeded(result)) {
+          if (isCurrentConversation(owner)) setRemovalFeedback({ conversationId: owner, message: result.message || "停止终端失败。" });
+          return false;
+        }
+        return true;
+      } catch (error) {
+        if (isCurrentConversation(owner)) setRemovalFeedback({ conversationId: owner, message: `停止终端失败：${String(error)}` });
+        return false;
+      }
+    } finally {
+      terminatingSessionIdsRef.current.delete(sessionId);
+      setTerminatingSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+    }
+  };
+
+  const restartSession = async (sessionId: string) => {
+    const state = useAppStore.getState();
+    const session = state.terminalSessions.find((item) => item.id === sessionId);
+    if (!session?.conversationId) return;
+    const owner = session.conversationId;
+    setStatusMessage("");
+    try {
+      if (!isDesktop()) {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.restart",
+            session_id: sessionId,
+            conversation_id: owner,
+            workspace_root: state.workingDirectory || undefined,
+          },
+          "terminal.restart",
+        );
+        if (!commandResultSucceeded(result)) {
+          if (isCurrentConversation(owner)) setStatusMessage(result.message || "重新启动终端失败。");
+          return;
+        }
+        delete outputBufferRef.current[sessionId];
+        delete outputCursorRef.current[sessionId];
+      disposeTerminalView(sessionId);
+        return;
+      }
+      const replacement = await ptyRestart(sessionId, owner);
+      if (!replacement) {
+        if (isCurrentConversation(owner)) setStatusMessage("重新启动终端失败。请新建终端后继续。");
+        return;
+      }
+      delete outputBufferRef.current[sessionId];
+      delete outputCursorRef.current[sessionId];
+      disposeTerminalView(sessionId);
+      removeMirroredTerminal(sessionId, owner);
+      const terminalSession: TerminalSessionInfo = {
+        id: replacement.sessionId,
+        conversationId: replacement.conversationId,
+        pid: replacement.pid,
+        shell: replacement.shell,
+        cwd: replacement.cwd,
+        status: "running",
+        createdAt: Date.now(),
+        terminalMode: "pty",
+      };
+      if (!isCurrentConversation(owner)) return;
+      const store = useAppStore.getState();
+      store.removeTerminalSession(sessionId);
+      store.upsertTerminalSession(terminalSession);
+      store.setActiveTerminalSession(terminalSession.id);
+    } catch (error) {
+      if (isCurrentConversation(owner)) setStatusMessage(`重新启动终端失败：${String(error)}`);
+    }
+  };
+
+  const appendOutput = (
+    sessionId: string, data: string, startCursor?: number, endCursor?: number,
+    owner = useAppStore.getState().conversationId || "",
+  ) => {
+    let appendedData = data;
+    let missingOutput = false;
+    const currentCursor = outputCursorRef.current[sessionId];
+    if (startCursor != null && endCursor != null) {
+      if (currentCursor != null && endCursor <= currentCursor) return;
+      if (currentCursor != null && startCursor < currentCursor) {
+        appendedData = data.slice(Math.max(0, currentCursor - startCursor));
+      }
+      if (currentCursor != null && startCursor > currentCursor) {
+        // Keep a contiguous suffix until the reconnect snapshot fills the gap.
+        outputBufferRef.current[sessionId] = "";
+        missingOutput = true;
+      }
+      outputCursorRef.current[sessionId] = endCursor;
+      outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${appendedData}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+    } else {
+      outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${appendedData}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+    }
+    const key = sessionId === "web-fallback" ? `fallback:${owner}` : sessionId;
+    const view = terminalViewsRef.current.get(key);
+    if (view?.owner === owner) {
+      if (missingOutput) {
+        view.term.reset();
+        view.output = "";
+        view.term.writeln("[断开期间的部分输出未保留]");
+      }
+      writeViewOutput(view, appendedData, endCursor);
+    }
+    if (!isCurrentConversation(owner)) return;
+    const found = Array.from(appendedData.matchAll(DEV_SERVER_URL_RE), (match) => normalizeDetectedUrl(match[0]));
+    if (found.length > 0) {
+      const store = useAppStore.getState();
+      for (const url of found) {
+        const port = portFromUrl(url);
+        if (port != null) {
+          store.addPreviewServer({ port, url, name: `:${port}`, framework: "terminal" });
+        }
+      }
+      setDetectedUrls((current) => {
+        const next = [...found, ...current.filter((url) => !found.includes(url))];
+        return next.slice(0, 5);
+      });
+    }
+  };
+
+  const runWebFallbackCommand = (command: string) => {
+    const state = useAppStore.getState();
+    if (!state.conversationId) {
+      setStatusMessage("请先选择会话，再运行命令。");
+      return;
+    }
+    if (!state.workingDirectory) {
+      setStatusMessage("请先打开工作区，再启动终端或运行命令。");
+      return;
+    }
+    const trimmed = command.trim();
+    if (!trimmed) {
+      appendOutput("web-fallback", "\r\n$ ");
+      return;
+    }
+    appendOutput("web-fallback", "\r\n");
+    sendClientCommand({
+      type: "terminal.exec",
+      command: trimmed,
+      cwd: state.workingDirectory || undefined,
+      conversation_id: state.conversationId,
+      workspace_root: state.workingDirectory || undefined,
+    });
+  };
+
+  const writeWebFallbackInput = (input: string) => {
+    const term = termRef.current;
+    if (!term) return;
+    for (const char of input) {
+      if (char === "\r" || char === "\n") {
+        const command = webLineRef.current;
+        webLineRef.current = "";
+        runWebFallbackCommand(command);
+        continue;
+      }
+      if (char === "\u007f" || char === "\b") {
+        if (webLineRef.current.length > 0) {
+          webLineRef.current = webLineRef.current.slice(0, -1);
+          term.write("\b \b");
+        }
+        continue;
+      }
+      if (char >= " ") {
+        webLineRef.current += char;
+        term.write(char);
+      }
+    }
+  };
+
+  const disposeTerminalView = (key: string) => {
+    const view = terminalViewsRef.current.get(key);
+    if (!view) return;
+    if (termRef.current === view.term) { termRef.current = null; fitRef.current = null; }
+    view.term.dispose();
+    view.host.remove();
+    terminalViewsRef.current.delete(key);
+  };
+
+  const writeViewOutput = (view: TerminalView, data: string, cursor?: number) => {
+    view.term.write(data);
+    view.output = `${view.output}${data}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+    if (cursor !== undefined) view.cursor = cursor;
+  };
+
+  const applySnapshotToView = (sessionId: string, output: string, endCursor?: number) => {
+    const view = terminalViewsRef.current.get(sessionId);
+    if (!view || !view.hydrated) return;
+    if (endCursor !== undefined && view.cursor !== undefined) {
+      const startCursor = endCursor - output.length;
+      if (endCursor <= view.cursor) {
+        // A late snapshot can fill the prefix of an already displayed live
+        // suffix without advancing its end cursor. Repaint that recovered
+        // contiguous range once; repeated snapshots retain the same bounds.
+        if (endCursor === view.cursor && startCursor < view.cursor - view.output.length) {
+          view.term.reset();
+          view.output = "";
+          writeViewOutput(view, output, endCursor);
+        }
+        return;
+      }
+      const skipped = startCursor > view.cursor;
+      writeViewOutput(view, `${skipped ? "\r\n[断开期间的部分输出未保留]\r\n" : ""}${output.slice(Math.max(0, view.cursor - startCursor))}`, endCursor);
+    } else if (output.startsWith(view.output)) {
+      writeViewOutput(view, output.slice(view.output.length), endCursor);
+    }
+  };
+
+  const redrawActiveSession = async () => {
+    const modules = terminalModulesRef.current;
+    if (!modules || !containerRef.current) return;
+    const requested = useAppStore.getState();
+    const fonts = requested.appearanceThemes[requested.resolvedTheme]?.fonts;
+    await prepareThemeFonts(fonts);
+    if (!containerRef.current) return;
+    const state = useAppStore.getState();
+    if (fonts !== state.appearanceThemes[state.resolvedTheme]?.fonts) return;
+    const owner = state.conversationId || "";
+    const sessionId = activeRef.current;
+    const key = sessionId || `fallback:${owner}`;
+    const session = state.terminalSessions.find((item) => item.id === sessionId);
+    let view = terminalViewsRef.current.get(key);
+    if (!view) {
+      const host = document.createElement("div");
+      host.className = "mc-terminal-session-surface";
+      host.dataset.terminalSession = key;
+      host.style.height = "100%";
+      host.style.width = "100%";
+      containerRef.current.appendChild(host);
+      const term = new modules.Terminal({
+        fontSize: terminalFontSize(), fontFamily: terminalFontFamily(), lineHeight: 1.12,
+        letterSpacing: 0, cursorBlink: true, convertEol: !sessionId || session?.terminalMode === "pipe",
+        allowTransparency: true, scrollback: 8000, theme: terminalTheme(state.resolvedTheme === "light"),
+      }) as unknown as XtermWithOptions;
+      const fit = new modules.FitAddon() as FitAddonLike;
+      term.loadAddon(fit);
+      term.open(host);
+      term.attachCustomKeyEventHandler?.((event: KeyboardEvent) => {
+        const isCopy = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c";
+        if (isCopy && (event.shiftKey || term.hasSelection?.())) { void copyTerminalSelection(term); return false; }
+        return true;
+      });
+      term.onData((input) => {
+        if (!isCurrentConversation(owner)) return;
+        if (sessionId) writeToSession(sessionId, input);
+        else if (outputBufferRef.current["web-fallback"] !== undefined) writeWebFallbackInput(input);
+      });
+      view = { owner, term, fit, host, hydrated: false, output: "" };
+      terminalViewsRef.current.set(key, view);
+    }
+    for (const [viewKey, existing] of terminalViewsRef.current) existing.host.hidden = viewKey !== key;
+    termRef.current = view.term;
+    fitRef.current = view.fit;
+    view.term.options.convertEol = !sessionId || session?.terminalMode === "pipe";
+    safeFit();
+    if (!sessionId) {
+      const runnerOutput = outputBufferRef.current["web-fallback"];
+      if (runnerOutput) {
+        if (!view.output) { view.term.reset(); writeViewOutput(view, runnerOutput); }
+        else applySnapshotToView(key, runnerOutput);
+      } else if (!state.conversationId || !state.workingDirectory) {
+        view.term.reset();
+      } else {
+        view.term.reset();
+        view.term.writeln(statusMessage || (booting || autoCreating ? "正在启动终端..." : "暂无终端会话，点击 + 新建。"));
+      }
+      view.hydrated = true;
+      return;
+    }
+    if (!view.hydrated) {
+      writeViewOutput(view, outputBufferRef.current[sessionId] ?? "", outputCursorRef.current[sessionId]);
+      view.hydrated = true;
+    }
+    const queued = inputQueueRef.current[sessionId] ?? [];
+    if (queued.length > 0) {
+      inputQueueRef.current[sessionId] = [];
+      for (const chunk of queued) writeToSession(sessionId, chunk);
+    }
+  };
+
+  useEffect(() => {
+    if (!terminalReady) return;
+    let activeSnapshotWasApplied = false;
+    for (const snapshot of terminalSnapshots) {
+      // Electron snapshots own PTY hydration; the backend mirror has a
+      // separate lifetime and must not replace its authoritative scrollback.
+      if (isDesktop() && snapshot.terminalMode === "pty") continue;
+      if (snapshot.error) continue;
+      const current = outputBufferRef.current[snapshot.id] ?? "";
+      const merged = mergeTerminalOutputByCursor(
+        snapshot.output, snapshot.outputStartCursor, snapshot.outputEndCursor,
+        current, outputCursorRef.current[snapshot.id],
+      );
+      outputBufferRef.current[snapshot.id] = merged.output;
+      if (merged.endCursor != null) outputCursorRef.current[snapshot.id] = merged.endCursor;
+      applySnapshotToView(snapshot.id, merged.output, merged.endCursor);
+      if (activeRef.current === snapshot.id) activeSnapshotWasApplied = true;
+    }
+    if (activeSnapshotWasApplied) redrawActiveSession();
+  }, [terminalSnapshots, terminalReady, conversationId]);
+
+  useEffect(() => {
+    if (booting || loadedConversationId !== conversationId) return;
+    const retained = new Set(terminalSessions.map((session) => session.id));
+    for (const [key, view] of terminalViewsRef.current) {
+      if (view.owner === conversationId && !key.startsWith("fallback:") && !retained.has(key)) disposeTerminalView(key);
+    }
+  }, [terminalSessions, booting, loadedConversationId, conversationId]);
+
+  useEffect(() => {
+    const owners = new Set(conversationIdsKey ? conversationIdsKey.split("\0") : []);
+    for (const [key, view] of terminalViewsRef.current) {
+      if (view.owner !== conversationId && !owners.has(view.owner)) {
+        disposeTerminalView(key);
+        delete outputBufferRef.current[key];
+        delete outputCursorRef.current[key];
+      }
+    }
+  }, [conversationIdsKey, conversationId]);
+
+  const writeToSession = (sessionId: string, data: string) => {
+    const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+    if (!session || session.status === "exited") {
+      setStatusMessage("终端会话已停止，请重新启动或新建终端。");
+      return;
+    }
+    if (isDesktop()) {
+      void Promise.resolve(ptyWrite(sessionId, data, session.conversationId)).then((written) => {
+        if (written === false && isCurrentConversation(session.conversationId)) {
+          setStatusMessage("终端输入未写入，请刷新终端列表。");
+        }
+      }).catch((error) => {
+        if (isCurrentConversation(session.conversationId)) setStatusMessage(`终端输入失败：${String(error)}`);
+      });
+    }
+    else sendClientCommand({
+      type: "terminal.input",
+      session_id: sessionId,
+      data,
+      conversation_id: session.conversationId,
+      workspace_root: useAppStore.getState().workingDirectory || undefined,
+    });
+  };
+
+  const safeFit = () => {
+    if (visibleRef.current && containerRef.current?.clientWidth && containerRef.current.clientHeight) fitRef.current?.fit();
+  };
+
+  const resizeSession = (sessionId: string, cols: number, rows: number) => {
+    if (isDesktop()) {
+      const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+      if (session?.conversationId) {
+        void Promise.resolve(ptyResize(sessionId, cols, rows, session.conversationId)).catch((error) => {
+          if (isCurrentConversation(session.conversationId)) setStatusMessage(`终端尺寸更新失败：${String(error)}`);
+        });
+      }
+    } else {
+      const state = useAppStore.getState();
+      sendClientCommand({
+        type: "terminal.resize",
+        session_id: sessionId,
+        cols,
+        rows,
+        conversation_id: state.conversationId || undefined,
+        workspace_root: state.workingDirectory || undefined,
+      });
+    }
+  };
+
+  const copyTerminalSelection = async (term = termRef.current) => {
+    const text = term?.getSelection?.() ?? "";
+    if (!text) return;
+    const owner = useAppStore.getState().conversationId || "";
+    try {
+      await navigator.clipboard.writeText(text);
+      if (!isCurrentConversation(owner)) return;
+      term?.clearSelection?.();
+      term?.focus?.();
+    } catch (error) {
+      if (isCurrentConversation(owner)) setStatusMessage(`复制终端文本失败：${String(error)}`);
+    }
+  };
+
+  const clearActiveTerminal = async () => {
+    const state = useAppStore.getState();
+    const sessionId = state.activeTerminalSessionId;
+    const session = state.terminalSessions.find((item) => item.id === sessionId);
+    if (!sessionId || !session) {
+      webLineRef.current = "";
+      termRef.current?.clear();
+      if (outputBufferRef.current["web-fallback"] !== undefined) {
+        outputBufferRef.current["web-fallback"] = "$ ";
+        termRef.current?.write("$ ");
+        const fallback = terminalViewsRef.current.get(`fallback:${state.conversationId || ""}`);
+        if (fallback) fallback.output = "$ ";
+      }
+      termRef.current?.focus?.();
+      return;
+    }
+
+    setStatusMessage("");
+    try {
+      let clearCursor: number;
+      if (isDesktop()) {
+        const result = await ptyClear(session.id, session.conversationId);
+        if (!result.cleared) {
+          if (isCurrentConversation(session.conversationId)) {
+            setStatusMessage("无法清空终端，因为该会话已不属于当前对话。");
+            await refreshSessionsRef.current();
+          }
+          return;
+        }
+        clearCursor = result.outputCursor;
+        // Keep the backend's reconnectable mirror consistent with the Electron
+        // PTY. A disconnected backend does not invalidate the local clear.
+        sendClientCommand(
+          {
+            type: "terminal.clear",
+            session_id: session.id,
+            conversation_id: session.conversationId,
+            workspace_root: state.workingDirectory || undefined,
+          },
+          { silent: true },
+        );
+      } else {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.clear",
+            session_id: session.id,
+            conversation_id: session.conversationId,
+            workspace_root: state.workingDirectory || undefined,
+          },
+          "terminal.clear",
+        );
+        if (!commandResultSucceeded(result)) {
+          if (isCurrentConversation(session.conversationId)) setStatusMessage(result.message || "清空终端失败。");
+          return;
+        }
+        clearCursor = result.data?.output_cursor as number;
+      }
+
+      const merged = mergeTerminalOutputByCursor(
+        "", clearCursor, clearCursor,
+        outputBufferRef.current[session.id] ?? "", outputCursorRef.current[session.id],
+      );
+      outputBufferRef.current[session.id] = merged.output;
+      outputCursorRef.current[session.id] = merged.endCursor ?? clearCursor;
+      if (!isCurrentConversation(session.conversationId)) return;
+      const view = terminalViewsRef.current.get(session.id);
+      if (view) {
+        view.term.reset();
+        view.output = "";
+        view.cursor = clearCursor;
+        writeViewOutput(view, merged.output, merged.endCursor);
+      }
+      state.upsertTerminalSnapshot({
+        id: session.id,
+        conversationId: session.conversationId,
+        pid: session.pid,
+        shell: session.shell,
+        cwd: session.cwd,
+        status: session.status,
+        terminalMode: session.terminalMode,
+        exitCode: session.exitCode,
+        exitSignal: session.exitSignal,
+        exitedAt: session.exitedAt,
+        cleanupPending: session.cleanupPending,
+        cleanupReason: session.cleanupReason,
+        output: merged.output,
+        outputChars: merged.output.length,
+        totalOutputChars: outputCursorRef.current[session.id],
+        outputStartCursor: outputCursorRef.current[session.id] - merged.output.length,
+        outputEndCursor: outputCursorRef.current[session.id],
+        truncated: false,
+        capturedAt: Date.now(),
+      });
+      if (activeRef.current === session.id) {
+        redrawActiveSession();
+        if (visibleRef.current) termRef.current?.focus?.();
+      }
+    } catch (error) {
+      if (isCurrentConversation(session.conversationId)) setStatusMessage(`清空终端失败：${String(error)}`);
+    }
+  };
+
+  return (
+    <div
+      onMouseDown={() => termRef.current?.focus?.()}
+      onContextMenu={(event) => {
+        if (termRef.current?.hasSelection?.()) {
+          event.preventDefault();
+          void copyTerminalSelection();
+        }
+      }}
+      className="h-full w-full flex flex-col overflow-hidden p-2 gap-2 border-0 rounded-none shadow-none"
+      style={{ background: "var(--surface-base)" }}
+    >
+      <div
+        className="flex items-center gap-1.5 p-0 border-b-0 bg-transparent min-h-7"
+        style={{ fontSize: "var(--text-sm)", color: "var(--text-primary)" }}
+      >
+        <button
+          type="button"
+          onClick={() => void createSession()}
+          className="w-6 h-6 inline-flex items-center justify-center border-0 bg-transparent cursor-pointer p-0"
+          style={{ color: "var(--text-primary)", borderRadius: "var(--radius-sm, 6px)" }}
+          title={tr("新建终端")}
+          aria-label={tr("新建终端")}
+        >
+          <Plus size={14} />
+        </button>
+        {terminalSessions.length > 0 && (
+          <div
+            role="tablist"
+            aria-label={tr("终端会话")}
+            className="flex flex-1 items-center gap-0.5 min-w-0 overflow-x-auto"
+            style={{ scrollbarWidth: "thin" }}
+          >
+            {terminalSessions.map((session, index) => {
+              const selected = session.id === activeTerminalSessionId;
+              const label = terminalSessionLabel(tr, session, index, terminalSessions.length);
+              return (
+                <div
+                  key={session.id}
+                  role="presentation"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  className="group h-7 inline-flex items-center border-0 whitespace-nowrap"
+                  style={{
+                    borderRadius: "var(--radius-sm, 4px)",
+                    background: selected ? "var(--surface-raised)" : "transparent",
+                    boxShadow: selected ? "inset 0 -2px 0 var(--accent-primary)" : "none",
+                  }}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    title={`${label} - ${terminalStatusLabel(tr, session.status)}`}
+                    onClick={() => useAppStore.getState().setActiveTerminalSession(session.id)}
+                    className="h-7 pl-2 pr-1 inline-flex items-center gap-1.5 border-0 bg-transparent cursor-pointer whitespace-nowrap"
+                    style={{
+                      color: selected ? "var(--text-primary)" : "var(--text-muted)",
+                      fontSize: "var(--text-xs)",
+                    }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="w-1.5 h-1.5 rounded-full shrink-0"
+                      style={{
+                        background: session.status === "exited" ? "var(--text-muted)" : "var(--state-success)",
+                      }}
+                    />
+                    <span>{label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    title={tr("删除终端 {v0}", { v0: label })}
+                    aria-label={tr("删除终端 {v0}", { v0: label })}
+                    disabled={terminatingSessionIds.has(session.id)}
+                    aria-busy={terminatingSessionIds.has(session.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void killSession(session.id);
+                    }}
+                    className={`mr-0.5 w-5 h-5 inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-opacity ${selected ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"}`}
+                    style={{
+                      color: "var(--text-muted)",
+                      borderRadius: "var(--radius-sm, 4px)",
+                    }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {liveUrl && (
+          <button
+            type="button"
+            title={tr("在预览面板中打开 {v0}", { v0: liveUrl })}
+            aria-label={tr("在预览面板中打开 {v0}", { v0: liveUrl })}
+            onClick={() => {
+              openWebInBrowser(liveUrl);
+            }}
+            className="inline-flex items-center gap-1.5 max-w-52 h-7 px-2 cursor-pointer"
+            style={{
+              border: "1px solid var(--border-subtle)",
+              borderRadius: "var(--radius-sm, 4px)",
+              background: "var(--surface-raised)",
+              color: "var(--text-primary)",
+              fontSize: "var(--text-xs)",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            <Globe size={14} />
+            <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+              {liveUrl.replace(/^https?:\/\//, "")}
+            </span>
+            <ExternalLink size={14} />
+          </button>
+        )}
+        <IconButton label={tr("刷新终端列表")} onClick={() => { setRemovalFeedback(null); void refreshSessions(); }}>
+          <RotateCcw size={14} />
+        </IconButton>
+        <IconButton label={tr("复制选中的终端文本")} onClick={() => void copyTerminalSelection()}>
+          <Copy size={14} />
+        </IconButton>
+        <IconButton label={tr("清空终端")} onClick={() => void clearActiveTerminal()}>
+          <Square size={14} />
+        </IconButton>
+        {activeSession?.status === "exited" && (
+          <IconButton
+            label={tr("重新启动终端")}
+            onClick={() => void restartSession(activeSession.id)}
+          >
+            <RotateCcw size={14} />
+          </IconButton>
+        )}
+      </div>
+      {(statusMessage || removalMessage) && <div role="status" style={{ color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>{removalMessage && <span>{removalMessage}</span>}{removalMessage && statusMessage ? " " : null}{statusMessage}</div>}
+      <div
+        ref={containerRef}
+        className="flex-1 w-full min-h-0 p-0.5 overflow-hidden"
+        style={{
+          background: terminalTheme(resolvedTheme === "light").background,
+          border: "1px solid var(--border-subtle)",
+          borderRadius: "var(--radius-sm, 4px)",
+        }}
+      />
+    </div>
+  );
+};
+
+const IconButton = ({
+  children,
+  label,
+  onClick,
+}: {
+  children: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) => (
+  <button
+    type="button"
+    onClick={onClick}
+    onMouseDown={(event) => event.stopPropagation()}
+    title={label}
+    aria-label={label}
+    className="bg-transparent border border-transparent p-0 min-w-7 h-7 cursor-pointer inline-flex items-center justify-center"
+    style={{
+      borderRadius: "var(--radius-sm, 6px)",
+      fontSize: "var(--text-xs)",
+      color: "var(--text-muted)",
+    }}
+  >
+    {children}
+  </button>
+);

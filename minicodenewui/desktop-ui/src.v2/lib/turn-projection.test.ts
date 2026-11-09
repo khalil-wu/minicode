@@ -1,0 +1,572 @@
+import { describe, expect, it } from "vitest";
+import type { ChatMessage, ContentBlock } from "../stores/types";
+import { projectTurn } from "./turn-projection";
+import { projectMessagesToTurns } from "../chat/chatSurfaceState";
+import { projectChatTurnToAgentLoop } from "../agent-loop/projection/project-turn";
+
+const toolBlock = (overrides: Record<string, unknown> = {}): ContentBlock => ({
+  type: "tool_call",
+  record: {
+    id: "tool-1",
+    name: "custom_tool",
+    args: {},
+    status: "success",
+    startedAt: 10,
+    ...overrides,
+  },
+});
+
+const streamingAssistantMessage = (id: string, blocks: ContentBlock[]): ChatMessage => ({
+  id,
+  role: "assistant",
+  content: "",
+  blocks,
+  artifacts: [],
+  timestamp: 1,
+  isStreaming: true,
+});
+
+describe("projectTurn explicit event contract", () => {
+  it("projects real delegated identities instead of routine agent polling, while retaining standalone task output", () => {
+    const blocks = [
+      toolBlock({ id: "spawn", name: "task", resultKind: "subagent", summary: "Background subagent subagent-a1b2 started." }),
+      toolBlock({ id: "exec-poll", name: "tool_exec", outputPreview: '{"cell_id":"poll-cell","status":"completed","output":["Agent is running"]}' }),
+      toolBlock({ id: "poll", name: "task_status", resultKind: "subagent", args: { subagent_id: "subagent-a1b2", wait_seconds: 45 },
+        callSource: { kind: "code_mode", parent_call_id: "exec-poll", cell_id: "poll-cell", runtime_call_id: "1" } }),
+      toolBlock({ id: "failed-poll", name: "task_status", args: { subagent_id: "subagent-a1b2" }, status: "failed", summary: "Child snapshot is unavailable" }),
+      toolBlock({ id: "standalone-poll", name: "task_status", args: { subagent_id: "subagent-ffff" }, summary: "Only recorded result" }),
+      toolBlock({ id: "shared-output", name: "task_output", resultKind: "subagent", args: { task_id: "task-real", content: "Actual finding" }, summary: "Saved actual finding" }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["spawn", "failed-poll", "standalone-poll", "shared-output"]);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(6);
+    expect((blocks[2] as Extract<ContentBlock, { type: "tool_call" }>).record.name).toBe("task_status");
+  });
+
+  it.each(["failed", "blocked", "timeout"])("keeps one actual %s leaf instead of duplicate execute/wait errors", (status) => {
+    const failure = "Permission denied by the tool";
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", status, outputPreview: JSON.stringify({ cell_id: "cell", status: "failed", error: failure }) }),
+      toolBlock({ id: "leaf", name: "read_file", status, summary: failure,
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: "1" } }),
+      toolBlock({ id: "wait", name: "tool_wait", status, args: { cell_id: "cell" }, outputPreview: JSON.stringify({ cell_id: "cell", status: "failed", error: failure, output: [] }) }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["leaf"]);
+    expect(projectTurn(blocks).hasFailure).toBe(true);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(3);
+  });
+
+  it("retains an independent script failure after a successful nested read", () => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", status: "failed", outputPreview: '{"cell_id":"cell","status":"failed","error":"TypeError: report is undefined"}' }),
+      toolBlock({ id: "leaf", name: "read_file", summary: "Read actual data",
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: "1" } }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["exec", "leaf"]);
+    expect(projectTurn(blocks).hasFailure).toBe(true);
+  });
+  it("shows composed leaf evidence without repeating successful script receipts", () => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec" }),
+      toolBlock({ id: "leaf", name: "read_file", callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell-1", runtime_call_id: "1" } }),
+      toolBlock({ id: "wait", name: "tool_wait", args: { cell_id: "cell-1" } }),
+      toolBlock({ id: "standalone", name: "tool_exec", outputPreview: '{"cell_id":"standalone-cell","status":"completed","output":["actual result"]}' }),
+      toolBlock({ id: "failed", name: "tool_exec", status: "failed", outputPreview: '{"cell_id":"failed-cell","status":"failed","error":"permission denied"}' }),
+    ];
+    expect(projectTurn(blocks).activityItems.flatMap(item => item.records?.map(record => record.id) ?? []))
+      .toEqual(["leaf", "failed"]);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(5);
+  });
+  it.each([
+    { cell_id: "cell", status: "completed", output: ["computed 42"] },
+    { cell_id: "cell", status: "completed", output: ['{"content":"file bytes","is_error":false}'], output_tool_call_ids: ["leaf"] },
+    { cell_id: "cell", status: "completed", artifact_id: "full-receipt", output_preview: '{"content":"file bytes... [truncated; full output in artifact] ...end"}' },
+    { cell_id: "cell", status: "running", output: ["Agent is running"], pending_tools: ["read_file"] },
+  ])("keeps execute and wait model receipts out of the trace regardless of truncation and forwarding (%j)", (receipt) => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", outputPreview: JSON.stringify(receipt) }),
+      toolBlock({ id: "leaf", name: "read_file", summary: "file bytes",
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: "1" } }),
+      toolBlock({ id: "wait", name: "tool_wait", args: { cell_id: "cell" }, outputPreview: JSON.stringify(receipt) }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["leaf"]);
+    expect(projectTurn([blocks[0]]).activityItems).toEqual([]);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(3);
+    expect(blocks[0]).toMatchObject({ type: "tool_call", record: { outputPreview: JSON.stringify(receipt) } });
+  });
+  it("projects a real script failure without making successful console output a second transcript item", () => {
+    const blocks = [toolBlock({ id: "exec", name: "tool_exec", status: "failed", outputPreview: JSON.stringify({
+      cell_id: "cell", status: "failed", output: ["computed 42"], error: "TypeError: report is undefined",
+    }) })];
+    const projection = projectTurn(blocks);
+    expect(projection.activityItems).toHaveLength(1);
+    expect(projection.activityItems[0]).toMatchObject({ title: "运行", outputText: "TypeError: report is undefined", hasFailure: true });
+    expect(projection.activityItems[0].records?.[0].outputPreview).toContain("computed 42");
+  });
+  it("keeps a real failed cell diagnostic when the runtime truncated it into an artifact preview", () => {
+    const outputPreview = JSON.stringify({ cell_id: "cell", status: "failed", artifact_id: "full-failure",
+      output_preview: "TypeError: report is undefined\n... [truncated; full output in artifact] ...\nlast diagnostic" });
+    const projection = projectTurn([toolBlock({ id: "exec", name: "tool_exec", status: "failed", outputPreview })]);
+    expect(projection.activityItems).toHaveLength(1);
+    expect(projection.activityItems[0]).toMatchObject({ title: "运行", outputText: expect.stringContaining("TypeError"), hasFailure: true });
+    expect(projection.activityItems[0].records?.[0].outputPreview).toBe(outputPreview);
+  });
+  it.each(["running", "pending", "success"])("projects real nested file/command/search work without a %s execute wrapper", (status) => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec", status }),
+      ...["read_file", "run_command", "grep_files"].map((name, index) => toolBlock({
+        id: `leaf-${index}`, name, status: "success", args: { file_path: "source.py", command: "python verify.py", pattern: "total" },
+        callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell", runtime_call_id: `${index}` },
+      })),
+      toolBlock({ id: "wait", name: "tool_wait", status, args: { cell_id: "cell" } }),
+    ];
+    expect(projectTurn(blocks).activityItems.map(item => item.id)).toEqual(["leaf-0", "leaf-1", "leaf-2"]);
+  });
+  it("keeps a real wrapper error while hiding provider and execute pipeline status", () => {
+    const projection = projectTurn([
+      { type: "progress", id: "child:provider", stage: "status", phase: "model", label: "provider", providerState: "connecting", status: "running", message: "连接供应商", timestamp: 1 },
+      { type: "progress", id: "code-status", stage: "tool", toolName: "tool_exec", status: "running", message: "正在执行代码", timestamp: 1 },
+      toolBlock({ id: "actual-failure", name: "tool_exec", status: "failed", outputPreview: '{"cell_id":"failed","status":"failed","error":"Connection reset while reading file"}' }),
+    ]);
+    expect(projection.activityItems.map(item => item.id)).toEqual(["actual-failure"]);
+    expect(projection.hasFailure).toBe(true);
+    expect(projection.activityItems[0].records?.[0].outputPreview).toContain("Connection reset");
+  });
+  it("uses only a completed agent-message item as the final answer", () => {
+    const projection = projectTurn([
+      {
+        type: "process",
+        id: "inspect",
+        itemKind: "process_text",
+        content: "Inspecting files",
+        status: "completed",
+        timestamp: 1,
+      },
+      {
+        type: "text",
+        itemId: "agent-message",
+        content: "Implemented the change.",
+        status: "completed",
+        source: "model_final",
+        isStreaming: false,
+      },
+    ]);
+
+    expect(projection.finalAnswer).toBe("Implemented the change.");
+    expect(projection.activityItems).toEqual([
+      expect.objectContaining({ kind: "processNote", content: "Inspecting files" }),
+    ]);
+  });
+
+  it("uses tool-owned activity metadata without inspecting the tool name", () => {
+    const projection = projectTurn([
+      toolBlock({
+        name: "looks_like_web_search_but_is_not_classified",
+        resultKind: "command",
+        activityKind: "commandExecution",
+        displayHint: "Run check",
+      }),
+    ]);
+
+    expect(projection.activityItems).toEqual([
+      expect.objectContaining({ kind: "commandExecution", title: "Run check", status: "completed" }),
+    ]);
+  });
+
+  it("keeps debug tool evidence out of the timeline unless Inspector projection is requested", () => {
+    const block = toolBlock({
+      name: "tool_search",
+      displayHint: "Find tools",
+      displaySummary: "Found 4 tools",
+      visibility: "debug",
+    });
+
+    expect(projectTurn([block]).activityItems).toEqual([]);
+    expect(projectTurn([block], { includeHiddenActivity: true }).activityItems).toEqual([
+      expect.objectContaining({ id: "tool-1", kind: "genericTool" }),
+    ]);
+  });
+
+  it("does not render a legacy progress mirror beside its typed tool lifecycle", () => {
+    const projection = projectTurn([
+      toolBlock({ id: "read-1", name: "read_file", status: "running" }),
+      {
+        type: "progress",
+        id: "tool:read-1",
+        stage: "tool",
+        status: "running",
+        message: "Running read_file",
+        toolCallId: "read-1",
+      },
+    ]);
+
+    expect(projection.activityItems).toHaveLength(1);
+    expect(projection.activityItems[0]).toEqual(expect.objectContaining({ id: "read-1" }));
+  });
+
+  it("keeps unclassified tools generic", () => {
+    const projection = projectTurn([toolBlock({ name: "web_search_like_name" })]);
+
+    expect(projection.activityItems[0]).toEqual(expect.objectContaining({ kind: "genericTool" }));
+  });
+
+  it("normalizes completion-side result metadata when the start omitted activity_kind", () => {
+    const projection = projectTurn([toolBlock({
+      name: "read_file",
+      resultKind: "file",
+      displaySummary: "已读取 README.md",
+      inputSummary: "README.md",
+    })]);
+
+    expect(projection.activityItems[0]).toEqual(expect.objectContaining({ kind: "fileRead" }));
+  });
+
+  it("classifies canonical built-in names when an older event omits projection metadata", () => {
+    expect(projectTurn([toolBlock({ name: "read_file" })]).activityItems[0]).toEqual(
+      expect.objectContaining({ kind: "fileRead" }),
+    );
+    expect(projectTurn([toolBlock({ name: "run_command" })]).activityItems[0]).toEqual(
+      expect.objectContaining({ kind: "commandExecution" }),
+    );
+    expect(projectTurn([toolBlock({ name: "list_files", activityKind: "genericTool", resultKind: "generic" })]).activityItems[0]).toEqual(
+      expect.objectContaining({ kind: "workspaceList" }),
+    );
+    expect(projectTurn([toolBlock({ name: "grep_files", activityKind: "genericTool", resultKind: "file" })]).activityItems[0]).toEqual(
+      expect.objectContaining({ kind: "workspaceSearch" }),
+    );
+  });
+
+  it("keeps browser activity distinct from the generic tool fallback", () => {
+    expect(projectTurn([toolBlock({
+      name: "browser_control",
+      resultKind: "browser",
+      activityKind: "genericTool",
+      args: { action: "screenshot" },
+    })]).activityItems[0]).toEqual(
+      expect.objectContaining({ kind: "browser" }),
+    );
+    expect(projectTurn([toolBlock({
+      name: "browser_control",
+      resultKind: "preview",
+    })]).activityItems[0]).toEqual(
+      expect.objectContaining({ kind: "browser" }),
+    );
+  });
+
+  it("repairs a stale non-browser activity label when the record is a screenshot", () => {
+    expect(projectTurn([toolBlock({
+      name: "browser_control",
+      args: { action: "screenshot" },
+      activityKind: "fileRead",
+      resultKind: "browser",
+      artifactId: "artifact-screen",
+      artifactKind: "image",
+      artifactMediaType: "image/png",
+    })]).activityItems[0]).toEqual(
+      expect.objectContaining({ kind: "browser" }),
+    );
+  });
+
+  it("does not project model-facing tool result markup into the timeline summary", () => {
+    const projection = projectTurn([toolBlock({
+      displaySummary: "已搜索网页",
+      inputSummary: "2026 年新闻",
+      summary: '<untrusted_tool_result source="web_search">raw model context</untrusted_tool_result>',
+    })]);
+
+    expect(projection.activityItems[0]).toEqual(expect.objectContaining({
+      title: "已搜索网页",
+      summary: "2026 年新闻",
+    }));
+  });
+
+  it("drops standalone protocol tool tokens that duplicate typed tool activity", () => {
+    const projection = projectTurn([
+      {
+        type: "process",
+        id: "leaked-search-name",
+        itemKind: "process_text",
+        content: "web_search",
+        source: "commentary",
+        status: "completed",
+        timestamp: 1,
+      },
+      { type: "thinking", content: "`web_fetch`", source: "model_preamble" },
+      toolBlock({ id: "search-1", name: "web_search", activityKind: "webSearch" }),
+      toolBlock({ id: "fetch-1", name: "web_fetch", activityKind: "webSearch" }),
+    ]);
+
+    expect(projection.activityItems.map((item) => item.id)).toEqual(["search-1", "fetch-1"]);
+  });
+
+  it("drops bare punctuation emitted as model pre-tool narration", () => {
+    const projection = projectTurn([
+      {
+        type: "process",
+        id: "placeholder",
+        itemKind: "process_text",
+        content: "...",
+        source: "model_preamble",
+        status: "completed",
+        timestamp: 1,
+      },
+      toolBlock({ id: "real-tool", name: "read_file", activityKind: "fileRead" }),
+    ]);
+
+    expect(projection.activityItems.map((item) => item.id)).toEqual(["real-tool"]);
+  });
+
+  it.each(["pending", "commentary", "model_preamble", "post_tool"] as const)("does not project %s punctuation as streaming or restored narration", (source) => {
+    for (const isStreaming of [true, false]) {
+      const projection = projectTurn([
+        { type: "text", itemId: "placeholder", content: "...\n…", source, isStreaming },
+        toolBlock({ id: "read", name: "read_file", activityKind: "fileRead" }),
+        { type: "text", itemId: "finding", content: "发现 README 与实现不符，继续核对备份。", source, isStreaming },
+      ]);
+      expect(projection.activityItems).toHaveLength(2);
+      expect(projection.activityItems[0].id).toBe("read");
+      expect(projection.activityItems[1].content).toBe("发现 README 与实现不符，继续核对备份。");
+    }
+  });
+
+  it("keeps normal process prose that mentions a tool name", () => {
+    const projection = projectTurn([
+      {
+        type: "process",
+        id: "search-note",
+        itemKind: "process_text",
+        content: "我会用 web_search 核对官方来源。",
+        source: "commentary",
+        status: "completed",
+        timestamp: 1,
+      },
+      toolBlock({ name: "web_search", activityKind: "webSearch" }),
+    ]);
+
+    expect(projection.activityItems[0]).toEqual(expect.objectContaining({
+      id: "search-note",
+      content: "我会用 web_search 核对官方来源。",
+    }));
+  });
+
+  it("maps typed thinking and process blocks directly", () => {
+    const projection = projectTurn([
+      { type: "thinking", content: "Provider reasoning", source: "provider", visibility: "debug" },
+      {
+        type: "process",
+        id: "process-1",
+        itemKind: "status",
+        content: "Waiting for approval",
+        status: "running",
+        visibility: "timeline",
+        timestamp: 20,
+      },
+    ]);
+
+    expect(projection.activityItems.map((item) => item.kind)).toEqual([
+      "processNote",
+    ]);
+    expect(projection.activityItems[0]?.status).toBe("running");
+  });
+
+  it("does not restore settled provider reasoning from legacy transcripts", () => {
+    const blocks: ContentBlock[] = [
+      { type: "thinking", content: "raw provider reasoning", source: "provider", visibility: "debug" },
+    ];
+
+    expect(projectTurn(blocks).activityItems).toEqual([]);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toEqual([]);
+  });
+
+  it("keeps provider summaries after raw reasoning settles", () => {
+    const blocks: ContentBlock[] = [
+      {
+        type: "thinking",
+        content: "temporary raw body",
+        source: "provider",
+        providerReasoningType: "reasoning_content",
+      },
+      {
+        type: "thinking",
+        content: "durable summary",
+        source: "provider",
+        providerReasoningType: "reasoning_summary_text",
+      },
+    ];
+
+    expect(projectTurn(blocks).activityItems).toEqual([
+      expect.objectContaining({
+        content: "durable summary",
+        providerReasoningType: "reasoning_summary_text",
+        status: "completed",
+      }),
+    ]);
+    expect(projectTurn(blocks, { isThinkingStreaming: true }).activityItems).toEqual([
+      expect.objectContaining({ content: "durable summary", status: "running" }),
+    ]);
+  });
+
+  it("marks only the latest reasoning block as streaming", () => {
+    const projection = projectTurn([
+      { type: "thinking", content: "First reasoning", source: "provider" },
+      {
+        type: "process",
+        id: "commentary",
+        itemKind: "process_text",
+        content: "Checking files",
+        status: "completed",
+        timestamp: 1,
+      },
+      { type: "thinking", content: "Second reasoning", source: "provider" },
+    ], { isThinkingStreaming: true });
+
+    expect(projection.activityItems.map((item) => item.status)).toEqual(["completed", "running"]);
+  });
+
+  it("keeps commentary in the ordered process trace before the following tool", () => {
+    const blocks: ContentBlock[] = [
+      { type: "thinking", content: "Reasoning", source: "provider" },
+      {
+        type: "text",
+        itemId: "commentary-1",
+        content: "Checking the three implementations.",
+        source: "commentary",
+        status: "in_progress",
+        isStreaming: true,
+      },
+      toolBlock({ id: "tool-after-commentary", status: "running" }),
+    ];
+
+    const projection = projectTurn(blocks, { isStreaming: true });
+
+    expect(projection.activityItems.map((item) => item.id)).toEqual(["commentary-1", "tool-after-commentary"]);
+    // Provisional text is not an authoritative answer either.
+    expect(projection.finalAnswer).toBe("");
+
+    const [turn] = projectMessagesToTurns(
+      [streamingAssistantMessage("assistant-commentary", blocks)],
+      true,
+    );
+    expect(turn?.activeCell).toBeNull();
+    expect(turn?.committedCells.map((cell) => cell.id)).toEqual(["commentary-1", "tool-after-commentary"]);
+  });
+
+  it("renders explicitly labelled streaming text as the live answer cell", () => {
+    const blocks: ContentBlock[] = [{
+      type: "text",
+      itemId: "final-1",
+      content: "Done.",
+      source: "model_final",
+      status: "in_progress",
+      isStreaming: true,
+    }];
+
+    const projection = projectTurn(blocks, { isStreaming: true });
+
+    expect(projection.activityItems).toEqual([]);
+    expect(projection.finalAnswer).toBe("");
+
+    const [turn] = projectMessagesToTurns(
+      [streamingAssistantMessage("assistant-final", blocks)],
+      true,
+    );
+    expect(turn?.activeCell).toMatchObject({
+      kind: "streaming_assistant_tail",
+      id: "final-1",
+      partialMarkdown: "Done.",
+    });
+
+    const agentLoop = projectChatTurnToAgentLoop(turn!);
+    expect(agentLoop.activeAnswerCell?.partialMarkdown).toBe("Done.");
+    expect(agentLoop.answerCell).toMatchObject({
+      kind: "assistant_markdown",
+      markdownSource: "Done.",
+      isStreaming: true,
+    });
+    expect(agentLoop.answerIsStreaming).toBe(true);
+  });
+
+  it("uses the authoritative terminal status without fabricating an answer", () => {
+    const projection = projectTurn([], { terminalStatus: "failed" });
+
+    expect(projection.status).toBe("failed");
+    expect(projection.hasFailure).toBe(true);
+    expect(projection.finalAnswer).toBe("");
+  });
+
+  it("does not project any provider request lifecycle as a work item", () => {
+    const projection = projectTurn([
+      {
+        type: "progress",
+        id: "provider:request-1",
+        stage: "status",
+        phase: "model",
+        status: "completed",
+        message: "提供商响应完成",
+        providerState: "completed",
+        retryAttempt: 0,
+        maxRetries: 3,
+        visibility: "timeline",
+        timestamp: 100,
+      },
+      {
+        type: "progress",
+        id: "provider:request-2",
+        stage: "status",
+        phase: "model",
+        status: "running",
+        message: "模型正在响应",
+        providerState: "responding",
+        retryAttempt: 0,
+        maxRetries: 3,
+        visibility: "timeline",
+        timestamp: 105,
+      },
+      {
+        type: "progress",
+        id: "provider:request-3",
+        stage: "status",
+        phase: "recover",
+        status: "running",
+        message: "连接中断，正在重连",
+        providerState: "reconnecting",
+        retryAttempt: 1,
+        maxRetries: 3,
+        visibility: "timeline",
+        timestamp: 107,
+      },
+      {
+        type: "progress",
+        id: "provider:mcp-tool",
+        stage: "tool",
+        phase: "tool",
+        status: "completed",
+        message: "MCP tool completed",
+        timestamp: 110,
+      },
+    ]);
+
+    expect(projection.activityItems.map((item) => item.id)).toEqual(["provider:mcp-tool"]);
+  });
+
+  it("does not infer a final answer from an untyped text block", () => {
+    const projection = projectTurn([{ type: "text", content: "Legacy answer" }]);
+
+    expect(projection.finalAnswer).toBe("");
+  });
+
+  it("never deletes an authoritative final answer just because it names a tool", () => {
+    const projection = projectTurn([
+      toolBlock({ name: "web_search", activityKind: "webSearch" }),
+      {
+        type: "text",
+        itemId: "agent-message",
+        content: "web_search",
+        status: "completed",
+        source: "model_final",
+        isStreaming: false,
+      },
+    ]);
+
+    expect(projection.finalAnswer).toBe("web_search");
+  });
+});

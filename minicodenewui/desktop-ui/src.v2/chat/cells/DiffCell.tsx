@@ -1,0 +1,227 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronUp, FileDiff, RotateCcw } from "lucide-react";
+import type { DiffCellState, DiffFileChange } from "./cellTypes";
+import { diffCellTitle, diffFileChangeType } from "./diffCellLabels";
+import { useAppStore } from "../../stores";
+import { RollingNumber } from "../../components/RollingNumber";
+import { workspaceRelativeDiffPath } from "../diffPaths";
+import { initialDiffReviewPatch } from "../diffReviewState";
+import { commandResultSucceeded, sendClientCommandAwaitResult } from "../../protocol/ws-outbox";
+import { pushToast } from "../../overlays/ToastContainer";
+import { showConfirm } from "../../overlays/DialogService";
+import { normalizeWorkspaceRoot, workspaceRootsEqual } from "../../lib/workspace-path";
+import "./cells.css";
+import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { loadMessageTurnDiff } from "../loadMessageTurnDiff";
+import { summarizeTurnDiff } from "../../lib/turn-diff";
+
+export function DiffCell({ cell, showActions = true, allowRevert = true, conversationId, workspaceRoot }: { cell: DiffCellState; showActions?: boolean; allowRevert?: boolean; conversationId?: string; workspaceRoot?: string }) {
+  const [showAllFiles, setShowAllFiles, userChangedFiles] = useTranscriptReadingPreference(`diff-files:${cell.id}`, false);
+  const [reverting, setReverting] = useState(false);
+  const [reverted, setReverted] = useState(false);
+  const [loadingDiff, setLoadingDiff] = useState(false);
+  const [diffError, setDiffError] = useState("");
+  const diffRequest = useRef<AbortController | null>(null);
+  const activeWorkspace = useAppStore((state) => state.workingDirectory);
+  const activeConversationId = useAppStore((state) => state.conversationId);
+  const workingDirectory = workspaceRoot ?? activeWorkspace;
+  const ownerConversationId = conversationId ?? activeConversationId;
+  const visibleScope = useRef({ id: cell.id, conversationId: ownerConversationId, workspaceRoot: workingDirectory });
+  visibleScope.current = { id: cell.id, conversationId: ownerConversationId, workspaceRoot: workingDirectory };
+  useEffect(() => {
+    setReverting(false);
+    setReverted(false);
+    setLoadingDiff(false);
+    setDiffError("");
+    return () => { diffRequest.current?.abort(); diffRequest.current = null; };
+  }, [cell.id, ownerConversationId, activeConversationId, normalizeWorkspaceRoot(workingDirectory)]);
+  const files = useMemo(() => cell.files.map((file) => ({
+    ...file,
+    path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
+    oldPath: file.oldPath
+      ? workspaceRelativeDiffPath(file.oldPath, workingDirectory) || file.oldPath
+      : undefined,
+  })), [cell.files, workingDirectory]);
+  const visibleFiles = showAllFiles ? files : files.slice(0, 3);
+  const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
+  const canRevert = !cell.deferredDiff && !cell.truncated && cell.source !== "workspace_snapshot"
+    && files.length > 0 && files.every((file) => file.patch && !file.isTruncated);
+
+  const showDiffReview = (reviewFiles: DiffFileChange[], path?: string, truncated = cell.truncated) => {
+    const reviewableFiles = reviewFiles.filter((file) => Boolean(file.patch));
+    if (reviewableFiles.length === 0) return;
+    const selectedPath = path ?? reviewableFiles[0].path;
+    useAppStore.setState({ gitReviewRequest: null });
+    useAppStore.getState().setDiffReviewState({
+      requestId: `diff-cell-${cell.id}`,
+      conversationId: ownerConversationId ?? undefined,
+      workspaceRoot: workingDirectory,
+      turnId: cell.deferredDiff?.turnId,
+      messageId: cell.deferredDiff?.messageId,
+      toolName: cell.source === "workspace_snapshot" ? "工作区比较" : "助手修改",
+      truncated,
+      diff: initialDiffReviewPatch(reviewableFiles.map((file) => ({
+        path: file.path,
+        patch: file.patch ?? "",
+        additions: file.additions,
+        deletions: file.deletions,
+      })), selectedPath),
+      files: reviewableFiles.map((file) => ({
+        path: file.path,
+        patch: file.patch ?? "",
+        additions: file.additions,
+        deletions: file.deletions,
+      })),
+      selectedPath,
+      status: "viewing",
+      mode: "view",
+      fileDecisions: {},
+      lineComments: [],
+    });
+    useAppStore.getState().setRightStackTab("diff");
+  };
+
+  const openDiffReview = async (path?: string) => {
+    if (!cell.deferredDiff) { showDiffReview(files, path); return; }
+    if (diffRequest.current) return;
+    const request = new AbortController();
+    diffRequest.current = request;
+    setLoadingDiff(true);
+    setDiffError("");
+    try {
+      const loaded = await loadMessageTurnDiff(cell.deferredDiff, request.signal);
+      if (!loaded || request.signal.aborted) return;
+      const summary = summarizeTurnDiff(loaded);
+      if (!summary) throw new Error("这一轮没有可用的历史差异");
+      showDiffReview(summary.files.map((file) => ({ ...file,
+        path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
+        isTruncated: loaded.truncated,
+      })), path, loaded.truncated);
+    } catch (error) {
+      if (request.signal.aborted) return;
+      const message = error instanceof Error ? error.message : "无法加载历史差异";
+      setDiffError(message);
+      pushToast(message, "error");
+    } finally {
+      if (diffRequest.current === request) { diffRequest.current = null; setLoadingDiff(false); }
+    }
+  };
+
+  const revertDiffFiles = async () => {
+    const isSameCell = () => {
+      const scope = visibleScope.current;
+      return scope.id === cell.id && scope.conversationId === ownerConversationId
+        && workspaceRootsEqual(scope.workspaceRoot, workingDirectory);
+    };
+    const isCurrent = () => {
+      const state = useAppStore.getState();
+      return isSameCell() && state.conversationId === ownerConversationId
+        && workspaceRootsEqual(state.workingDirectory, workingDirectory);
+    };
+    if (!canRevert || reverting || reverted || !isCurrent()) return;
+    const patch = files.map((file) => file.patch).join("\n");
+    const ownerTitle = useAppStore.getState().conversations.find((conversation) => conversation.id === ownerConversationId)?.title || "原任务";
+    setReverting(true);
+    try {
+      const confirmed = await showConfirm({
+        title: "撤销更改",
+        message: `撤销 ${ownerTitle} 中显示的 ${files.length} 个文件更改？\n工作区：${workingDirectory}`,
+        confirmLabel: "撤销",
+        cancelLabel: "取消",
+        danger: true,
+      });
+      if (!confirmed) return;
+      if (!isCurrent()) {
+        pushToast(`任务或工作区已切换，未撤销 ${ownerTitle} 中的更改。返回原任务后重试。`, "info", 5000);
+        return;
+      }
+      const result = await sendClientCommandAwaitResult({
+        type: "diff.git_revert_patch",
+        conversation_id: ownerConversationId,
+        workspace_root: workingDirectory,
+        patch,
+        confirmed: true,
+      }, "diff.git_revert_patch");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "撤销更改失败");
+      if (isSameCell()) setReverted(true);
+      if (isCurrent()) useAppStore.getState().requestGitChanges();
+      pushToast(`${ownerTitle} 中的更改已撤销。`, "success", 3000);
+    } catch (error) {
+      pushToast(`${ownerTitle} 撤销失败：${error instanceof Error ? error.message : "撤销更改失败"}`, "error", 5000);
+    } finally {
+      if (isSameCell()) setReverting(false);
+    }
+  };
+
+  return (
+    <div className="diff-cell">
+      <div className="diff-cell-header-row">
+        <div className="diff-cell-header-button diff-cell-header-static">
+          <span className="diff-cell-icon-tile" aria-hidden="true"><FileDiff size={18} /></span>
+          <span className="diff-cell-heading">
+            <span className="diff-cell-title" title={cell.historical ? "后续操作可能改变文件；这里展示编辑完成时的记录。" : undefined}>{diffCellTitle(cell)} {cell.files.length} 个文件</span>
+            <span className="diff-cell-stats diff-cell-header-stats">
+              <RollingNumber value={cell.summary.added} prefix="+" className="diff-cell-added" />
+              <RollingNumber value={cell.summary.deleted} prefix="-" className="diff-cell-removed" />
+            </span>
+          </span>
+        </div>
+        {showActions && !cell.historical && (
+          <div className="diff-cell-header-actions">
+            {allowRevert && activeConversationId === ownerConversationId && workspaceRootsEqual(activeWorkspace, workingDirectory) && <button
+              type="button"
+              className="diff-cell-action-button diff-cell-action-button-danger"
+              onClick={() => void revertDiffFiles()}
+              disabled={!canRevert || reverting || reverted}
+              title="撤销这些更改"
+            >
+              <span>{reverted ? "已撤销" : reverting ? "正在撤销" : "撤销"}</span>
+              <RotateCcw size={14} aria-hidden="true" />
+            </button>}
+            <button
+              type="button"
+              className="diff-cell-action-button diff-cell-action-button-accent"
+              onClick={() => void openDiffReview()}
+              disabled={loadingDiff || (!cell.deferredDiff && !files.some((file) => Boolean(file.patch)))}
+              title="在审核面板查看更改"
+            >
+              <span>{loadingDiff ? "正在加载差异…" : "查看变更"}</span>
+            </button>
+          </div>
+        )}
+      </div>
+      {cell.truncated && <span className="diff-cell-history-note">不完整历史Diff：保存的差异已截断，无法撤销。</span>}
+      {diffError && <span className="diff-cell-history-error" role="alert">{diffError}</span>}
+      <div className="diff-cell-files">
+        {visibleFiles.map((file, index) => <DiffFileSection key={file.path || index} file={file} disabled={loadingDiff}
+          onOpen={showActions && (file.patch || cell.deferredDiff) ? () => void openDiffReview(file.path) : undefined} />)}
+      </div>
+      {files.length > 3 && (
+        <button
+          type="button"
+          className="diff-cell-more-files"
+          aria-expanded={showAllFiles}
+          onClick={() => { userChangedFiles.current = true; setShowAllFiles((value) => !value); }}
+        >
+          <span>{showAllFiles ? "收起文件列表" : `再显示 ${hiddenFileCount} 个文件`}</span>
+          {showAllFiles ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function DiffFileSection({ file, onOpen, disabled }: { file: DiffFileChange; onOpen?: () => void; disabled?: boolean }) {
+  const changeType = diffFileChangeType(file);
+  const displayPath = changeType === "renamed" && file.oldPath
+    ? `${file.oldPath.split(/[\\/]/).pop()} → ${file.path.split(/[\\/]/).pop()}`
+    : file.path;
+  return <section className="diff-file-section">
+    <div className="diff-file-section-header">
+      {onOpen
+        ? <button type="button" className="diff-cell-file-path" title={file.path} onClick={onOpen} disabled={disabled}>{displayPath}</button>
+        : <span className="diff-cell-file-path" title={file.path}>{displayPath}</span>}
+      <span className="diff-cell-stats"><RollingNumber value={file.additions} prefix="+" className="diff-cell-added" /><RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" /></span>
+    </div>
+  </section>;
+}

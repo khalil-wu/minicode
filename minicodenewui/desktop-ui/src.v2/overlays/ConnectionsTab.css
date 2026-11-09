@@ -1,0 +1,53 @@
+.remote-connections-heading, .remote-connection-dialog header, .remote-connection-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.remote-connections-heading h3, .remote-connection-dialog h3 { margin: 0; font: inherit; color: var(--text-primary); }
+.settings-row.remote-connection-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; }
+.remote-connection-row > svg { flex: 0 0 auto; color: var(--text-secondary); }
+.remote-connection-actions { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; }
+.remote-connection-status { color: var(--text-muted); white-space: nowrap; }
+.remote-connections-empty { display: grid; justify-items: center; padding: 28px 16px; gap: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); color: var(--text-secondary); }
+.remote-connections-empty-icon { display: flex; align-items: center; gap: 2px; color: var(--text-primary); }
+.remote-connections-empty p { margin: 0; }
+#root .remote-connections-empty .settings-action-button[data-primary="true"] { border-color: var(--accent-primary); background: var(--accent-primary); color: var(--text-on-accent); }
+.remote-connection-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 16px; background: var(--backdrop-strong); font-family: var(--font-ui); }
+.remote-connection-backdrop[data-dialog-variant="default"] { background: var(--dialog-overlay); }
+.remote-connection-dialog { display: grid; gap: 20px; width: min(460px, calc(100vw - 48px)); padding: 24px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); }
+.remote-connection-dialog label { display: grid; gap: 8px; }
+.remote-connection-dialog input { min-width: 0; width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: var(--mc-control-radius); background: var(--surface-soft); color: inherit; font: inherit; }
+.remote-connection-host-fields { display: grid; gap: 20px; }
+.remote-connection-color-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.remote-connection-details-marker { color: var(--text-secondary); }
+.remote-connection-color-trigger { min-width: 44px; justify-content: center; }
+.remote-connection-color-menu { min-width: 0 !important; display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 8px; }
+.remote-connection-color-menu [role="menuitemradio"] { justify-content: center; min-height: 32px !important; padding: 4px !important; }
+.remote-connection-color-menu .mc-menu-content > .flex-fill { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.remote-connection-color-menu [role="menuitemradio"] > .shrink-0:last-child { display: none !important; }
+.remote-connection-color-swatch { display: block; width: 24px; height: 24px; border-radius: var(--radius-full); color: var(--text-primary); }
+.remote-connection-color-swatch[data-selected="true"] { outline: 2px solid var(--text-secondary); outline-offset: 2px; }
+.remote-connection-dialog footer { justify-content: flex-end; }
+.remote-connection-dialog .settings-action-button { min-height: 36px; padding-inline: 14px; border-radius: var(--mc-control-radius); font-size: var(--mc-font-body); line-height: 1.2; }
+.remote-connection-error { overflow-wrap: anywhere; }
+.remote-connection-details { gap: 12px; }
+.remote-connection-details-actions { display: flex; align-items: center; gap: 4px; }
+.remote-connection-details-kind { display: inline-flex; align-items: center; justify-self: start; gap: 6px; height: 20px; padding-inline: 8px; border-radius: 999px; background: var(--surface-soft); color: var(--text-secondary); }
+.remote-connection-details-status { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+.remote-connection-details-status[data-connected="true"] { background: var(--state-success); }
+.remote-connection-details-fields { margin: 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
+.remote-connection-detail-row { display: flex; align-items: center; justify-content: space-between; min-height: 36px; padding: 8px 12px; gap: 12px; border-top: 1px solid var(--border-subtle); }
+.remote-connection-detail-row:first-child { border-top: 0; }
+.remote-connection-detail-row dt { flex-shrink: 0; color: var(--text-secondary); }
+.remote-connection-detail-row dd { min-width: 0; max-width: 80%; margin: 0; color: var(--text-primary); text-align: end; }
+.remote-connection-detail-value { display: block; max-width: 100%; overflow: hidden; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: end; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.remote-connection-discovery { max-height: calc(100dvh - 48px); }
+.remote-connection-discovery-list { height: 300px; min-height: 0; overflow-y: auto; }
+.remote-connection-discovery .remote-connection-discovery-row { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+.remote-connection-discovery-row > svg { color: var(--text-secondary); }
+.remote-connection-discovery-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-connection-discovery-row input { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--text-primary); cursor: pointer; }
+.remote-connection-discovery-row:has(input:disabled), .remote-connection-discovery-row input:disabled { cursor: not-allowed; }
+.remote-connection-discovery-empty { display: grid; place-items: center; height: 100%; margin: 0; color: var(--text-muted); }
+.remote-connection-discovery footer { gap: 12px; }
+.remote-connection-add-manually { flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; text-align: start; cursor: pointer; }
+.remote-connection-add-manually:hover { color: var(--text-primary); }
+.remote-connection-refreshing { animation: remote-connection-refresh 1s linear infinite; }
+@keyframes remote-connection-refresh { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { html:not([data-reduced-motion="false"]) .remote-connection-refreshing { animation: none; } }

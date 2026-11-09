@@ -1,0 +1,1843 @@
+/* @vitest-environment jsdom */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { StreamBuffer } from "../lib/stream-buffer";
+import type { ServerEvent } from "../protocol/events";
+import { useAppStore } from "../stores";
+import { getToolCallsFromMessage } from "../lib/content-blocks";
+import { handleChatStreamEvent } from "./chatStreamEvents";
+import { projectMessagesToTurns } from "./chatSurfaceState";
+import { pushToast } from "../overlays/ToastContainer";
+import { rejectClientCommandResult, sendClientCommand } from "../protocol/ws-outbox";
+import { resetPendingUserMessagesForTests } from "./sendChatMessage";
+import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
+import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
+
+vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), rejectClientCommandResult: vi.fn(() => false) }));
+vi.mock("./sendChatMessage", async load => ({ ...await load<typeof import("./sendChatMessage")>(), resetPendingUserMessagesForTests: vi.fn() }));
+
+const immediateBuffer = (
+  apply: (chunk: string, conversationId?: string, itemId?: string, metadata?: Record<string, unknown>, messageId?: string) => void,
+): StreamBuffer => ({
+  push: apply,
+  flush: vi.fn(),
+  destroy: vi.fn(),
+});
+
+const seedStreamingAssistant = () => {
+  useAppStore.setState({
+    conversationId: "conv-stream",
+    pendingConversationSwitchId: null,
+    pendingConversationCreateId: null,
+    messages: [{
+      id: "assistant-stream",
+      role: "assistant",
+      content: "",
+      blocks: [],
+      artifacts: [],
+      timestamp: 1,
+      isStreaming: true,
+    }],
+    conversationMessages: {},
+    conversationStreaming: { "conv-stream": true },
+    sideChats: {},
+    isStreaming: true,
+    lastUsage: null,
+    agentProgress: [],
+    inspectorEntries: [],
+    inspectorFocus: null,
+    plan: null,
+    todos: [],
+    pendingApproval: null,
+    approvalQueue: [],
+    pendingDiffReview: null,
+    diffReviewQueue: [],
+    diffReview: null,
+    pendingAskUser: null,
+    askUserQueue: [],
+  });
+};
+
+const handlers = {
+  textStreamBuffer: immediateBuffer((chunk, conversationId, itemId, _metadata, messageId) =>
+    useAppStore.getState().appendAgentMessageDelta(
+      itemId || "agent-message",
+      chunk,
+      conversationId,
+      messageId,
+    ),
+  ),
+  thinkingStreamBuffer: immediateBuffer((chunk, conversationId, _source, metadata, messageId) =>
+    useAppStore.getState().appendThinkingChunk(chunk, conversationId, metadata, messageId),
+  ),
+};
+
+const handle = (event: ServerEvent) =>
+  handleChatStreamEvent(event, "conv-stream", handlers);
+
+describe("handleChatStreamEvent typed lifecycle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(rejectClientCommandResult).mockReturnValue(false);
+    seedStreamingAssistant();
+  });
+
+  it("does not recreate confirmed deleted owners from late text, resume, terminal or run error events", async () => {
+    const owner = "deleted-chat-stream-owner";
+    await deleteConversationComposerDrafts(owner);
+    useAppStore.setState({ draft: "keep current draft", conversationMessages: {}, conversationStreaming: { "conv-stream": true } });
+    const before = useAppStore.getState();
+    for (const event of [
+      { type: "agent_message.delta", item_id: "late-text", delta: "late text" },
+      { type: "thinking_delta", content: "late thinking" },
+      { type: "stream_resume", turn_id: "late-turn", stream_status: "running", tool_calls_pending: [],
+        content_blocks: [{ type: "text", item_id: "late-text", content: "late restored text" }] },
+      { type: "done", status: "completed" },
+      { type: "error", message: "late provider error", recoverable: false },
+    ]) expect(handleChatStreamEvent({ ...event, conversation_id: owner, message_id: "late-answer" } as ServerEvent, owner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages).toBe(before.conversationMessages);
+    expect(useAppStore.getState().conversationStreaming).toBe(before.conversationStreaming);
+    expect(useAppStore.getState().messages).toBe(before.messages);
+    expect(useAppStore.getState().draft).toBe("keep current draft");
+    expect(useAppStore.getState().isStreaming).toBe(true);
+  });
+
+  it("abandons an incomplete resume after confirmed deletion while allowing an unlisted live owner to resume", async () => {
+    const owner = "deleted-paged-resume-owner";
+    const page = { type: "stream_resume" as const, conversation_id: owner, message_id: "paged-answer", turn_id: "paged-turn",
+      stream_status: "running", tool_calls_pending: [], snapshot_id: "paged-snapshot", snapshot_part: 0, snapshot_complete: false,
+      content_blocks: [{ type: "text", item_id: "paged-text", content: "first page" }] };
+    expect(handleChatStreamEvent(page as ServerEvent, owner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages[owner]).toBeUndefined();
+    await deleteConversationComposerDrafts(owner);
+    expect(handleChatStreamEvent({ type: "agent_message.delta", conversation_id: owner, message_id: "paged-answer",
+      item_id: "paged-text", delta: "late live delta" } as ServerEvent, owner, handlers)).toBe(true);
+    expect(handleChatStreamEvent({ ...page, snapshot_part: 1, snapshot_complete: true } as ServerEvent, owner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages[owner]).toBeUndefined();
+    expect(useAppStore.getState().conversationStreaming[owner]).toBeUndefined();
+    const liveOwner = "unlisted-resume-owner";
+    expect(handleChatStreamEvent({ type: "stream_resume", conversation_id: liveOwner, message_id: "unlisted-answer",
+      turn_id: "unlisted-turn", stream_status: "running", tool_calls_pending: [],
+    } as ServerEvent, liveOwner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages[liveOwner]?.[0]).toMatchObject({ id: "unlisted-answer", isStreaming: true });
+  });
+
+  it("still resolves an awaited conversation command error for a deleted owner", async () => {
+    const owner = "deleted-command-error-owner";
+    await deleteConversationComposerDrafts(owner);
+    vi.mocked(rejectClientCommandResult).mockReturnValue(true);
+    expect(handleChatStreamEvent({ type: "error", conversation_id: owner, client_command_type: "conversation.delete",
+      client_command_id: "delete-command-receipt", message: "Deletion receipt error" } as ServerEvent, owner, handlers)).toBe(true);
+    expect(rejectClientCommandResult).toHaveBeenCalledWith("delete-command-receipt", "Deletion receipt error");
+    expect(useAppStore.getState().conversationMessages[owner]).toBeUndefined();
+  });
+
+  it("rejects an awaited menu error without failing the unrelated active assistant", () => {
+    const messages = useAppStore.getState().messages;
+    vi.mocked(rejectClientCommandResult).mockReturnValue(true);
+    expect(handle({ type: "error", conversation_id: "inactive", client_command_type: "conversation.clone",
+      client_command_id: "clone-request", message: "Attachment copy failed" } as ServerEvent)).toBe(true);
+    expect(rejectClientCommandResult).toHaveBeenCalledWith("clone-request", "Attachment copy failed");
+    expect(useAppStore.getState().messages).toBe(messages);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("keeps a compact error in one persistent notice without duplicate toasts or changing the previous answer", () => {
+    const previous = { ...useAppStore.getState().messages[0], content: "上次的完整回答", isStreaming: false, terminalStatus: "completed" as const };
+    useAppStore.setState({ messages: [previous], isStreaming: false, draft: "新的未发送草稿" });
+    const error = { type: "error", conversation_id: "conv-stream", error_code: "context.compact_failed",
+      message: "Compact failed: HTTP 400", recoverable: true } as ServerEvent;
+    handle(error);
+    handle(error);
+    expect(useAppStore.getState().messages).toHaveLength(2);
+    expect(useAppStore.getState().messages[0]).toEqual(previous);
+    expect(useAppStore.getState().messages[1]).toMatchObject({ id: "system-compact-status", systemNoticeProcessing: false });
+    expect(useAppStore.getState().draft).toBe("新的未发送草稿");
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("restores the source after a rejected switch without erasing its transcript or draft", () => {
+    const messages = useAppStore.getState().messages;
+    useAppStore.setState({ pendingConversationSwitchId: "missing-target", draft: "unsent prompt" });
+    expect(handle({ type: "error", conversation_id: "missing-target", error_code: "workspace_missing",
+      message: "Target workspace missing" } as ServerEvent)).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-stream", pendingConversationSwitchId: null,
+      messages, draft: "unsent prompt", isStreaming: true });
+    expect(pushToast).toHaveBeenCalledWith("Target workspace missing", "error", 6000);
+  });
+
+  it("projects started, delta and completed into one authoritative answer block", () => {
+    expect(handle({
+      type: "item.started",
+      item: { id: "agent-message", type: "agent_message", text: "", status: "in_progress" },
+      message_id: "assistant-stream",
+    } as ServerEvent)).toBe(true);
+    expect(handle({
+      type: "agent_message.delta",
+      item_id: "agent-message",
+      delta: "Done",
+      message_id: "assistant-stream",
+    } as ServerEvent)).toBe(true);
+
+    let message = useAppStore.getState().messages[0];
+    expect(message.content).toBe("");
+    expect(message.blocks).toEqual([{
+      type: "text",
+      itemId: "agent-message",
+      content: "Done",
+      status: "in_progress",
+      isStreaming: true,
+    }]);
+    let turns = projectMessagesToTurns(useAppStore.getState().messages, true);
+    expect(turns[0]?.activeCell).toEqual(expect.objectContaining({
+      kind: "streaming_assistant_tail",
+      partialMarkdown: "Done",
+    }));
+    expect(turns[0]?.committedCells).toEqual([]);
+    expect(turns[0]?.finalAnswerCell).toBeNull();
+
+    expect(handle({
+      type: "item.completed",
+      item: {
+        id: "agent-message",
+        type: "agent_message",
+        text: "Done",
+        source: "model_final",
+        status: "completed",
+      },
+      finish_reason: "stop",
+      message_id: "assistant-stream",
+    } as ServerEvent)).toBe(true);
+
+    message = useAppStore.getState().messages[0];
+    expect(message.content).toBe("Done");
+    expect(message.blocks).toEqual([{
+      type: "text",
+      itemId: "agent-message",
+      content: "Done",
+      source: "model_final",
+      status: "completed",
+      isStreaming: false,
+      providerRaw: undefined,
+      finishReason: "stop",
+    }]);
+    turns = projectMessagesToTurns(useAppStore.getState().messages, false);
+    expect(turns[0]?.activeCell).toBeNull();
+    expect(turns[0]?.committedCells).toEqual([]);
+    expect(turns[0]?.finalAnswerCell?.markdownSource).toBe("Done");
+  });
+
+  it("restores a newly started run before it has produced visible content", () => {
+    useAppStore.setState({
+      messages: [{
+        id: "assistant-old", role: "assistant", content: "Done", blocks: [],
+        artifacts: [], timestamp: 1, isStreaming: false, terminalStatus: "completed",
+      }],
+      conversationMessages: {},
+      conversationStreaming: { "conv-stream": false },
+      isStreaming: false,
+    });
+
+    expect(handle({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-new",
+      turn_id: "turn-new",
+      stream_status: "running",
+      event_seq: 1,
+      content_blocks: [],
+      tool_states: [],
+      tool_calls_pending: [],
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().messages.map((message) => [message.id, message.isStreaming])).toEqual([
+      ["assistant-old", false],
+      ["assistant-new", true],
+    ]);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+  });
+
+  it.each([
+    ["context.budget_refresh_failed", false],
+    ["context.budget_refresh_failed", true],
+    ["context.live_projection_failed", false],
+    ["context.live_projection_failed", true],
+  ])("clears an obsolete token budget after %s (replayed=%s)", (errorCode, replayed) => {
+    useAppStore.getState().setContextUsage({ used: 900, limit: 1000 });
+
+    expect(handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      error_code: errorCode,
+      error_type: "context",
+      message: "Context was compacted and saved, but its token budget could not be refreshed",
+      recoverable: false,
+      replayed,
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().contextUsage).toBeNull();
+    expect(useAppStore.getState().messages[0].isStreaming).toBe(true);
+  });
+
+  it("streams provisional text without committing an answer and classifies the settled commentary", () => {
+    handle({
+      type: "item.started",
+      item: {
+        id: "pending-message",
+        type: "agent_message",
+        text: "",
+        source: "pending",
+        status: "in_progress",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "agent_message.delta",
+      item_id: "pending-message",
+      delta: "我先从官方气象源确认一下。",
+      source: "pending",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "text",
+        itemId: "pending-message",
+        content: "我先从官方气象源确认一下。",
+        isStreaming: true,
+      }),
+    ]);
+    expect(useAppStore.getState().messages[0]?.blocks[0]).toHaveProperty("source", "pending");
+
+    let turns = projectMessagesToTurns(useAppStore.getState().messages, true);
+    expect(turns[0]?.activeCell).toMatchObject({
+      kind: "streaming_assistant_tail", source: "pending", partialMarkdown: "我先从官方气象源确认一下。",
+    });
+    expect(turns[0]?.finalAnswerCell).toBeNull();
+    expect(turns[0]?.committedCells).toEqual([]);
+
+    handle({
+      type: "item.completed",
+      item: {
+        id: "pending-message",
+        type: "agent_message",
+        text: "我先从官方气象源确认一下。",
+        source: "commentary",
+        status: "completed",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]).toMatchObject({
+      content: "",
+      blocks: [expect.objectContaining({
+        type: "text",
+        itemId: "pending-message",
+        source: "commentary",
+        status: "completed",
+      })],
+    });
+    turns = projectMessagesToTurns(useAppStore.getState().messages, true);
+    expect(turns[0]?.activeCell).toBeNull();
+    expect(turns[0]?.finalAnswerCell).toBeNull();
+    expect(turns[0]?.committedCells).toEqual([
+      expect.objectContaining({
+        kind: "thinking",
+        source: "commentary",
+        content: "我先从官方气象源确认一下。",
+      }),
+    ]);
+
+    useAppStore.setState((state) => ({
+      messages: state.messages.map((message) => ({
+        ...message,
+        blocks: message.blocks?.map((block) => block.type === "text"
+          ? { ...block, source: "commentary", status: "in_progress", isStreaming: true }
+          : block),
+      })),
+    }));
+    handle({
+      type: "item.completed",
+      item: {
+        id: "pending-message",
+        type: "agent_message",
+        text: "Legacy completion without a source.",
+        status: "completed",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks[0]).toMatchObject({
+      type: "text",
+      source: "model_final",
+      content: "Legacy completion without a source.",
+      isStreaming: false,
+    });
+  });
+
+  it("flushes and removes pending raw reasoning before an agent message starts", () => {
+    let pendingThinking: (() => void) | undefined;
+    const delayedThinkingBuffer: StreamBuffer = {
+      push: (chunk, conversationId, _source, metadata, messageId) => {
+        pendingThinking = () => useAppStore.getState().appendThinkingChunk(
+          chunk,
+          conversationId,
+          metadata,
+          messageId,
+        );
+      },
+      flush: vi.fn(() => {
+        pendingThinking?.();
+        pendingThinking = undefined;
+      }),
+      destroy: vi.fn(),
+    };
+    const delayedHandlers = {
+      textStreamBuffer: handlers.textStreamBuffer,
+      thinkingStreamBuffer: delayedThinkingBuffer,
+    };
+
+    handleChatStreamEvent({
+      type: "thinking_delta",
+      content: "The date is 2026-08-02.",
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+    handleChatStreamEvent({
+      type: "item.started",
+      item: {
+        id: "final-message",
+        type: "agent_message",
+        source: "model_final",
+        status: "in_progress",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+
+    expect(delayedThinkingBuffer.flush).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "text",
+        itemId: "final-message",
+      }),
+    ]);
+    expect(useAppStore.getState().messages[0]?.blocks[0]).toHaveProperty("source", "model_final");
+  });
+
+  it("flushes pending thinking before final text at item completion", () => {
+    let pendingThinking: (() => void) | undefined;
+    let pendingText: (() => void) | undefined;
+    const delayedThinkingBuffer: StreamBuffer = {
+      push: (chunk, conversationId, _source, metadata, messageId) => {
+        pendingThinking = () => useAppStore.getState().appendThinkingChunk(
+          chunk,
+          conversationId,
+          metadata,
+          messageId,
+        );
+      },
+      flush: vi.fn(() => {
+        pendingThinking?.();
+        pendingThinking = undefined;
+      }),
+      destroy: vi.fn(),
+    };
+    const delayedTextBuffer: StreamBuffer = {
+      push: (chunk, conversationId, itemId, _metadata, messageId) => {
+        pendingText = () => useAppStore.getState().appendAgentMessageDelta(
+          itemId || "agent-message",
+          chunk,
+          conversationId,
+          messageId,
+        );
+      },
+      flush: vi.fn(() => {
+        pendingText?.();
+        pendingText = undefined;
+      }),
+      destroy: vi.fn(),
+    };
+    const delayedHandlers = {
+      textStreamBuffer: delayedTextBuffer,
+      thinkingStreamBuffer: delayedThinkingBuffer,
+    };
+
+    handleChatStreamEvent({
+      type: "thinking_delta",
+      content: "Checked the repository.",
+      source: "provider",
+      provider_reasoning_type: "reasoning_summary_text",
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+    handleChatStreamEvent({
+      type: "agent_message.delta",
+      item_id: "final-message",
+      delta: "Done",
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+    handleChatStreamEvent({
+      type: "item.completed",
+      item: {
+        id: "final-message",
+        type: "agent_message",
+        text: "Done",
+        source: "model_final",
+        status: "completed",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+
+    expect(delayedThinkingBuffer.flush).toHaveBeenCalledOnce();
+    expect(delayedTextBuffer.flush).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "Checked the repository.",
+      }),
+      expect.objectContaining({
+        type: "text",
+        content: "Done",
+        isStreaming: false,
+      }),
+    ]);
+  });
+
+  it("keeps a public reasoning summary when the final message starts", () => {
+    handle({
+      type: "thinking_delta",
+      content: "Checked the request and selected the minimal fix.",
+      source: "provider",
+      provider_reasoning_type: "reasoning_summary_text",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "item.started",
+      item: {
+        id: "final-message",
+        type: "agent_message",
+        source: "model_final",
+        status: "in_progress",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "Checked the request and selected the minimal fix.",
+        providerReasoningType: "reasoning_summary_text",
+      }),
+      expect.objectContaining({ type: "text", itemId: "final-message" }),
+    ]);
+  });
+
+  it("starts a new reasoning block when the provider moves to the next summary part", () => {
+    const part = (content: string, contentIndex: number) => ({
+      type: "thinking_delta" as const,
+      content,
+      source: "provider",
+      visibility: "timeline",
+      phase: "model",
+      provider_reasoning_type: "reasoning_summary_text",
+      item_id: "reasoning-1",
+      content_index: contentIndex,
+      message_id: "assistant-stream",
+    });
+    handle(part("**Formatting metric tables**", 0) as ServerEvent);
+    handle(part("**Compiling grouped metric tables**", 1) as ServerEvent);
+    handle(part("\n\nDone", 1) as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "**Formatting metric tables**",
+        item_id: "reasoning-1",
+        content_index: 0,
+      }),
+      expect.objectContaining({
+        type: "thinking",
+        content: "**Compiling grouped metric tables**\n\nDone",
+        item_id: "reasoning-1",
+        content_index: 1,
+      }),
+    ]);
+  });
+
+  it("keeps reasoning item identity when a stream resumes before the next delta", () => {
+    handle({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      turn_id: "turn-resumed",
+      content_blocks: [{
+        type: "thinking",
+        content: "Before reconnect",
+        source: "provider",
+        visibility: "timeline",
+        provider_reasoning_type: "reasoning_summary_text",
+        item_id: "summary-item",
+        content_index: 0,
+        lifecycle: "delta",
+      }],
+      tool_states: [],
+    } as unknown as ServerEvent);
+
+    handle({
+      type: "thinking_delta",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      content: " and after reconnect",
+      source: "provider",
+      visibility: "timeline",
+      provider_reasoning_type: "reasoning_summary_text",
+      item_id: "summary-item",
+      content_index: 0,
+      lifecycle: "delta",
+    } as unknown as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "Before reconnect and after reconnect",
+        item_id: "summary-item",
+        content_index: 0,
+        providerReasoningType: "reasoning_summary_text",
+      }),
+    ]);
+  });
+
+  it("routes interleaved reasoning deltas by provider item identity", () => {
+    handle({
+      type: "thinking_delta",
+      content: "A",
+      item_id: "reasoning-1",
+      content_index: 0,
+      lifecycle: "delta",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "item.started",
+      item: { id: "answer-1", type: "agent_message" },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "thinking_delta",
+      content: "B",
+      item_id: "reasoning-1",
+      content_index: 0,
+      lifecycle: "delta",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const blocks = useAppStore.getState().messages[0]?.blocks ?? [];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatchObject({
+      type: "thinking",
+      item_id: "reasoning-1",
+      content: "AB",
+    });
+    expect(blocks[1]).toMatchObject({ type: "text", itemId: "answer-1" });
+  });
+
+  it("settles thinking when a typed tool lifecycle starts", () => {
+    handle({
+      type: "thinking_delta",
+      content: "Inspecting the repository",
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.isThinkingStreaming).toBe(true);
+
+    handle({
+      type: "tool_call",
+      id: "read-1",
+      name: "read_file",
+      args: { file_path: "README.md" },
+      status: "running",
+      activity_kind: "fileRead",
+      result_kind: "file",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.isThinkingStreaming).toBe(false);
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({ type: "tool_call", record: expect.objectContaining({ id: "read-1" }) }),
+    ]);
+  });
+
+  it("removes raw reasoning on its explicit lifecycle end", () => {
+    handle({
+      type: "thinking_delta",
+      content: "Temporary raw reasoning",
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      item_id: "reasoning-raw",
+      lifecycle: "delta",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toHaveLength(1);
+
+    handle({
+      type: "thinking_delta",
+      content: "",
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      item_id: "reasoning-raw",
+      lifecycle: "end",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.isThinkingStreaming).toBe(false);
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([]);
+  });
+
+  it("does not add permission decisions as generic transcript progress", () => {
+    handle({
+      type: "tool_call",
+      id: "write-1",
+      name: "write_file",
+      args: { file_path: "a.txt" },
+      status: "running",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "permission.decision",
+      tool_call_id: "write-1",
+      tool_name: "write_file",
+      decision: "ask",
+      source: "policy",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const tool = getToolCallsFromMessage(useAppStore.getState().messages[0])[0];
+    expect(tool).toMatchObject({
+      id: "write-1",
+      status: "pending",
+      transition: "waiting_approval",
+      waitingOn: "approval",
+    });
+  });
+
+  it("projects a live legacy raster image as a stable artifact without fabricating markdown", () => {
+    const event = {
+      type: "image_chunk",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      media_type: "image/png",
+      image_data: "iVBORw0KGgo=",
+      event_id: "session-1:image-1",
+      tool_call_id: "image-call-1",
+    } as unknown as ServerEvent;
+
+    expect(handle(event)).toBe(true);
+    expect(handle(event)).toBe(true);
+
+    const message = useAppStore.getState().messages[0];
+    expect(message.content).toBe("");
+    expect(message.blocks).toEqual([]);
+    expect(message.artifacts).toEqual([
+      expect.objectContaining({
+        artifactId: expect.stringMatching(/^legacy-image-/),
+        kind: "image",
+        source: "image_generation",
+        toolCallId: "image-call-1",
+        summary: "Generated PNG image (legacy stream)",
+        bytes: 8,
+        mediaType: "image/png",
+        url: "data:image/png;base64,iVBORw0KGgo=",
+      }),
+    ]);
+    expect(useAppStore.getState().inspectorEntries).toEqual([]);
+  });
+
+  it("keeps replay-omitted legacy image metadata in Inspector without inventing an artifact", () => {
+    expect(handle({
+      type: "image_chunk",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      media_type: "image/png",
+      image_data_omitted: true,
+      image_data_size: 12,
+      event_id: "session-1:image-replay",
+      replayed: true,
+    } as unknown as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().messages[0].artifacts).toEqual([]);
+    expect(useAppStore.getState().inspectorEntries).toEqual([
+      expect.objectContaining({
+        targetKind: "artifact",
+        targetId: expect.stringMatching(/^legacy-image-/),
+        payload: {
+          event: "image_chunk",
+          conversation_id: "conv-stream",
+          message_id: "assistant-stream",
+          media_type: "image/png",
+          image_data_size: 12,
+          image_data_omitted: true,
+          replayed: true,
+          projected: false,
+        },
+      }),
+    ]);
+  });
+
+  it("routes command output by the backend tool_call_id", () => {
+    for (const id of ["cmd-1", "cmd-2"]) {
+      handle({
+        type: "tool_call",
+        id,
+        name: "run_command",
+        args: { command: id },
+        status: "running",
+        message_id: "assistant-stream",
+      } as ServerEvent);
+    }
+    handle({
+      type: "command_output_chunk",
+      id: "cmd-1",
+      tool_call_id: "cmd-1",
+      content: "first-only",
+      stream: "stdout",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const tools = getToolCallsFromMessage(useAppStore.getState().messages[0]);
+    expect(tools.find((tool) => tool.id === "cmd-1")?.outputPreview).toContain("first-only");
+    expect(tools.find((tool) => tool.id === "cmd-2")?.outputPreview ?? "").not.toContain("first-only");
+  });
+
+  it("never falls back to a different command when an explicit tool id is unknown", () => {
+    handle({
+      type: "tool_call",
+      id: "cmd-running",
+      name: "run_command",
+      args: { command: "npm test" },
+      status: "running",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "command_output_chunk",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      turn_id: "turn-1",
+      id: "cmd-missing",
+      tool_call_id: "cmd-missing",
+      content: "must-not-leak",
+      stream: "stderr",
+    } as ServerEvent);
+
+    const tool = getToolCallsFromMessage(useAppStore.getState().messages[0])[0];
+    expect(tool.outputPreview ?? "").not.toContain("must-not-leak");
+    expect(useAppStore.getState().inspectorEntries.at(-1)).toMatchObject({
+      targetKind: "tool_call",
+      targetId: "cmd-missing",
+      payload: {
+        event: "command_output_chunk",
+        conversation_id: "conv-stream",
+        message_id: "assistant-stream",
+        turn_id: "turn-1",
+        id: "cmd-missing",
+        tool_call_id: "cmd-missing",
+        stream: "stderr",
+        output: "must-not-leak",
+        projected: false,
+      },
+    });
+  });
+
+  it("falls back to the latest running command only when the backend omits tool identity", () => {
+    for (const id of ["cmd-first", "cmd-latest"]) {
+      handle({
+        type: "tool_call",
+        id,
+        name: "run_command",
+        args: { command: id },
+        status: "running",
+        message_id: "assistant-stream",
+      } as ServerEvent);
+    }
+    handle({
+      type: "command_output_chunk",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      turn_id: "turn-2",
+      content: "latest-only",
+      stream: "stdout",
+    } as ServerEvent);
+
+    const tools = getToolCallsFromMessage(useAppStore.getState().messages[0]);
+    expect(tools.find((tool) => tool.id === "cmd-first")?.outputPreview ?? "").not.toContain("latest-only");
+    expect(tools.find((tool) => tool.id === "cmd-latest")?.outputPreview).toContain("latest-only");
+    expect(useAppStore.getState().inspectorEntries.at(-1)).toMatchObject({
+      targetKind: "tool_call",
+      targetId: "cmd-latest",
+      payload: expect.objectContaining({
+        turn_id: "turn-2",
+        stream: "stdout",
+        output: "latest-only",
+        projected: true,
+      }),
+    });
+  });
+
+  it("records unprojected command output against the owning message", () => {
+    handle({
+      type: "command_output_chunk",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      content: "orphan output",
+      stream: "stdout",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().inspectorEntries.at(-1)).toMatchObject({
+      targetKind: "message",
+      targetId: "assistant-stream",
+      payload: expect.objectContaining({
+        conversation_id: "conv-stream",
+        message_id: "assistant-stream",
+        stream: "stdout",
+        output: "orphan output",
+        projected: false,
+      }),
+    });
+  });
+
+  it("keeps command output in a strict 64K head-tail buffer", () => {
+    handle({
+      type: "tool_call",
+      id: "cmd-bounded",
+      name: "run_command",
+      args: { command: "long" },
+      status: "running",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "command_output_chunk",
+      id: "cmd-bounded",
+      tool_call_id: "cmd-bounded",
+      content: `HEAD${"x".repeat(80_000)}TAIL`,
+      stream: "stdout",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const output = getToolCallsFromMessage(useAppStore.getState().messages[0])[0]?.outputPreview ?? "";
+    expect(output.length).toBeLessThanOrEqual(64 * 1024);
+    expect(output.startsWith("HEAD")).toBe(true);
+    expect(output.endsWith("TAIL")).toBe(true);
+    expect(output).toContain("characters omitted");
+  });
+
+  it("closes rejected output before starting a distinct item", () => {
+    const firstId = "iter-1:agent-message:1";
+    const secondId = "iter-1:agent-message:2";
+    handle({
+      type: "item.started",
+      item: { id: firstId, type: "agent_message", text: "", status: "in_progress" },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "agent_message.delta", item_id: firstId, delta: "rejected", message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "item.completed",
+      item: { id: firstId, type: "agent_message", text: "rejected", source: "cancelled", status: "cancelled" },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "item.started",
+      item: { id: secondId, type: "agent_message", text: "", status: "in_progress" },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "agent_message.delta", item_id: secondId, delta: "accepted", message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const blocks = useAppStore.getState().messages[0]?.blocks;
+    expect(blocks).toHaveLength(2);
+    expect(blocks?.[0]).toEqual(expect.objectContaining({ content: "rejected", status: "cancelled", isStreaming: false }));
+    expect(blocks?.[1]).toEqual(expect.objectContaining({ content: "accepted", isStreaming: true }));
+  });
+
+  it("settles an unfinished item as partial when done arrives", () => {
+    handle({
+      type: "item.started",
+      item: { id: "agent-message", type: "agent_message", text: "", status: "in_progress" },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "agent_message.delta", item_id: "agent-message", delta: "partial", message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "done", status: "failed", conversation_id: "conv-stream", message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const message = useAppStore.getState().messages[0];
+    expect(message.content).toBe("partial");
+    expect(message.terminalStatus).toBe("failed");
+    expect(message.blocks?.[0]).toEqual(expect.objectContaining({
+      content: "partial",
+      status: "partial",
+      isStreaming: false,
+    }));
+  });
+
+  it("does not replace an authoritative deferred Provider trace with the reduced done fallback", () => {
+    useAppStore.setState({
+      inspectorEntries: [{
+        targetKind: "provider",
+        targetId: "iter:1:provider:1",
+        timestamp: 1,
+        payload: {
+          kind: "provider_trace",
+          diagnostics_deferred: true,
+          finish_reason: "end_turn",
+        },
+      }],
+    });
+
+    handle({
+      type: "done",
+      status: "completed",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      usage: { input_tokens: 29, output_tokens: 14 },
+      provider_raw: {
+        provider: "custom",
+        trace_id: "iter:1:provider:1",
+        usage: { input_tokens: 29, output_tokens: 14 },
+      },
+    } as unknown as ServerEvent);
+
+    expect(useAppStore.getState().inspectorEntries).toEqual([{
+      targetKind: "provider",
+      targetId: "iter:1:provider:1",
+      timestamp: 1,
+      payload: {
+        kind: "provider_trace",
+        diagnostics_deferred: true,
+        finish_reason: "end_turn",
+      },
+    }]);
+  });
+
+  it("keeps the actual owned provider failure inline without duplicating it in a global toast", () => {
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream", message: "模型服务网络请求失败，请稍后重试。",
+      error_type: "api", provider_error_type: "network", recoverable: true } as ServerEvent);
+    handle({ type: "done", conversation_id: "conv-stream", message_id: "assistant-stream", status: "failed" } as ServerEvent);
+    const errors = projectMessagesToTurns(useAppStore.getState().messages, false)[0].committedCells.filter(cell => cell.kind === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: "模型服务网络请求失败，请稍后重试。", recoverable: true });
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("renders one terminal error after a recoverable error", () => {
+    handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message: "network unavailable",
+      error_type: "network",
+      recoverable: true,
+    } as ServerEvent);
+    expect(useAppStore.getState().messages.filter((message) => message.role === "system")).toHaveLength(0);
+
+    handle({
+      type: "done",
+      status: "failed",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const turns = projectMessagesToTurns(useAppStore.getState().messages, false);
+    const errorCells = turns[0]?.committedCells.filter((cell) => cell.kind === "error") ?? [];
+    expect(errorCells).toHaveLength(1);
+    expect(errorCells[0]).toEqual(expect.objectContaining({
+      message: "network unavailable",
+      recoverable: true,
+    }));
+    expect(useAppStore.getState().messages[0]?.failureRecoverable).toBe(true);
+  });
+
+  it("keeps a fatal authentication failure on the assistant turn without appending a system notice", () => {
+    handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message: "401 Unauthorized: invalid api key",
+      error_type: "auth",
+      recoverable: false,
+    } as ServerEvent);
+
+    const messages = useAppStore.getState().messages;
+    expect(messages.filter((message) => message.role === "system")).toHaveLength(0);
+    expect(messages[0]?.role).toBe("assistant");
+    expect(messages[0]?.terminalStatus).toBe("failed");
+    expect(messages[0]?.failureMessage).toBe("401 Unauthorized: invalid api key");
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("API Key"), "error", 6000);
+  });
+
+  it.each(["failed", "partial"])("retains the original published recoverable error when DONE commits %s", (status) => {
+    const failure = "Network error: the public gateway closed the response.\n  Retry details: https://example.com/request?id=public";
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream", message: failure,
+      error_type: "network", provider_error_type: "network", recoverable: true } as ServerEvent);
+    expect(useAppStore.getState().messages[0].isStreaming).toBe(true);
+    handle({ type: "done", conversation_id: "conv-stream", message_id: "assistant-stream", status } as ServerEvent);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ terminalStatus: status, failureMessage: failure });
+    const errors = projectMessagesToTurns(useAppStore.getState().messages, false)[0].committedCells.filter(cell => cell.kind === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: failure, source: "agent" });
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("keeps A's public recoverable error after switching to B and clears B's error after recovery", () => {
+    const failureA = "401 Unauthorized: missing project role A.\n  https://example.com/failure-a";
+    const failureB = "Network error: public failure B.\n  https://example.com/failure-b";
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream", message: failureA,
+      error_type: "auth", provider_error_type: "auth", recoverable: true } as ServerEvent);
+    const messagesA = useAppStore.getState().messages;
+    useAppStore.setState({ conversationId: "B", draft: "Keep B's unsent prompt", isStreaming: true,
+      messages: [{ id: "assistant-B", role: "assistant", content: "", blocks: [], artifacts: [], timestamp: 2, isStreaming: true }],
+      conversationMessages: { "conv-stream": messagesA }, conversationStreaming: { "conv-stream": true, B: true } });
+    handle({ type: "error", conversation_id: "B", message_id: "assistant-B", message: failureB,
+      error_type: "network", provider_error_type: "network", recoverable: true } as ServerEvent);
+    handle({ type: "done", conversation_id: "conv-stream", message_id: "assistant-stream", status: "failed" } as ServerEvent);
+    expect(useAppStore.getState().conversationMessages["conv-stream"][0]).toMatchObject({ failureMessage: failureA, terminalStatus: "failed" });
+    expect(useAppStore.getState().messages[0]).toMatchObject({ id: "assistant-B", isStreaming: true });
+    expect(useAppStore.getState().messages[0].failureMessage).toBeUndefined();
+    handle({ type: "done", conversation_id: "B", message_id: "assistant-B", status: "completed" } as ServerEvent);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ id: "assistant-B", terminalStatus: "completed" });
+    expect(useAppStore.getState().messages[0].failureMessage).toBeUndefined();
+    expect(useAppStore.getState().conversationMessages["conv-stream"][0].failureMessage).toBe(failureA);
+    expect(useAppStore.getState().draft).toBe("Keep B's unsent prompt");
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("keeps recoverable errors scoped to the matching concurrent turn", () => {
+    useAppStore.setState({
+      messages: [
+        {
+          id: "assistant-first",
+          role: "assistant",
+          content: "",
+          blocks: [],
+          artifacts: [],
+          timestamp: 1,
+          isStreaming: true,
+        },
+        {
+          id: "assistant-second",
+          role: "assistant",
+          content: "",
+          blocks: [],
+          artifacts: [],
+          timestamp: 2,
+          isStreaming: true,
+        },
+      ],
+    });
+
+    handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message_id: "assistant-first",
+      message: "first turn failed",
+      error_type: "network",
+      recoverable: true,
+    } as ServerEvent);
+    handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message_id: "assistant-second",
+      message: "second turn failed",
+      error_type: "network",
+      recoverable: true,
+    } as ServerEvent);
+
+    handle({
+      type: "done",
+      status: "failed",
+      conversation_id: "conv-stream",
+      message_id: "assistant-second",
+    } as ServerEvent);
+    handle({
+      type: "done",
+      status: "failed",
+      conversation_id: "conv-stream",
+      message_id: "assistant-first",
+    } as ServerEvent);
+
+    const [first, second] = useAppStore.getState().messages;
+    expect(first.failureMessage).toBe("first turn failed");
+    expect(second.failureMessage).toBe("second turn failed");
+    expect(first.failureRecoverable).toBe(true);
+    expect(second.failureRecoverable).toBe(true);
+  });
+
+  it("uses authoritative fatal recoverability from done", () => {
+    handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message: "provider failed",
+      error_type: "network",
+      recoverable: true,
+    } as ServerEvent);
+
+    handle({
+      type: "done",
+      status: "failed",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      failure_recoverable: false,
+    } as unknown as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]).toMatchObject({
+      failureMessage: "provider failed",
+      failureRecoverable: false,
+    });
+  });
+
+  it("shows a live global error without terminating the active conversation", () => {
+    useAppStore.setState({
+      workingDirectory: "C:\\workspace",
+      conversations: [{
+        id: "conv-stream",
+        title: "Active conversation",
+        updatedAt: "2026-08-16T00:00:00Z",
+        workspaceRoot: "C:\\workspace",
+      }],
+    });
+
+    expect(handle({
+      type: "error",
+      message: "Invalid JSON message",
+      error_type: "protocol",
+      recoverable: true,
+    } as ServerEvent)).toBe(true);
+
+    const state = useAppStore.getState();
+    expect(pushToast).toHaveBeenCalledWith("Invalid JSON message", "error", 6000);
+    expect(state.conversationId).toBe("conv-stream");
+    expect(state.workingDirectory).toBe("C:\\workspace");
+    expect(state.messages[0]).toMatchObject({ id: "assistant-stream", isStreaming: true });
+    expect(state.isStreaming).toBe(true);
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
+  });
+
+  it("shows a queue recovery error without changing the active turn or draft", () => {
+    const message = "Queued commands could not be fully restored.";
+    useAppStore.setState({ draft: "unsent draft" });
+    const event = normalizeInboundServerEvent({ type: "error", message, recoverable: false,
+      error_type: "storage", error_code: "user_message.queue.restore",
+      error_details: { reason: "malformed_json", path: "queue.json" } });
+    expect(event).not.toBeNull();
+    expect(handle(event!)).toBe(true);
+    expect(pushToast).toHaveBeenCalledWith(message, "error", 6000);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ id: "assistant-stream", isStreaming: true });
+    expect(useAppStore.getState()).toMatchObject({ draft: "unsent draft", isStreaming: true, conversationId: "conv-stream" });
+  });
+
+  it("hydrates replayed owned errors without replaying destructive recovery or toasts", () => {
+    useAppStore.setState({
+      workingDirectory: "C:\\workspace",
+      conversations: [{
+        id: "conv-stream",
+        title: "Active conversation",
+        updatedAt: "2026-08-16T00:00:00Z",
+        workspaceRoot: "C:\\workspace",
+        worktreePath: "C:\\workspace\\.worktrees\\conv-stream",
+        gitIsolated: true,
+      }],
+    });
+
+    expect(handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      message: "Workspace is unavailable",
+      error_type: "tool",
+      error_code: "workspace_missing",
+      recoverable: false,
+      replayed: true,
+    } as unknown as ServerEvent)).toBe(true);
+
+    const state = useAppStore.getState();
+    expect(pushToast).not.toHaveBeenCalled();
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
+    expect(state.workingDirectory).toBe("C:\\workspace");
+    expect(state.conversations[0]).toMatchObject({
+      id: "conv-stream",
+      workspaceRoot: "C:\\workspace",
+      worktreePath: "C:\\workspace\\.worktrees\\conv-stream",
+      gitIsolated: true,
+    });
+    expect(state.messages[0]).toMatchObject({
+      id: "assistant-stream",
+      terminalStatus: "failed",
+      failureMessage: "Workspace is unavailable",
+    });
+  });
+
+  it("does not clear the active workspace for a background conversation failure", () => {
+    useAppStore.setState({
+      conversationId: "conv-active",
+      workingDirectory: "C:\\active",
+      conversations: [
+        { id: "conv-active", title: "Active", updatedAt: "2026-08-16T00:00:00Z", workspaceRoot: "C:\\active" },
+        { id: "conv-background", title: "Background", updatedAt: "2026-08-16T00:00:00Z", workspaceRoot: "C:\\background" },
+      ],
+    });
+
+    expect(handleChatStreamEvent({
+      type: "error",
+      conversation_id: "conv-background",
+      message_id: "assistant-background",
+      message: "Workspace is unavailable",
+      error_type: "tool",
+      error_code: "workspace_missing",
+      recoverable: false,
+    } as unknown as ServerEvent, "conv-background", handlers)).toBe(true);
+
+    const state = useAppStore.getState();
+    expect(state.workingDirectory).toBe("C:\\active");
+    expect(state.conversations.find((item) => item.id === "conv-background")).toMatchObject({
+      workspaceRoot: "",
+      worktreePath: "",
+    });
+  });
+
+  it("restores the prior view when workspace admission rejects a pending switch", () => {
+    useAppStore.setState({ conversationId: "conv-stream", pendingConversationSwitchId: "conv-target" });
+
+    expect(handleChatStreamEvent({
+      type: "error",
+      conversation_id: "conv-target",
+      message: "Workspace is not trusted",
+      error_type: "workspace",
+      error_code: "workspace_untrusted",
+      recoverable: true,
+    } as unknown as ServerEvent, "conv-target", handlers)).toBe(true);
+
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+    expect(useAppStore.getState().conversationId).toBe("conv-stream");
+  });
+
+  it("does not delete a conversation when conversation.not_found is replayed", () => {
+    useAppStore.setState({
+      conversations: [{
+        id: "conv-stream",
+        title: "Active conversation",
+        updatedAt: "2026-08-16T00:00:00Z",
+      }],
+    });
+
+    expect(handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      message: "Conversation not found",
+      error_type: "tool",
+      error_code: "conversation.not_found",
+      recoverable: true,
+      replayed: true,
+    } as unknown as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().conversationId).toBe("conv-stream");
+    expect(useAppStore.getState().conversations).toEqual([
+      expect.objectContaining({ id: "conv-stream" }),
+    ]);
+    expect(pushToast).not.toHaveBeenCalled();
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
+  });
+
+  it("clears pending provider progress when a live conversation is missing", () => {
+    useAppStore.setState({
+      pendingProviderProgress: {
+        "conv-stream\u0000assistant-stream": [{
+          type: "progress",
+          id: "provider:connection:missing:iteration-1",
+          stage: "status",
+          status: "running",
+          message: "正在重连",
+          timestamp: 1,
+        }],
+        "conv-other\u0000assistant-other": [{
+          type: "progress",
+          id: "provider:connection:other:iteration-1",
+          stage: "status",
+          status: "running",
+          message: "正在重连",
+          timestamp: 1,
+        }],
+      },
+    });
+
+    expect(handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      message: "Conversation not found",
+      error_type: "tool",
+      error_code: "conversation.not_found",
+      recoverable: true,
+    } as unknown as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().pendingProviderProgress).toEqual({
+      "conv-other\u0000assistant-other": [expect.objectContaining({
+        id: "provider:connection:other:iteration-1",
+      })],
+    });
+  });
+
+  it("ignores lifecycle events targeted at an old assistant message", () => {
+    expect(handle({
+      type: "agent_message.delta",
+      item_id: "agent-message",
+      delta: "stale",
+      message_id: "assistant-old",
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([]);
+  });
+
+  it("projects process and tool events without treating their text as an answer", () => {
+    handle({
+      type: "agent.item",
+      id: "process-1",
+      item_id: "process-1",
+      kind: "process_text",
+      content: "Inspecting files",
+      status: "completed",
+      order: 3,
+      seq: 42,
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "tool_call",
+      id: "tool-1",
+      name: "read_file",
+      args: { path: "README.md" },
+      status: "running",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "tool_result",
+      id: "tool-1",
+      summary: "Read README",
+      status: "success",
+      is_error: false,
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const message = useAppStore.getState().messages[0];
+    expect(message.content).toBe("");
+    expect(message.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "process", id: "process-1", order: 3 }),
+      expect.objectContaining({ type: "tool_call" }),
+    ]));
+    const process = message.blocks?.find((block) => block.type === "process");
+    expect(process).not.toHaveProperty("seq");
+    expect(getToolCallsFromMessage(message)[0]).toEqual(expect.objectContaining({
+      id: "tool-1",
+      status: "success",
+    }));
+  });
+
+  it("extends a running process item with agent.item.delta instead of resending it", () => {
+    handle({
+      type: "agent.item",
+      id: "it:model-output:commentary",
+      item_id: "it:model-output:commentary",
+      kind: "process_text",
+      content: "Let me check",
+      status: "running",
+      source: "commentary",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "agent.item.delta",
+      item_id: "it:model-output:commentary",
+      delta: " the tests first.",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    // A delta for an item that was never announced creates nothing.
+    handle({
+      type: "agent.item.delta",
+      item_id: "never-announced",
+      delta: "x",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const processBlocks = (useAppStore.getState().messages[0]?.blocks ?? []).filter(
+      (block) => block.type === "process",
+    );
+    expect(processBlocks).toHaveLength(1);
+    expect(processBlocks[0]).toEqual(expect.objectContaining({
+      id: "it:model-output:commentary",
+      content: "Let me check the tests first.",
+      status: "running",
+    }));
+  });
+
+  it("keeps debug and retracted process evidence in Inspector without rendering it", () => {
+    handle({
+      type: "agent.item",
+      id: "debug-1",
+      item_id: "debug-1",
+      kind: "status",
+      content: "Provider retry ladder selected attempt 2.",
+      status: "completed",
+      visibility: "debug",
+      source: "runtime",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks ?? []).toEqual([]);
+    expect(useAppStore.getState().inspectorEntries).toEqual([
+      expect.objectContaining({
+        targetKind: "message",
+        targetId: "debug-1",
+        payload: expect.objectContaining({
+          event: "agent.item",
+          visibility: "debug",
+          content: "Provider retry ladder selected attempt 2.",
+        }),
+      }),
+    ]);
+
+    handle({
+      type: "agent.item",
+      id: "process-2",
+      item_id: "process-2",
+      kind: "process_text",
+      content: "Temporary process text",
+      status: "completed",
+      visibility: "timeline",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({ type: "process", id: "process-2" }),
+    ]);
+
+    handle({
+      type: "agent.item",
+      id: "process-2",
+      item_id: "process-2",
+      kind: "process_text",
+      status: "retracted",
+      visibility: "timeline",
+      reason: "superseded by final answer",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    expect(useAppStore.getState().messages[0]?.blocks ?? []).toEqual([]);
+    expect(useAppStore.getState().inspectorEntries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        targetKind: "message",
+        targetId: "process-2",
+        payload: expect.objectContaining({
+          status: "retracted",
+          reason: "superseded by final answer",
+          retracted: true,
+        }),
+      }),
+    ]));
+  });
+
+  it("updates one tool record when transport scope changes across its lifecycle", () => {
+    handle({
+      type: "tool_call",
+      id: "write-1",
+      name: "write_file",
+      args: {},
+      status: "pending",
+      turn_id: "run-1",
+      iteration_id: "iter:1",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "tool_call",
+      id: "write-1",
+      name: "write_file",
+      args: { file_path: "src/app.ts" },
+      status: "pending",
+      turn_id: "run-1",
+      iteration_id: "iter:1",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    let records = getToolCallsFromMessage(useAppStore.getState().messages[0]);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toEqual(expect.objectContaining({
+      args: { file_path: "src/app.ts" },
+      status: "pending",
+    }));
+
+    handle({
+      type: "tool_call",
+      id: "write-1",
+      name: "write_file",
+      args: { file_path: "src/app.ts" },
+      status: "running",
+      turn_id: "assistant-stream",
+      iteration_id: "iter:1",
+      activity_kind: "fileChange",
+      result_kind: "edit",
+      display_hint: "Write",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "tool_result",
+      id: "write-1",
+      summary: "Wrote src/app.ts",
+      status: "success",
+      is_error: false,
+      turn_id: "assistant-stream",
+      iteration_id: "iter:1",
+      diff: { plus: 3, minus: 1, patch: "@@\n-old\n+new" },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    records = getToolCallsFromMessage(useAppStore.getState().messages[0]);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toEqual(expect.objectContaining({
+      id: "write-1",
+      args: { file_path: "src/app.ts" },
+      status: "success",
+      diff: expect.objectContaining({ plus: 3, minus: 1 }),
+    }));
+  });
+
+  it("hydrates a reconnect snapshot instead of reconstructing state from prose", () => {
+    handle({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      content_blocks: [{
+        type: "text",
+        itemId: "agent-message",
+        content: "Recovered",
+        source: "partial",
+        status: "partial",
+        isStreaming: false,
+      }],
+      tool_calls_pending: [],
+    } as ServerEvent);
+
+    const message = useAppStore.getState().messages[0];
+    expect(message.content).toBe("Recovered");
+    expect(message.blocks).toEqual([expect.objectContaining({
+      type: "text",
+      itemId: "agent-message",
+      status: "partial",
+    })]);
+  });
+
+  it("does not revive a message after the terminal fence", () => {
+    handle({
+      type: "done",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      status: "completed",
+      usage: {},
+    } as ServerEvent);
+
+    handle({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      turn_id: "turn-old",
+      event_seq: 12,
+      content_blocks: [{ type: "text", content: "stale recovered text" }],
+      tool_calls_pending: [],
+    } as unknown as ServerEvent);
+
+    const message = useAppStore.getState().messages[0];
+    expect(message.isStreaming).toBe(false);
+    expect(message.terminalStatus).toBe("completed");
+    expect(message.content).not.toBe("stale recovered text");
+    expect(useAppStore.getState().inspectorEntries.at(-1)?.payload).toMatchObject({
+      event: "stream_resume",
+      ignored: true,
+      reason: "target_already_terminal",
+    });
+  });
+
+  it("rejects a resume snapshot owned by an older turn", () => {
+    useAppStore.setState({
+      messages: [{
+        ...useAppStore.getState().messages[0],
+        turnId: "turn-new",
+      }],
+    });
+
+    handle({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      turn_id: "turn-old",
+      event_seq: 8,
+      content_blocks: [{ type: "text", content: "old turn" }],
+      tool_calls_pending: [],
+    } as unknown as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]).toMatchObject({
+      turnId: "turn-new",
+      content: "",
+      isStreaming: true,
+    });
+    expect(useAppStore.getState().inspectorEntries.at(-1)?.payload).toMatchObject({
+      ignored: true,
+      reason: "turn_mismatch",
+    });
+  });
+
+  it("keeps the newest authoritative resume event sequence", () => {
+    const snapshot = (eventSeq: number, content: string) => ({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      turn_id: "turn-resume-seq",
+      event_seq: eventSeq,
+      stream_status: "running",
+      content_blocks: [{
+        type: "text",
+        itemId: "agent-message",
+        content,
+        status: "in_progress",
+        isStreaming: true,
+      }],
+      tool_calls_pending: [],
+    } as unknown as ServerEvent);
+
+    handle(snapshot(10, "new snapshot"));
+    handle(snapshot(9, "old snapshot"));
+
+    const resumedMessage = useAppStore.getState().messages[0];
+    // While the authoritative snapshot is still running, answer text lives in
+    // the structured streaming block. The legacy `content` field is reserved
+    // for sealed completed/partial answer blocks.
+    expect(resumedMessage.content).toBe("");
+    expect(resumedMessage.blocks).toEqual([
+      expect.objectContaining({
+        type: "text",
+        itemId: "agent-message",
+        content: "new snapshot",
+        status: "in_progress",
+        isStreaming: true,
+      }),
+    ]);
+    expect(useAppStore.getState().inspectorEntries.at(-1)?.payload).toMatchObject({
+      ignored: true,
+      reason: "stale_event_seq",
+      event_seq: 9,
+    });
+  });
+
+  it("clears prompts owned by the terminal turn", () => {
+    const owner = { conversationId: "conv-stream", turnId: "turn-prompts", messageId: "assistant-stream" };
+    useAppStore.setState({
+      pendingApproval: { requestId: "approval-done", ...owner, toolName: "run_command", args: {} },
+      approvalQueue: [
+        { requestId: "approval-done-queued", ...owner, toolName: "write_file", args: {} },
+        { requestId: "approval-other", conversationId: "conv-other", toolName: "read_file", args: {} },
+      ],
+      pendingDiffReview: { requestId: "diff-done", ...owner, diff: "patch" },
+      diffReviewQueue: [
+        { requestId: "diff-done-queued", ...owner, diff: "queued patch" },
+        { requestId: "diff-other", conversationId: "conv-other", diff: "other patch" },
+      ],
+      pendingAskUser: { requestId: "ask-done", ...owner, question: "Continue?" },
+      askUserQueue: [
+        { requestId: "ask-done-queued", ...owner, question: "Still continue?" },
+        { requestId: "ask-other", conversationId: "conv-other", question: "Other?" },
+      ],
+    });
+
+    handle({ type: "done", conversation_id: owner.conversationId, turn_id: owner.turnId, message_id: owner.messageId } as ServerEvent);
+
+    const state = useAppStore.getState();
+    expect(state.pendingApproval?.requestId).toBe("approval-other");
+    expect(state.approvalQueue).toEqual([]);
+    expect(state.pendingDiffReview?.requestId).toBe("diff-other");
+    expect(state.diffReviewQueue).toEqual([]);
+    expect(state.pendingAskUser?.requestId).toBe("ask-other");
+    expect(state.askUserQueue).toEqual([]);
+  });
+
+  it("does not add replayed done usage to cumulative totals", () => {
+    useAppStore.setState({
+      usageTotals: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, promptCacheTotal: 0, reasoning: 0, turns: 1 },
+      pendingApproval: {
+        requestId: "approval-current",
+        conversationId: "conv-stream",
+        toolName: "write_file",
+        args: {},
+      },
+    });
+
+    handle({
+      type: "done",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      status: "completed",
+      usage: { input_tokens: 7, output_tokens: 3 },
+      replayed: true,
+    } as unknown as ServerEvent);
+
+    expect(useAppStore.getState().usageTotals).toEqual({
+      input: 10,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      promptCacheTotal: 0,
+      reasoning: 0,
+      turns: 1,
+    });
+    expect(useAppStore.getState().pendingApproval?.requestId).toBe("approval-current");
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
+  });
+  it("keeps one error visible when partial output precedes a provider failure", () => {
+    useAppStore.getState().appendAgentMessageDelta("reply-part", "I will inspect the files.", "conv-stream", "assistant-stream");
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream",
+      message: "network unavailable", error_type: "network", recoverable: true } as ServerEvent);
+    handle({ type: "done", status: "partial", reason: "partial_stream_error", conversation_id: "conv-stream",
+      message_id: "assistant-stream", usage: { input_tokens: 10, output_tokens: 2 } } as unknown as ServerEvent);
+    const message = useAppStore.getState().messages[0];
+    expect(message?.terminalStatus).toBe("partial");
+    expect(message?.failureMessage).toBe("network unavailable");
+    const errors = projectMessagesToTurns(useAppStore.getState().messages, false)[0]?.committedCells.filter(cell => cell.kind === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors?.[0]).toMatchObject({ title: "响应未完整结束", recoverable: true });
+    useAppStore.getState().finishStreaming("conv-stream", { input_tokens: 10, output_tokens: 2 }, "completed", "assistant-stream");
+    expect(useAppStore.getState().messages[0]?.failureMessage).toBeUndefined();
+  });
+
+  it.each([false, true])("projects unfinished resource evidence without repeating replay alerts (%s)", (replayed) => {
+    const receipt = {
+      resource_kind: "lifecycle", resource_id: "observer:1", reason: "cancelled",
+      requested: true, acknowledged: false, completed: false, timed_out: true, pending: 1,
+    };
+    handle({
+      type: "done", status: "cancelled", conversation_id: "conv-stream",
+      message_id: "assistant-stream", replayed,
+      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0, input_includes_cache_read: false },
+      lifecycle_cleanup_pending_count: 1,
+      lifecycle_cleanup_receipts: { "observer:1": receipt },
+    } as ServerEvent);
+    expect(useAppStore.getState().inspectorEntries).toContainEqual(expect.objectContaining({
+      targetKind: "message", targetId: "assistant-stream",
+      payload: expect.objectContaining({
+        lifecycle_cleanup_pending_count: 1,
+        lifecycle_cleanup_receipts: { "observer:1": receipt },
+      }),
+    }));
+    if (replayed) expect(pushToast).not.toHaveBeenCalled();
+    else expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("1 个资源尚未回收"), "warning", 6000);
+  });
+
+});

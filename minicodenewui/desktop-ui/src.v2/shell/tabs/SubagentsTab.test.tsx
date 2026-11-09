@@ -1,0 +1,1106 @@
+/* @vitest-environment jsdom */
+
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAppStore } from "../../stores";
+import type { SubagentState } from "../../stores/types";
+import { SubagentsTab } from "./SubagentsTab";
+import { CollaborationCell } from "../../chat/cells/CollaborationCell";
+import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
+import type { CollaborationCellState } from "../../chat/cells/cellTypes";
+import * as agentViews from "../../lib/agent-view-model";
+import * as markdown from "../../lib/markdown";
+
+const { sendClientCommandMock, sendClientCommandAwaitResultMock } = vi.hoisted(() => ({
+  sendClientCommandMock: vi.fn(() => true),
+  sendClientCommandAwaitResultMock: vi.fn(async (command: unknown) => {
+    sendClientCommandMock(command);
+    return { type: "command.result", command: (command as { type?: string }).type || "", level: "success", message: "", data: {} };
+  }),
+}));
+
+vi.hoisted(() => {
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: () => ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+});
+
+vi.mock("../../protocol/ws-outbox", () => ({
+  sendClientCommand: sendClientCommandMock,
+  sendClientCommandAwaitResult: sendClientCommandAwaitResultMock,
+  commandResultSucceeded: (result: { level?: string }) => result.level !== "error",
+}));
+
+describe("SubagentsTab", () => {
+  it("opens a persisted completion after the live list reset and loads its real child transcript", async () => {
+    useAppStore.setState({ currentModel: "parent-only-model", subagents: [], messages: [
+      { id: "past-user", role: "user", content: "核对工作区", timestamp: 1, artifacts: [] },
+      { id: "past-answer", turnId: "past-turn", role: "assistant", content: "完成", timestamp: 2, artifacts: [],
+        completedAt: 4, terminalStatus: "completed", blocks: [
+          { type: "progress", id: "persisted-completion", stage: "status", phase: "subagent", status: "completed",
+            message: "Historical review已完成", subagentId: "historical-child", subagentName: "Historical review",
+            subagentIdentity: "/root/historical_review", subagentStatus: "done", timestamp: 3, visibility: "timeline" },
+          { type: "text", id: "past-final", content: "完成", source: "model_final", status: "completed" },
+        ] },
+    ] });
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: "subagent.transcript", level: "success", message: "",
+        data: { model: "gpt-6.1-sol", provider: "child-provider", reasoning_effort: "high", agent_path: "/root/historical_review", seq: 2,
+          messages: [{ id: "actual-child-answer", role: "assistant", content: "来自持久化子任务的实际结果", timestamp: 3, terminal_status: "completed" }] } };
+    });
+    const state = useAppStore.getState();
+    const completion = projectMessagesToTurns(state.messages, false, state.workingDirectory).flatMap((turn) => turn.committedCells)
+      .find((cell) => cell.kind === "collaboration" && cell.action === "completed") as CollaborationCellState;
+    expect(completion.entries[0]).toMatchObject({ agentId: "historical-child", agentLabel: "Historical review",
+      agentIdentity: "/root/historical_review", agentStatus: "done" });
+    render(<><CollaborationCell cell={completion} conversationId="conversation-1" /><SubagentsTab /></>);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Historical review" }));
+    await waitFor(() => expect(screen.getByText("来自持久化子任务的实际结果")).toBeTruthy());
+    expect(sendClientCommandAwaitResultMock).toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.transcript",
+      subagent_id: "historical-child", conversation_id: "conversation-1", workspace_root: "C:\\workspace" }), "subagent.transcript", { silent: true });
+    expect(screen.getByRole("region", { name: "子智能体任务详情：Historical review" })).toBeTruthy();
+    expect(screen.getByText("6.1 Sol · 高")).toBeTruthy();
+    expect(screen.queryByText("parent-only-model")).toBeNull();
+    expect(useAppStore.getState().subagents[0]).toMatchObject({ id: "historical-child", status: "done",
+      displayName: "Historical review", agentPath: "/root/historical_review", model: "gpt-6.1-sol", provider: "child-provider" });
+    expect(useAppStore.getState().subagents[0].teammateName).toBeUndefined();
+    expect(useAppStore.getState().subagents[0].objective).toBeUndefined();
+    expect(useAppStore.getState().subagents[0].durationMs).toBeUndefined();
+    expect(useAppStore.getState().subagents[0].lastEventAt).toBeUndefined();
+  });
+
+  it("formats the real child model label while retaining its exact metadata in the title", async () => {
+    useAppStore.setState({ focusedSubagentId: "real-model", subagents: [{ id: "real-model", role: "reviewer", status: "done",
+      objective: "核对真实模型", model: "gpt-6.1-sol", provider: "custom", reasoningEffort: "off" }],
+    });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    expect(screen.getByText("6.1 Sol · off")).toBeTruthy();
+    expect(screen.getByTitle("custom · gpt-6.1-sol · off")).toBeTruthy();
+    expect(useAppStore.getState().subagents[0]).toMatchObject({ model: "gpt-6.1-sol", provider: "custom", reasoningEffort: "off" });
+  });
+
+  it("localizes a known child reasoning effort without changing the original metadata", async () => {
+    useAppStore.setState({ focusedSubagentId: "known-effort", subagents: [{ id: "known-effort", role: "reviewer", status: "done",
+      objective: "核对强度标签", model: "gpt-6.1-sol", provider: "custom", reasoningEffort: "xhigh" }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    expect(screen.getByText("6.1 Sol · 极高")).toBeTruthy();
+    expect(screen.getByTitle("custom · gpt-6.1-sol · xhigh")).toBeTruthy();
+    expect(useAppStore.getState().subagents[0].reasoningEffort).toBe("xhigh");
+  });
+  it("does not borrow the parent picker model for an unknown child", async () => {
+    useAppStore.setState({ focusedSubagentId: "unknown-model", currentModel: "parent-only-model",
+      subagents: [{ id: "unknown-model", role: "reviewer", status: "done", objective: "核对历史结果" }],
+    });
+    const { container } = render(<SubagentsTab />);
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    expect(container.querySelector(".subagents-detail-model")).toBeNull();
+    expect(screen.queryByText("parent-only-model")).toBeNull();
+  });
+
+  it("does not apply model metadata or transcript from an older child incarnation", async () => {
+    let resolve!: (value: unknown) => void;
+    sendClientCommandAwaitResultMock.mockReturnValueOnce(new Promise((done) => { resolve = done; }) as never);
+    useAppStore.setState({ focusedSubagentId: "resumed-child", subagents: [{ id: "resumed-child", role: "reviewer", status: "running",
+      objective: "继续核对", agentPath: "/root/review", mailboxEpoch: 2, model: "current-child-model" }],
+    });
+    render(<SubagentsTab />);
+    await act(async () => resolve({ type: "command.result", command: "subagent.transcript", level: "success", message: "",
+      data: { agent_path: "/root/review", mailbox_epoch: 1, model: "stale-child-model", provider: "old", reasoning_effort: "high", seq: 100,
+        messages: [{ id: "old-final", role: "assistant", content: "旧代结果", timestamp: 1 }] },
+    }));
+    expect(screen.getByText("current-child-model")).toBeTruthy();
+    expect(screen.queryByText("stale-child-model · high")).toBeNull();
+    expect(screen.queryByText("旧代结果")).toBeNull();
+  });
+  it("renders a rotating mark for running subagents", () => {
+    useAppStore.setState({
+      focusedSubagentId: null,
+      subagents: [{
+        id: "subagent-running-stable",
+        role: "explore",
+        status: "running",
+        objective: "查询北京当前天气",
+      }],
+    });
+
+    const { container } = render(<SubagentsTab />);
+
+    expect(screen.getByText("运行中")).toBeTruthy();
+    expect(container.querySelector('.subagents-glyph[data-status="running"]')).toBeTruthy();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sendClientCommandMock.mockReturnValue(true);
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: (command as { type?: string }).type || "", level: "success", message: "", data: {} };
+    });
+    useAppStore.setState({
+      focusedSubagentId: null,
+      conversationId: "conversation-1",
+      workingDirectory: "C:\\workspace",
+      isConnected: true,
+      pendingAskUser: null,
+      askUserQueue: [],
+      promptDrafts: {},
+      messages: [],
+      messageRevealTarget: null,
+      subagents: [
+        {
+          id: "subagent-1",
+          role: "verification",
+          status: "running",
+          objective: "验证测试结果",
+          currentActivity: "正在检查测试结果",
+        },
+        {
+          id: "subagent-2",
+          role: "explore",
+          status: "done",
+          objective: "定位界面问题",
+          summary: "已找到主要问题",
+          resultContent: "## 结论\n\n侧栏应只展示任务、状态和结果。",
+        },
+      ],
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("navigates from a child to its actual parent and blocking dependency", async () => {
+    useAppStore.setState({ focusedSubagentId: "child", subagents: [
+      { id: "parent", role: "reviewer", status: "running", objective: "审阅页面" },
+      { id: "schema", taskId: "schema-task", role: "explore", status: "done", objective: "检查数据" },
+      { id: "child", parentRunId: "parent", blockedBy: ["schema-task"], role: "explore", status: "blocked", objective: "修正布局" },
+    ] });
+    render(<SubagentsTab />);
+    expect(screen.getByText("正在等待")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "检查数据" }));
+    expect(useAppStore.getState().focusedSubagentId).toBe("schema");
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.transcript", subagent_id: "schema" }), "subagent.transcript", { silent: true }));
+  });
+
+  it.each(["running", "done"] as const)("keeps %s child details free of a composer and manual toolbar", async (status) => {
+    useAppStore.setState({ focusedSubagentId: "readonly-worker", subagents: [
+      { id: "readonly-worker", role: "explore", status, objective: "检查界面", readOnly: true, writeScope: ["src/ui"] },
+    ] });
+    const { container } = render(<SubagentsTab />);
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: "subagent.transcript", subagent_id: "readonly-worker",
+    }), "subagent.transcript", { silent: true }));
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: "补充指令" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "刷新子智能体工作详情" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "停止子智能体" })).toBeNull();
+    expect(screen.queryByText("允许修改的范围")).toBeNull();
+    expect(screen.queryByText("只读任务")).toBeNull();
+    expect(container.querySelector(".subagents-scope")).toBeNull();
+    expect(container.querySelector(".subagents-detail-header-actions")).toBeNull();
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "send_message" }));
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.cancel" }));
+  });
+
+  it("uses the actual plan request and clears the waiting label only after approval succeeds", async () => {
+    useAppStore.setState({ focusedSubagentId: "planner", subagents: [
+      { id: "planner", role: "explore", status: "blocked", objective: "实现布局", awaitingPlanApproval: true, activePlanRequestId: "plan-1" },
+    ], pendingAskUser: { requestId: "plan-1", conversationId: "conversation-1", question: "审批计划", planReview: { subagentId: "planner", planContent: "先检查样式，再修改布局。" } } });
+    render(<SubagentsTab />);
+    expect(screen.getByRole("region", { name: "子智能体计划审批" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "给实现布局补充说明" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "批准子智能体的计划" }));
+    await waitFor(() => expect(useAppStore.getState().pendingAskUser).toBeNull());
+    expect(useAppStore.getState().subagents[0].awaitingPlanApproval).toBe(false);
+    expect(sendClientCommandAwaitResultMock).toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.plan_review", subagent_id: "planner", request_id: "plan-1", conversation_id: "conversation-1", approved: true }), "subagent.plan_review");
+  });
+
+  it("keeps an actual cleanup error visible without inventing a stop toolbar", async () => {
+    useAppStore.setState({ subagents: [{ id: "pending-cleanup", role: "explore", status: "done", objective: "保留结果",
+      cleanupPending: true, cleanupReason: "runner is still alive", resultContent: "retained" }], focusedSubagentId: "pending-cleanup" });
+    render(<SubagentsTab />);
+    expect(screen.getByText("清理未完成")).toBeTruthy();
+    expect(screen.getByText("runner is still alive")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "停止子智能体" })).toBeNull();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+  });
+
+  it("shows a calm empty state when there is no delegated work", () => {
+    useAppStore.setState({ subagents: [] });
+
+    render(<SubagentsTab />);
+
+    expect(screen.getByText("已开启 · 0")).toBeTruthy();
+    expect(screen.getByText("没有已开启的子代理")).toBeTruthy();
+    expect(screen.queryByText("完成 · 0")).toBeNull();
+  });
+
+  it("groups concise task rows by user-facing state", () => {
+    render(<SubagentsTab />);
+
+    expect(screen.getByRole("region", { name: "进行中，1 项" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "已完成，1 项" })).toBeTruthy();
+    expect(screen.getByText("验证测试结果")).toBeTruthy();
+    expect(screen.queryByText("正在检查测试结果")).toBeNull();
+    expect(screen.getByText("定位界面问题")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "结论" })).toBeNull();
+    expect(screen.getByText("已开启 · 1")).toBeTruthy();
+    expect(screen.getByText("完成 · 1")).toBeTruthy();
+    expect(screen.queryByText("已找到主要问题")).toBeNull();
+  });
+
+  it("uses the child's name without an extra parent-delegation button", async () => {
+    useAppStore.setState({ focusedSubagentId: "source-child", subagents: [{ id: "source-child", role: "explore", status: "running",
+      teammateName: "Layout audit", objective: "检查所有页面的细节", turnId: "source-turn" }],
+      messages: [{ id: "parent-delegation", role: "assistant", turnId: "source-turn", content: "开始审计", artifacts: [], timestamp: 1 }],
+    });
+    render(<SubagentsTab />);
+    expect(screen.getByText("Layout audit")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "查看主任务中的委派" })).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+  });
+
+  it("shows the retained result separately without synthesizing a chat answer", async () => {
+    render(<SubagentsTab />);
+
+    expect(screen.queryByText("侧栏应只展示任务、状态和结果。")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：定位界面问题" }));
+
+    expect(screen.getByRole("region", { name: "子智能体任务详情：定位界面问题" })).toBeTruthy();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    const result = screen.getByLabelText("保留结果");
+    expect(within(result).getByText("侧栏应只展示任务、状态和结果。")).toBeTruthy();
+    expect(result.closest(".subagents-transcript")).toBeNull();
+    expect(screen.getByText("此任务保留了结果，暂无可回放的工作记录。")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "返回子智能体列表" }));
+    expect(screen.getByRole("region", { name: "进行中，1 项" })).toBeTruthy();
+  });
+
+  it("does not repeat the short summary as a substitute transcript", async () => {
+    render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：定位界面问题" }));
+
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    expect(screen.queryByRole("heading", { name: "任务摘要" })).toBeNull();
+    expect(screen.queryByText("已找到主要问题")).toBeNull();
+  });
+
+  it("retrieves a real retained result when its details are opened", async () => {
+    useAppStore.setState({
+      focusedSubagentId: null,
+      subagents: [{
+        id: "subagent-result",
+        role: "reviewer",
+        status: "done",
+        objective: "检查实现质量",
+        resultAvailable: true,
+      }],
+    });
+
+    cleanup();
+    render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查实现质量" }));
+
+    await waitFor(() => expect(sendClientCommandMock).toHaveBeenCalledWith({
+      type: "subagent.status",
+      subagent_id: "subagent-result",
+      include_result: true,
+      conversation_id: "conversation-1",
+      workspace_root: "C:\\workspace",
+    }));
+    expect(screen.queryByRole("button", { name: "获取结果" })).toBeNull();
+  });
+
+  it.each(["process", "partial"] as const)("does not use a previous answer or latest %s content to suppress a retained-result read", async (latest) => {
+    const messages = [
+      { id: "earlier-final", role: "assistant", content: "上一轮完整答案", timestamp: 1, terminal_status: "completed" },
+      latest === "process"
+        ? { id: "latest-process", role: "assistant", content: "", timestamp: 2, terminal_status: "completed", blocks: [
+          { type: "process", id: "latest-note", item_kind: "process_text", source: "model_preamble", status: "completed", visibility: "timeline", content: "本轮检查过程", timestamp: 2 },
+        ] }
+        : { id: "latest-partial", role: "assistant", content: "本轮尚未完整结束的正文", timestamp: 2, terminal_status: "partial" },
+    ];
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: (command as { type: string }).type, level: "success", message: "",
+        data: (command as { type: string }).type === "subagent.transcript" ? { seq: 2, messages } : {} };
+    });
+    useAppStore.setState({ focusedSubagentId: "latest-result", subagents: [{ id: "latest-result", role: "reviewer", status: "done",
+      objective: "继续检查", resultAvailable: true }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(sendClientCommandMock).toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.status",
+      subagent_id: "latest-result", include_result: true })));
+    expect(screen.getByText("上一轮完整答案")).toBeTruthy();
+    expect(screen.getByText(latest === "process" ? "本轮检查过程" : "本轮尚未完整结束的正文")).toBeTruthy();
+  });
+
+  it.each([
+    { terminal: "completed", answer: "本轮完整结果", retained: "本轮完整结果", duplicate: true },
+    { terminal: "completed", answer: "较早的完整结果", retained: "更新后的真实结果", duplicate: false },
+    { terminal: "partial", answer: "未完整结束的内容", retained: "未完整结束的内容", duplicate: false },
+  ])("deduplicates only the actual complete final answer: $terminal / $duplicate", async ({ terminal, answer, retained, duplicate }) => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: (command as { type: string }).type, level: "success", message: "", data: {
+        seq: 1, messages: [{ id: "answer", role: "assistant", content: answer, timestamp: 1, terminal_status: terminal }],
+      } };
+    });
+    useAppStore.setState({ focusedSubagentId: "known-result", subagents: [{ id: "known-result", role: "reviewer", status: "done",
+      objective: "检查最新结果", resultContent: retained }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(within(screen.getByLabelText("子智能体工作记录")).getByText(answer)).toBeTruthy());
+    if (duplicate) expect(screen.queryByLabelText("保留结果")).toBeNull();
+    else expect(within(screen.getByLabelText("保留结果")).getByText(retained)).toBeTruthy();
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.status" }));
+  });
+
+  it("uses the latest complete final answer without another retained-result request", async () => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: (command as { type: string }).type, level: "success", message: "", data: {
+        seq: 1, messages: [{ id: "complete-answer", role: "assistant", content: "当前轮完整答案", timestamp: 1, terminal_status: "completed" }],
+      } };
+    });
+    useAppStore.setState({ focusedSubagentId: "complete-result", subagents: [{ id: "complete-result", role: "reviewer", status: "done",
+      objective: "检查结果读取", resultAvailable: true }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(screen.getByText("当前轮完整答案")).toBeTruthy());
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.status" }));
+  });
+
+  it("keeps runtime counters and result envelopes out of the transcript", async () => {
+    useAppStore.setState({
+      subagents: [{
+        id: "subagent-noisy",
+        role: "explore",
+        status: "done",
+        objective: "调研石家庄天气",
+        summary: "天气调研完成",
+        currentActivity: "Running call_a7bb47d3d431442bb8ade914",
+        detail: "46.1s elapsed",
+        iteration: 8,
+        maxIterations: 8,
+        toolCallCount: 34,
+        resultContent: [
+          "### 天气结论",
+          "- 石家庄今天晴，最高 31°C",
+        ].join("\n"),
+      }],
+    });
+
+    const { container } = render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：调研石家庄天气" }));
+
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    expect(within(screen.getByLabelText("保留结果")).getByText("石家庄今天晴，最高 31°C")).toBeTruthy();
+    expect(container.textContent).not.toMatch(/call_a7bb|46\.1s|iteration|tool call/i);
+  });
+
+  it("keeps a running child transcript read-only", async () => {
+    useAppStore.setState({
+      conversationId: "conv-steer",
+      focusedSubagentId: null,
+      subagents: [{
+        id: "subagent-steer",
+        role: "reviewer",
+        status: "running",
+        objective: "检查实现",
+      }],
+    });
+    render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查实现" }));
+    await waitFor(() => expect(sendClientCommandMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: "subagent.transcript",
+      subagent_id: "subagent-steer",
+    })));
+    expect(screen.queryByLabelText("给这个子智能体发送消息")).toBeNull();
+    expect(screen.queryByRole("button", { name: "发送给子智能体" })).toBeNull();
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "send_message" }));
+  });
+
+  it("keeps a completed child transcript read-only", async () => {
+    useAppStore.setState({
+      conversationId: "conv-resume",
+      focusedSubagentId: null,
+      subagents: [{
+        id: "subagent-completed",
+        role: "reviewer",
+        status: "done",
+        objective: "检查实现",
+      }],
+    });
+    render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查实现" }));
+    await waitFor(() => expect(sendClientCommandMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: "subagent.transcript",
+      subagent_id: "subagent-completed",
+    })));
+    expect(screen.queryByLabelText("给这个子智能体发送消息")).toBeNull();
+    expect(screen.queryByText("继续给这个子智能体补充指令")).toBeNull();
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "send_message" }));
+  });
+
+  it("shows a terminal transcript gap as an explicit error", async () => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return {
+        type: "command.result",
+        command: "subagent.transcript",
+        level: "warning",
+        message: "Terminal subagent subagent-gap has no durable transcript.",
+        data: { seq: 0, messages: [], error_kind: "subagent_transcript_missing" },
+      };
+    });
+    useAppStore.setState({
+      conversationId: "conv-gap",
+      focusedSubagentId: "subagent-gap",
+      subagents: [{
+        id: "subagent-gap",
+        role: "reviewer",
+        status: "done",
+        objective: "检查持久化缺口",
+        resultContent: "This must not become a fake final answer.",
+      }],
+    });
+
+    render(<SubagentsTab />);
+
+    expect(await screen.findByText("Terminal subagent subagent-gap has no durable transcript.")).toBeTruthy();
+    expect(within(screen.getByLabelText("保留结果")).getByText("This must not become a fake final answer.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  });
+
+  it.each([false, true])("keeps the durable startup error visible with prior transcript=%s", async (hasHistory) => {
+    const messages = hasHistory ? [{
+      id: "previous-answer",
+      role: "assistant",
+      content: "上一轮已经完成",
+      timestamp: 1,
+    }] : [];
+    sendClientCommandAwaitResultMock.mockResolvedValue({
+      type: "command.result",
+      command: "subagent.transcript",
+      level: hasHistory ? "success" : "warning",
+      message: hasHistory ? "" : "Terminal subagent startup-failed has no durable transcript.",
+      data: { seq: hasHistory ? 1 : 0, messages },
+    });
+    useAppStore.setState({
+      focusedSubagentId: "startup-failed",
+      subagents: [{
+        id: "startup-failed",
+        role: "reviewer",
+        status: "error",
+        objective: "启动审计任务",
+        resultError: "RuntimeError: SubagentStart hook denied this task.",
+      }],
+    });
+
+    render(<SubagentsTab />);
+
+    expect(within(screen.getByRole("alert")).getByText(
+      "RuntimeError: SubagentStart hook denied this task.",
+    )).toBeTruthy();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    if (hasHistory) {
+      expect(await screen.findByText("上一轮已经完成")).toBeTruthy();
+    } else {
+      expect(await screen.findByText("Terminal subagent startup-failed has no durable transcript.")).toBeTruthy();
+    }
+    expect(screen.getByRole("alert").textContent).toContain("SubagentStart hook denied this task");
+    expect(screen.queryByRole("button", { name: "停止子智能体" })).toBeNull();
+  });
+
+  it.each([
+    { result: "RuntimeError: 模型请求被拒绝", alerts: 1 },
+    { result: "RuntimeError: 独立的启动清理错误", alerts: 2 },
+  ])("deduplicates only the child result error already present in its transcript: $result", async ({ result, alerts }) => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: "subagent.transcript", level: "success", message: "", data: {
+        messages: [{ id: "child-turn", role: "assistant", content: "", timestamp: 2, completed_at: 4,
+          terminal_status: "failed", termination_reason: "api_error", failure_message: "模型请求被拒绝" }],
+      } };
+    });
+    useAppStore.setState({ conversationId: "conv-failed", focusedSubagentId: "failed-child", subagents: [{
+      id: "failed-child", role: "reviewer", status: "error", objective: "失败任务", resultError: result,
+    }] });
+    const view = render(<SubagentsTab />);
+    await waitFor(() => expect(view.container.querySelector(".subagents-transcript .error-cell-notice")).toBeTruthy());
+    expect(screen.getAllByRole("alert")).toHaveLength(alerts);
+    expect(screen.getByText("模型请求被拒绝")).toBeTruthy();
+    if (alerts === 2) expect(screen.getByText(result)).toBeTruthy();
+  });
+
+  it("renders the child through the ordinary ChatTurn transcript without a details gate", async () => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return {
+        type: "command.result",
+        command: "subagent.transcript",
+        level: "success",
+        message: "",
+        data: { model: "child-review-model", provider: "actual-child-provider", reasoning_effort: "high", messages: [
+          { id: "child-user", role: "user", content: "检查实现", timestamp: 1 },
+          {
+            id: "child-turn",
+            role: "assistant",
+            content: "## 结论\n实现已核对",
+            timestamp: 2,
+            completed_at: 4,
+            duration_ms: 3000,
+            terminal_status: "completed",
+            blocks: [
+              { type: "process", id: "child-process", item_kind: "process_text", content: "正在读取关键文件", source: "model_preamble", status: "completed", visibility: "timeline", timestamp: 2 },
+              { type: "text", item_id: "child-answer", content: "## 结论\n实现已核对", source: "model_final", status: "completed" },
+            ],
+          },
+        ] },
+      };
+    });
+    useAppStore.setState({
+      conversationId: "conv-transcript",
+      focusedSubagentId: null,
+      subagents: [{
+        id: "subagent-transcript",
+        role: "reviewer",
+        status: "running",
+        objective: "检查实现",
+        resultContent: "## 结论\n实现已核对",
+      }],
+    });
+    const { container } = render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查实现" }));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "结论" })).toBeTruthy());
+    expect(screen.queryByText("正在读取关键文件")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(screen.getByText("正在读取关键文件")).toBeTruthy();
+    expect(container.querySelector(".user-cell-wrap")).toBeNull();
+    expect(screen.getByRole("heading", { name: "结论" })).toBeTruthy();
+    expect(screen.getByText("实现已核对")).toBeTruthy();
+    expect(screen.getAllByText("实现已核对")).toHaveLength(1);
+    expect(screen.queryByText("保留结果")).toBeNull();
+    expect(screen.getByText("child-review-model · 高")).toBeTruthy();
+    expect(screen.getByTitle("actual-child-provider · child-review-model · high")).toBeTruthy();
+    expect(container.querySelector("details")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "给检查实现补充说明" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "补充指令" })).toBeNull();
+  });
+
+  it("projects child tools and diffs with the same ordinary ChatTurn cells", async () => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return {
+        type: "command.result",
+        command: "subagent.transcript",
+        level: "success",
+        message: "",
+        data: { messages: [
+          { id: "child-user-tools", role: "user", content: "检查并修复实现", timestamp: 1 },
+          {
+            id: "child-turn-tools",
+            role: "assistant",
+            content: "修复完成",
+            timestamp: 2,
+            completed_at: 8,
+            duration_ms: 6000,
+            terminal_status: "completed",
+            is_streaming: false,
+            blocks: [
+              {
+                type: "tool_call",
+                record: {
+                  id: "read-1",
+                  name: "read_file",
+                  args: { path: "src/app.ts" },
+                  status: "success",
+                  result_kind: "file",
+                  activity_kind: "fileRead",
+                  input_summary: "src/app.ts",
+                  output_preview: "export const app = true;",
+                  started_at: 2,
+                  finished_at: 3,
+                },
+              },
+              {
+                type: "tool_call",
+                record: {
+                  id: "search-1",
+                  name: "search_files",
+                  args: { query: "app", path: "src" },
+                  status: "success",
+                  result_kind: "search",
+                  activity_kind: "workspaceSearch",
+                  input_summary: "app in src",
+                  output_preview: "src/app.ts:1",
+                  started_at: 3,
+                  finished_at: 4,
+                },
+              },
+              {
+                type: "tool_call",
+                record: {
+                  id: "command-1",
+                  name: "run_command",
+                  args: { command: "npm test" },
+                  status: "success",
+                  result_kind: "command",
+                  activity_kind: "commandExecution",
+                  stdout_preview: "1 passed",
+                  duration_ms: 1000,
+                  started_at: 4,
+                  finished_at: 5,
+                },
+              },
+              {
+                type: "tool_call",
+                record: {
+                  id: "edit-1",
+                  name: "edit_file",
+                  args: { path: "src/app.ts" },
+                  status: "success",
+                  result_kind: "edit",
+                  activity_kind: "fileChange",
+                  input_summary: "src/app.ts",
+                  started_at: 5,
+                  finished_at: 6,
+                  diff: {
+                    plus: 1,
+                    minus: 1,
+                    files: [{
+                      path: "src/app.ts",
+                      plus: 1,
+                      minus: 1,
+                      patch: "@@ -1 +1 @@\n-export const app = false;\n+export const app = true;",
+                    }],
+                  },
+                },
+              },
+              { type: "text", item_id: "child-final-tools", content: "修复完成", source: "model_final", status: "completed" },
+            ],
+          },
+        ] },
+      };
+    });
+    useAppStore.setState({
+      conversationId: "conv-tool-transcript",
+      focusedSubagentId: null,
+      subagents: [{
+        id: "subagent-tool-transcript",
+        role: "build",
+        status: "done",
+        objective: "检查并修复实现",
+      }],
+    });
+
+    const { container } = render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查并修复实现" }));
+
+    expect(await screen.findByText("已处理 6秒")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    container.querySelectorAll<HTMLButtonElement>("button.agent-loop-timeline-group-title[aria-expanded=\"false\"]").forEach((button) => fireEvent.click(button));
+
+    const readCell = screen.getAllByText("已读取", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    const searchCell = screen.getAllByText("已搜索", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    expect(readCell).toBeTruthy();
+    expect(searchCell).toBeTruthy();
+    fireEvent.click(within(readCell as HTMLElement).getByRole("button", { name: "展开活动详情" }));
+    fireEvent.click(within(searchCell as HTMLElement).getByRole("button", { name: "展开活动详情" }));
+    expect(within(readCell as HTMLElement).getByTitle("src/app.ts")).toBeTruthy();
+    expect(within(searchCell as HTMLElement).getByText("src/app.ts:1")).toBeTruthy();
+
+    expect(container.querySelector(".exec-cell")?.getAttribute("data-status")).toBe("success");
+    expect(container.querySelector(".exec-cell")?.textContent).toContain("npm test");
+    expect(screen.getByText("npm test")).toBeTruthy();
+    expect(screen.getByText("已编辑", { exact: true, selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByText("修复完成")).toBeTruthy();
+    expect(screen.getByText("已编辑 1 个文件")).toBeTruthy();
+
+    const workArea = screen.getByLabelText("Agent 处理进度");
+    const replyArea = screen.getByLabelText("Agent 回复");
+    const diffArea = screen.getByLabelText("文件修改");
+    expect(workArea.compareDocumentPosition(replyArea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(replyArea.compareDocumentPosition(diffArea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelectorAll(".chat-turn")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "撤销" })).toBeNull();
+    expect(screen.getByRole("button", { name: "查看变更" })).toBeTruthy();
+  });
+
+  it.each([
+    ["C:\\workspace", true], ["C:\\workspace\\.minicode\\worktrees\\child", false], [undefined, false],
+  ] as const)("uses actual child workspace %s for file review and only enables same-workspace revert", async (workspaceRoot, canRevert) => {
+    sendClientCommandAwaitResultMock.mockResolvedValue({ type: "command.result", command: "subagent.transcript", level: "success", message: "", data: {
+      ...(workspaceRoot ? { workspace_root: workspaceRoot } : {}), seq: 3,
+      messages: [{ id: "child-workspace-turn", role: "assistant", content: "已修正布局", timestamp: 1,
+        terminal_status: "completed", completed_at: 2000, is_streaming: false, blocks: [
+          { type: "tool_call", record: { id: "workspace-edit", name: "edit_file", args: { path: "src/layout.ts" },
+            status: "success", result_kind: "edit", activity_kind: "fileChange", started_at: 1, finished_at: 2,
+            diff: { plus: 1, minus: 1, files: [{ path: "src/layout.ts", plus: 1, minus: 1, patch: "@@ -1 +1 @@\n-old\n+new" }] } } },
+          { type: "text", item_id: "workspace-answer", content: "已修正布局", source: "model_final", status: "completed" },
+        ] }],
+    } });
+    useAppStore.setState({ focusedSubagentId: "child-workspace", subagents: [{ id: "child-workspace", role: "build", status: "done", displayName: "Layout" }] });
+    render(<SubagentsTab />);
+    expect(await screen.findByRole("button", { name: "查看变更" })).toBeTruthy();
+    expect(Boolean(screen.queryByRole("button", { name: "撤销" }))).toBe(canRevert);
+    expect(useAppStore.getState().subagents[0].workspaceRoot).toBe(workspaceRoot);
+    fireEvent.click(screen.getByRole("button", { name: "查看变更" }));
+    expect(useAppStore.getState().diffReview).toMatchObject({
+      conversationId: "conversation-1", workspaceRoot: workspaceRoot ?? "", mode: "view",
+    });
+    expect(useAppStore.getState().diffReview?.diff).toContain("+new");
+    if (!workspaceRoot) {
+      expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "file.read" }));
+      expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "diff.git_revert_patch" }));
+    }
+  });
+
+  it("loads the durable transcript once and does not poll on ordinary progress", async () => {
+    useAppStore.setState({
+      conversationId: "conv-push",
+      focusedSubagentId: "subagent-push",
+      subagents: [{
+        id: "subagent-push",
+        role: "reviewer",
+        status: "running",
+        objective: "检查推送",
+      }],
+    });
+    render(<SubagentsTab />);
+
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalledTimes(1));
+    for (let index = 0; index < 5; index += 1) {
+      act(() => {
+        useAppStore.setState({
+          subagents: [{
+            id: "subagent-push",
+            role: "reviewer",
+            status: "running",
+            objective: "检查推送",
+            currentActivity: `进度 ${index + 1}`,
+          }],
+        });
+      });
+    }
+
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("lets a pushed snapshot invalidate an older durable transcript response", async () => {
+    let resolveRequest: ((value: {
+      type: string;
+      command: string;
+      level: string;
+      message: string;
+      data: { seq: number; messages: Array<Record<string, unknown>> };
+    }) => void) | undefined;
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return await new Promise((resolve) => {
+        resolveRequest = resolve;
+      });
+    });
+    useAppStore.setState({
+      conversationId: "conv-race",
+      focusedSubagentId: "subagent-race",
+      subagents: [{
+        id: "subagent-race",
+        role: "reviewer",
+        status: "running",
+        objective: "检查竞态",
+      }],
+    });
+    render(<SubagentsTab />);
+
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalledTimes(1));
+    act(() => {
+      useAppStore.setState({
+        subagents: [{
+          id: "subagent-race",
+          role: "reviewer",
+          status: "running",
+          objective: "检查竞态",
+          transcriptSeq: 2,
+          transcriptMessages: [{
+            id: "pushed-final",
+            role: "assistant",
+            content: "来自实时推送的新记录",
+            timestamp: 2,
+          }],
+        }],
+      });
+    });
+    expect(await screen.findByText("来自实时推送的新记录")).toBeTruthy();
+
+    await act(async () => {
+      resolveRequest?.({
+        type: "command.result",
+        command: "subagent.transcript",
+        level: "success",
+        message: "",
+        data: {
+          seq: 1,
+          messages: [{
+            id: "stale-final",
+            role: "assistant",
+            content: "过期的请求结果",
+            timestamp: 1,
+          }],
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("来自实时推送的新记录")).toBeTruthy();
+    expect(screen.queryByText("过期的请求结果")).toBeNull();
+    expect(sendClientCommandAwaitResultMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an already-pushed transcript while durable hydration is still pending", async () => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return await new Promise(() => undefined);
+    });
+    useAppStore.setState({
+      conversationId: "conv-preloaded-push",
+      focusedSubagentId: "subagent-preloaded-push",
+      subagents: [{
+        id: "subagent-preloaded-push",
+        role: "reviewer",
+        status: "running",
+        objective: "检查预载推送",
+        transcriptSeq: 2,
+        transcriptMessages: [{
+          id: "preloaded-process",
+          role: "assistant",
+          content: "",
+          timestamp: 2,
+          isStreaming: true,
+          blocks: [{
+            type: "process",
+            id: "preloaded-process",
+            itemKind: "process_text",
+            content: "实时工作记录已经到达",
+            source: "model_preamble",
+            status: "completed",
+            visibility: "timeline",
+            timestamp: 2,
+          }, {
+            type: "text",
+            itemId: "preloaded-answer",
+            content: "子智能体正文正在实时返回",
+            source: "model_final",
+            status: "in_progress",
+            isStreaming: true,
+          }],
+        }],
+      }],
+    });
+
+    render(<SubagentsTab />);
+
+    expect(screen.getByText("实时工作记录已经到达")).toBeTruthy();
+    expect(await screen.findByText("子智能体正文正在实时返回")).toBeTruthy();
+    expect(screen.getByLabelText("Agent 回复")).toBeTruthy();
+    expect(screen.queryByText("正在载入工作详情…")).toBeNull();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("hides workflow containers and internal node metadata while preserving worker tasks", () => {
+    useAppStore.setState({
+      subagents: [
+        {
+          id: "workflow-weather",
+          role: "workflow",
+          status: "running",
+          workflowId: "workflow-weather",
+          workflowName: "天气调研",
+          workflowMode: "parallel",
+          summary: "internal workflow container",
+        },
+        {
+          id: "subagent-shijiazhuang",
+          role: "explorer",
+          status: "running",
+          workflowId: "workflow-weather",
+          nodeId: "node-weather-1",
+          taskId: "task-weather-1",
+          objective: "查询石家庄天气",
+        },
+        {
+          id: "subagent-taiyuan",
+          role: "explorer",
+          status: "done",
+          workflowId: "workflow-weather",
+          nodeId: "node-weather-2",
+          taskId: "task-weather-2",
+          objective: "查询太原天气",
+        },
+      ],
+    });
+
+    const { container } = render(<SubagentsTab />);
+
+    expect(screen.getByText("查询石家庄天气")).toBeTruthy();
+    expect(screen.getByText("查询太原天气")).toBeTruthy();
+    expect(container.textContent).not.toMatch(/internal workflow container|workflow-weather|node-weather|task-weather|并行|节点/);
+  });
+
+  it("presents partial, deadline and cancelled outcomes without protocol language", () => {
+    useAppStore.setState({
+      subagents: [
+        {
+          id: "subagent-deadline",
+          role: "explore",
+          status: "partial",
+          objective: "调研可用资料",
+          terminationReason: "deadline_exceeded",
+        },
+        {
+          id: "subagent-cancelled",
+          role: "reviewer",
+          status: "cancelled",
+          objective: "检查修改",
+          terminationInitiator: "user",
+        },
+      ],
+    });
+
+    render(<SubagentsTab />);
+
+    expect(screen.getByRole("region", { name: "已完成，1 项" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: /需要处理/ })).toBeNull();
+    expect(screen.getByText("已保留结果")).toBeTruthy();
+    expect(screen.queryByText("已保留可用结果")).toBeNull();
+    expect(screen.queryByText("已停止")).toBeNull();
+    expect(useAppStore.getState().subagents).toHaveLength(2);
+    expect(screen.queryByText("已由你停止")).toBeNull();
+    expect(screen.queryByText(/deadline|cancelled|partial/i)).toBeNull();
+  });
+
+  it("excludes failed and interrupted agents from the overview while retaining their original detail records", async () => {
+    useAppStore.setState({ subagents: [{ id: "failed-child", role: "reviewer", status: "error", displayName: "Failed child", resultError: "actual provider response" },
+      { id: "cancelled-child", role: "reviewer", status: "cancelled", displayName: "Cancelled child" }] });
+    render(<SubagentsTab />);
+    expect(screen.queryByRole("button", { name: "打开子智能体任务：Failed child" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "打开子智能体任务：Cancelled child" })).toBeNull();
+    expect(useAppStore.getState().subagents).toHaveLength(2);
+    act(() => useAppStore.getState().setFocusedSubagentId("failed-child"));
+    expect(screen.getByRole("region", { name: "子智能体任务详情：Failed child" })).toBeTruthy();
+    expect(screen.getByText("actual provider response")).toBeTruthy();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+  });
+
+  it("reveals every real completed task with the current Codex ten-row disclosure", () => {
+    const completed: SubagentState[] = Array.from({ length: 14 }, (_, index) => ({
+      id: `subagent-completed-${index}`,
+      role: "reviewer",
+      status: "done",
+      objective: `已完成任务 ${index + 1}`,
+    }));
+    useAppStore.setState({ subagents: completed });
+
+    render(<SubagentsTab />);
+
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：已完成任务/ })).toHaveLength(10);
+    fireEvent.click(screen.getByRole("button", { name: "再显示 4 个已完成子智能体" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：已完成任务/ })).toHaveLength(14);
+    expect(screen.getByText("已完成任务 14")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起已完成子智能体" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：已完成任务/ })).toHaveLength(10);
+    expect(useAppStore.getState().subagents).toHaveLength(14);
+  });
+
+  it("shows the real objective and elapsed clock while keeping recency for finished work", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    useAppStore.setState({ subagents: [
+      { id: "running-clock", role: "reviewer", status: "running", displayName: "Layout audit",
+        objective: "**检查**页面的布局与真实交互", startedAt: 98_100, lastProgressAt: 99_900 },
+      { id: "waiting-input", role: "explore", status: "blocked", displayName: "Waiting audit",
+        objective: "等待配置结果", startedAt: 98_100, needsInput: true },
+      { id: "finished-clock", role: "reviewer", status: "done", displayName: "Completed audit", completedAt: 99_900 },
+    ] });
+    try {
+      render(<SubagentsTab />);
+      const running = screen.getByRole("button", { name: "打开子智能体任务：Layout audit" });
+      expect(within(running).getByText("检查页面的布局与真实交互")).toBeTruthy();
+      expect(within(running).getByText("1秒")).toBeTruthy();
+      expect(within(running).queryByText("刚刚")).toBeNull();
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Completed audit" })).getByText("刚刚")).toBeTruthy();
+      expect(screen.getByRole("region", { name: "进行中，2 项" })).toBeTruthy();
+      expect(screen.queryByRole("region", { name: /需要处理/ })).toBeNull();
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(within(running).getByText("3秒")).toBeTruthy();
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+
+  it("ticks visible clocks without rebuilding agent projections or reparsing objectives, including completed recency", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    const projection = vi.spyOn(agentViews, "projectAgentViews");
+    const parse = vi.spyOn(markdown, "fromMarkdown");
+    useAppStore.setState({ subagents: [
+      { id: "clock-active", role: "reviewer", status: "running", displayName: "Running audit", objective: "**Active** objective", startedAt: 98_100 },
+      { id: "clock-done", role: "reviewer", status: "done", displayName: "Finished audit", objective: "Finished objective", completedAt: 41_000 },
+    ] });
+    try {
+      render(<SubagentsTab />);
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Finished audit" })).getByText("刚刚")).toBeTruthy();
+      projection.mockClear(); parse.mockClear();
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Running audit" })).getByText("3秒")).toBeTruthy();
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Finished audit" })).getByText("1分钟前")).toBeTruthy();
+      expect(projection).not.toHaveBeenCalled();
+      expect(parse).not.toHaveBeenCalled();
+    } finally { cleanup(); projection.mockRestore(); parse.mockRestore(); vi.useRealTimers(); }
+  });
+
+  it("reveals all active agents and keeps each conversation's disclosure choice", () => {
+    useAppStore.setState({ subagents: Array.from({ length: 6 }, (_, index) => ({
+      id: `active-${index}`, role: "reviewer", status: "running", displayName: `Review ${index}`, objective: `检查区域 ${index}`,
+    })) });
+    render(<SubagentsTab />);
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(4);
+    fireEvent.click(screen.getByRole("button", { name: "再显示 2 个进行中子智能体" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(6);
+    act(() => useAppStore.setState({ conversationId: "another-owner" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(4);
+    act(() => useAppStore.setState({ conversationId: "conversation-1" }));
+    expect(screen.getAllByRole("button", { name: /打开子智能体任务：Review/ })).toHaveLength(6);
+  });
+
+  it("keeps internal message rows out of the ordinary panel", () => {
+    useAppStore.setState({
+      subagents: [{
+        id: "message-1",
+        role: "message",
+        status: "running",
+        summary: "Message from run-1: checking progress",
+      }],
+    });
+
+    render(<SubagentsTab />);
+
+    expect(screen.queryByText(/Message from run-1/)).toBeNull();
+    expect(screen.getByText("没有已开启的子代理")).toBeTruthy();
+  });
+
+});

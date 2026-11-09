@@ -1,0 +1,169 @@
+/* @vitest-environment jsdom */
+import { loadConversationMenu } from "./ConversationMenu";
+
+// These action suites use a ready interaction module; cold ownership is covered separately.
+beforeAll(async () => { await loadConversationMenu(); });
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { beforeAll, afterEach, beforeEach, expect, it, vi } from "vitest";
+import { useAppStore } from "../stores";
+import { ConversationsTab } from "./ConversationsTab";
+import { handleSessionEvent } from "../chat/sessionEvents";
+import type { ServerEvent } from "../protocol/events";
+
+const { send } = vi.hoisted(() => ({ send: vi.fn(async (command: { type: string }) => ({
+  type: "command.result", command: command.type, level: "success", message: "", data: {},
+})) }));
+vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), sendClientCommandAwaitResult: send,
+  commandResultSucceeded: (event: { level: string }) => event.level !== "error" }));
+vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(), isDesktop: () => false, revealPath: vi.fn() }));
+vi.mock("../workspace/openWorkspaceFolder", () => ({ openWorkspaceFolder: vi.fn() }));
+
+const record = (extra = {}) => ({ id: "task", title: "Actual task", updated_at: "2026-10-14T01:00:00Z", revision: 1,
+  workspace_root: "C:/A", execution_cwd: "C:/A", pinned: false, has_unread_turn: false, project_id: null, ...extra });
+let revision = 0;
+const publish = (extra = {}) => act(() => {
+  handleSessionEvent({ type: "conversation.list", conversation_id: "reader", active_conversation_id: "reader",
+    inventory_instance_id: "a".repeat(32), inventory_revision: ++revision, conversations: [record(extra), {
+      id: "reader", title: "Current reader", updated_at: "2026-10-14T00:00:00Z", workspace_root: "C:/B", execution_cwd: "C:/B",
+    }] } as ServerEvent, { textStreamBuffer: { push: vi.fn(), flush: vi.fn(), destroy: vi.fn() },
+      thinkingStreamBuffer: { push: vi.fn(), flush: vi.fn(), destroy: vi.fn() } });
+});
+beforeEach(() => {
+  revision = 0;
+  send.mockClear();
+  localStorage.removeItem("minicode.sidebar.conversations.state");
+  useAppStore.setState({ conversationId: "reader", workingDirectory: "C:/B", appMode: "cowork", draft: "Original reader draft",
+    messages: [], conversations: [], conversationMessages: {}, isConnected: false, isStreaming: false, conversationStreaming: {},
+    pendingConversationSwitchId: null, pendingConversationCreateId: null, conversationInventoryInstanceId: null, conversationInventoryRevision: 0,
+    pendingApproval: null, approvalQueue: [], pendingDiffReview: null, diffReviewQueue: [], pendingAskUser: null, askUserQueue: [], runtimeSession: null,
+    recentWorkspaces: [{ path: "C:/A", name: "A", projectType: "unknown", lastOpened: 1 }, { path: "C:/B", name: "B", projectType: "unknown", lastOpened: 2 }] });
+  publish();
+});
+afterEach(cleanup);
+const show = () => render(<ConversationsTab conversationId="reader" onSetConfirmDialog={vi.fn()} />);
+const menuFor = (region: HTMLElement) => {
+  const row = within(region).getByText("Actual task").closest('[data-session-row="true"]')!;
+  fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "会话操作", exact: true }));
+};
+
+it("pins the captured background task only after authoritative inventory and unpins back to its project", async () => {
+  show();
+  menuFor(screen.getByRole("region", { name: "工作区 A" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "固定", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.pin.set", conversation_id: "task", pinned: true }, "conversation.pin.set", expect.anything()));
+  expect(screen.queryByRole("region", { name: "已固定" })).toBeNull();
+  publish({ revision: 2, pinned: true, pinned_at: "2026-10-14T02:00:00Z" });
+  const pinned = screen.getByRole("region", { name: "已固定" });
+  expect(within(pinned).getByText("Actual task")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "最近" })).queryByText("Actual task")).toBeNull();
+  expect(within(screen.getByRole("region", { name: "工作区 A" })).queryByText("Actual task")).toBeNull();
+  fireEvent.click(within(pinned).getByRole("button", { name: "取消固定", exact: true }));
+  publish({ revision: 3, pinned: false });
+  expect(screen.queryByRole("region", { name: "已固定" })).toBeNull();
+  expect(within(screen.getByRole("region", { name: "工作区 A" })).getByText("Actual task")).toBeTruthy();
+  expect(useAppStore.getState().draft).toBe("Original reader draft");
+  expect(useAppStore.getState().conversationId).toBe("reader");
+});
+
+it("projects real unread metadata and clears it when the user opens that row", async () => {
+  show();
+  menuFor(screen.getByRole("region", { name: "工作区 A" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "标记为未读", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: true, expected_revision: "initial:task" }, "conversation.read_state.set"));
+  publish({ revision: 2, has_unread_turn: true });
+  const project = screen.getByRole("region", { name: "工作区 A" });
+  expect(within(project).getByLabelText("未读")).toBeTruthy();
+  menuFor(project);
+  expect(screen.getByRole("menuitem", { name: "标记为已读", exact: true })).toBeTruthy();
+  fireEvent.click(screen.getByRole("menuitem", { name: "标记为已读", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: false, expected_revision: "initial:task" }, "conversation.read_state.set"));
+  publish({ revision: 3, has_unread_turn: true });
+  fireEvent.click(within(project).getByRole("button", { name: "Actual task", exact: true }));
+  expect(send).toHaveBeenLastCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: false, expected_revision: "initial:task" }, "conversation.read_state.set");
+});
+
+it("moves the pinned task to a real project then removes membership while preserving execution and the reader", async () => {
+  publish({ revision: 2, pinned: true, pinned_at: "2026-10-14T02:00:00Z" });
+  show();
+  menuFor(screen.getByRole("region", { name: "已固定" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "项目", exact: true }));
+  expect(screen.queryByRole("menuitem", { name: "A", exact: true })).toBeNull();
+  fireEvent.click(screen.getByRole("menuitem", { name: "B", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.project.set", conversation_id: "task", project_id: "c:/b" }, "conversation.project.set", expect.anything()));
+  publish({ revision: 3, pinned: false, project_id: "C:/B" });
+  const target = screen.getByRole("region", { name: "工作区 B" });
+  expect(within(target).getByText("Actual task")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "工作区 A" })).queryByText("Actual task")).toBeNull();
+  expect(useAppStore.getState().conversations.find(item => item.id === "task")?.executionCwd).toBe("C:/A");
+  menuFor(target);
+  fireEvent.click(screen.getByRole("menuitem", { name: "项目", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "从 B 移出", exact: true }));
+  publish({ revision: 4, project_id: "" });
+  expect(within(target).queryByText("Actual task")).toBeNull();
+  expect(within(screen.getByRole("region", { name: "最近" })).getByText("Actual task")).toBeTruthy();
+  expect(useAppStore.getState().workingDirectory).toBe("C:/B");
+  expect(useAppStore.getState().conversationId).toBe("reader");
+  expect(useAppStore.getState().draft).toBe("Original reader draft");
+});
+
+it.each(["pinned", "recent", "project"] as const)("uses the same legacy named-project membership in the %s occurrence instead of its execution folder", async occurrence => {
+  useAppStore.setState({ recentWorkspaces: [
+    { path: "C:/A", name: "Project A", projectType: "project", lastOpened: 1, named: true, sourceFolders: ["C:/source-a", "C:/second-a"] },
+    { path: "C:/B", name: "Project B", projectType: "project", lastOpened: 2, named: true, sourceFolders: ["C:/B"] },
+  ] });
+  publish({ revision: 2, project_id: null, pinned: occurrence === "pinned", workspace_root: "C:/source-a",
+    worktree_path: "C:/source-a/.minicode/worktrees/task", execution_cwd: "C:/source-a/.minicode/worktrees/task" });
+  show();
+  menuFor(screen.getByRole("region", { name: occurrence === "pinned" ? "已固定" : occurrence === "recent" ? "最近" : "工作区 Project A" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "项目", exact: true }));
+  expect(screen.getByRole("menuitem", { name: "从 Project A 移出", exact: true })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Project A", exact: true })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: /worktrees|source-a/ })).toBeNull();
+  fireEvent.click(screen.getByRole("menuitem", { name: "Project B", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.project.set", conversation_id: "task", project_id: "c:/b" },
+    "conversation.project.set", expect.anything()));
+  expect(useAppStore.getState().conversations.find(item => item.id === "task")).toMatchObject({ projectId: null,
+    executionCwd: "C:/source-a/.minicode/worktrees/task" });
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "reader", workingDirectory: "C:/B", draft: "Original reader draft" });
+});
+
+it("keeps explicit removal from a named project authoritative even when its old source folder still matches", () => {
+  useAppStore.setState({ recentWorkspaces: [
+    { path: "C:/A", name: "Project A", projectType: "project", lastOpened: 1, named: true, sourceFolders: ["C:/source-a"] },
+    { path: "C:/B", name: "Project B", projectType: "project", lastOpened: 2, named: true, sourceFolders: ["C:/B"] },
+  ] });
+  publish({ revision: 2, project_id: "", workspace_root: "C:/source-a", execution_cwd: "C:/source-a/.minicode/worktrees/task" });
+  show(); menuFor(screen.getByRole("region", { name: "最近" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "项目", exact: true }));
+  expect(screen.getByRole("menuitem", { name: "Project A", exact: true })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Project B", exact: true })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: /^从 / })).toBeNull();
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("opens a background conversation's real context menu at the pointer without selecting or rewriting the reader", async () => {
+  show();
+  const row = within(screen.getByRole("region", { name: "工作区 A" })).getByRole("button", { name: "Actual task", exact: true });
+  fireEvent.contextMenu(row, { clientX: 180, clientY: 90 });
+  const menu = screen.getByRole("menu", { name: "会话操作" });
+  expect(menu.style.left).toBe("180px");
+  expect(menu.style.top).toBe("90px");
+  fireEvent.click(screen.getByRole("menuitem", { name: "固定", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.pin.set", conversation_id: "task", pinned: true },
+    "conversation.pin.set", expect.anything()));
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "reader", workingDirectory: "C:/B", draft: "Original reader draft" });
+});
+
+it.each([{ key: "ContextMenu" }, { key: "F10", shiftKey: true }])("opens the row menu with $key and restores that occurrence on Escape", async shortcut => {
+  show();
+  const row = within(screen.getByRole("region", { name: "最近" })).getByRole("button", { name: "Actual task", exact: true });
+  row.focus();
+  fireEvent.keyDown(row, { ...shortcut, isComposing: true });
+  expect(screen.queryByRole("menu", { name: "会话操作" })).toBeNull();
+  fireEvent.keyDown(row, shortcut);
+  fireEvent.keyDown(screen.getByRole("menu", { name: "会话操作" }), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("menu", { name: "会话操作" })).toBeNull());
+  expect(document.activeElement).toBe(row);
+  expect(send).not.toHaveBeenCalled();
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "reader", draft: "Original reader draft" });
+});

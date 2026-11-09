@@ -708,3 +708,24 @@ it("starts original A explicitly while B is still pending, keeps A context until
   expect(useAppStore.getState()).toMatchObject({ conversationId: "B", draft: "B owned draft", activeTabPath: "C:/project-B/B.ts" });
   expect(wire.sent).toHaveLength(1); expectWaiterReleased(stopped);
 });
+
+it("creates the conversation for the first send even when local draft storage is broken", async () => {
+  useAppStore.getState().setDraft("send me");
+  const id = currentDraft();
+  await resetComposerDraftStorageForTests(true);
+  vi.stubGlobal("indexedDB", { open: () => {
+    const request = { error: new DOMException("quota", "QuotaExceededError"), onerror: null as null | ((event: Event) => void),
+      onsuccess: null as null | ((event: Event) => void), onupgradeneeded: null as null | ((event: Event) => void), result: undefined };
+    setTimeout(() => request.onerror?.(new Event("error")), 0);
+    return request;
+  } });
+  useAppStore.getState().setDraft("send me now");
+
+  const owner = await useAppStore.getState().materializeConversationDraft(id);
+
+  expect(owner).toBeTruthy();
+  expect(commandOfType("conversation.create")).toBeTruthy();
+  vi.unstubAllGlobals();
+  vi.stubGlobal("File", NativeFile);
+  await resetComposerDraftStorageForTests();
+});

@@ -1,0 +1,36 @@
+.mc-changes-file-actions,
+.mc-changes-file-open-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+.mc-changes-file-actions { gap: 4px; }
+
+.mc-changes-file-action {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.mc-changes-file-more { border-radius: 50%; }
+
+.mc-changes-file-action:hover,
+.mc-changes-file-action[aria-expanded="true"] {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.mc-changes-file-action:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}

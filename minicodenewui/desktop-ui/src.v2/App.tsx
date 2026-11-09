@@ -1,0 +1,111 @@
+import { lazy, Suspense, useEffect, useState } from "react";
+import { LoaderCircle } from "lucide-react";
+import { WorkbenchShell } from "./shell/WorkbenchShell";
+import { QuickOpen } from "./overlays/QuickOpen";
+import { ToastContainer } from "./overlays/ToastContainer";
+import { useWebSocketConnection } from "./hooks/useWebSocket";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useDesktopEvents } from "./hooks/useDesktopEvents";
+import { useNativeWindowAppearance } from "./hooks/useNativeWindowAppearance";
+import { useAppStore } from "./stores";
+import { ChunkErrorBoundary, SafeBoundary } from "./shell/ChunkErrorBoundary";
+import { capabilityFeatureEnabled } from "./protocol/capabilities";
+import { DesktopLanguageProvider, useI18n } from "./i18n";
+import { McpAppSurfaces } from "./chat/mcp-apps/app-surfaces";
+
+const CommandPalette = lazy(() => import("./overlays/CommandPalette").then((m) => ({ default: m.CommandPalette })));
+const SettingsCenter = lazy(() => import("./overlays/SettingsCenter").then((m) => ({ default: m.SettingsCenter })));
+const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHelp").then((m) => ({ default: m.KeyboardShortcutsHelp })));
+const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
+const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
+const ProjectDialogHost = lazy(() => import("./overlays/ProjectDialog").then(m => ({ default: m.ProjectDialogHost })));
+const DeferredDesktopEffects = lazy(() => import("./desktop/DeferredDesktopEffects").then(m => ({ default: m.DeferredDesktopEffects })));
+
+const DeferredDesktopEffectsHost = () => {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let idleCallback = false;
+    const release = () => { if (active) setReady(true); };
+    const idle = typeof window.requestIdleCallback === "function"
+      ? (idleCallback = true, window.requestIdleCallback(release, { timeout: 1200 }))
+      : window.setTimeout(release, 0);
+    return () => {
+      active = false;
+      if (idleCallback && typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idle);
+      else window.clearTimeout(idle);
+    };
+  }, []);
+  return ready ? <Suspense fallback={null}><DeferredDesktopEffects /></Suspense> : null;
+};
+
+const RouteLoading = ({ settings = false }: { settings?: boolean }) => {
+  const { t } = useI18n();
+  return (
+  <div className="app-route-loading" data-scope={settings ? "settings" : "overlay"} role="status" aria-label={settings ? t("正在加载设置") : t("正在加载页面")}>
+    <LoaderCircle className="animate-spin" aria-hidden="true" />
+  </div>
+);
+};
+
+const AppContent = () => {
+  const { t } = useI18n();
+  useWebSocketConnection();
+  useKeyboardShortcuts();
+  useDesktopEvents();
+  useNativeWindowAppearance();
+
+  const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
+  const quickOpenVisible = useAppStore((s) => s.quickOpenVisible);
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const shortcutsHelpOpen = useAppStore((s) => s.shortcutsHelpOpen);
+  const liveArtifactsOpen = useAppStore((s) => s.liveArtifactsOpen);
+  const agentEditorOpen = useAppStore((s) => s.agentEditorOpen);
+  const projectEditTarget = useAppStore(s => s.projectEditTarget);
+  const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
+  const agentEditorEnabled = capabilityFeatureEnabled(runtimeCapabilities, "agent_editor", true);
+  const [settingsVisited, setSettingsVisited] = useState(settingsOpen);
+  const [agentEditorVisited, setAgentEditorVisited] = useState(agentEditorOpen && agentEditorEnabled);
+  useEffect(() => { if (settingsOpen) setSettingsVisited(true); }, [settingsOpen]);
+  useEffect(() => { if (agentEditorOpen && agentEditorEnabled) setAgentEditorVisited(true); }, [agentEditorOpen, agentEditorEnabled]);
+  const overlayRoute = [
+    commandPaletteOpen, settingsOpen, shortcutsHelpOpen,
+    liveArtifactsOpen, agentEditorOpen && agentEditorEnabled, projectEditTarget,
+  ].join(":");
+
+  return (
+    <>
+      <SafeBoundary fallback={<div style={{padding: 32, textAlign: 'center'}}>{t("发生错误。")} <button onClick={() => window.location.reload()}>{t("重新加载")}</button></div>}>
+        <WorkbenchShell />
+        <McpAppSurfaces />
+      </SafeBoundary>
+      <DeferredDesktopEffectsHost />
+      <ChunkErrorBoundary key={overlayRoute}>
+        <Suspense fallback={<RouteLoading />}>
+          {commandPaletteOpen && <CommandPalette />}
+          {shortcutsHelpOpen && <KeyboardShortcutsHelp />}
+          {liveArtifactsOpen && <LiveArtifacts />}
+          {projectEditTarget && <ProjectDialogHost />}
+        </Suspense>
+      </ChunkErrorBoundary>
+      <div hidden={!settingsOpen} style={{ display: settingsOpen ? "contents" : "none" }}>
+        <ChunkErrorBoundary resetKey={settingsOpen}>
+          <Suspense fallback={<RouteLoading settings />}>
+            {(settingsVisited || settingsOpen) && <SettingsCenter withGlobalRail />}
+          </Suspense>
+        </ChunkErrorBoundary>
+      </div>
+      <div hidden={!agentEditorOpen || !agentEditorEnabled} style={{ display: agentEditorOpen && agentEditorEnabled ? "contents" : "none" }}>
+        <ChunkErrorBoundary resetKey={agentEditorOpen}>
+          <Suspense fallback={<RouteLoading />}>
+            {agentEditorEnabled && (agentEditorVisited || agentEditorOpen) && <AgentEditor />}
+          </Suspense>
+        </ChunkErrorBoundary>
+      </div>
+      <QuickOpen />
+      <ToastContainer placement={commandPaletteOpen || quickOpenVisible ? "bottom" : "top"} />
+    </>
+  );
+};
+
+export const App = () => <DesktopLanguageProvider><AppContent /></DesktopLanguageProvider>;

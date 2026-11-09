@@ -85,6 +85,8 @@ async def update_memory_settings_api(request: MemorySettingsUpdate, response: Re
             config_change_hook=run_config_change_hook)
     except (ValueError, SettingsError, ConfigChangeHookBlocked) as error:
         raise HTTPException(409, str(error)) from error
+    except OSError as error:
+        raise HTTPException(500, f"无法保存记忆设置：{error}") from error
     if _state.bootstrap is not None:
         _state.bootstrap.config = config
     _state.invalidate_status_cache()
@@ -292,6 +294,8 @@ async def update_llm_settings_api(request: LLMSettingsUpdateRequest) -> dict[str
         )
     except LLMSettingsServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法保存模型设置：{exc}") from exc
     if _state.bootstrap is not None:
         _state.bootstrap.config = result.config
     return result.payload
@@ -332,6 +336,8 @@ async def update_feature_flags_settings_api(request: FeatureFlagsUpdateRequest, 
         )
     except FeatureFlagSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法保存功能开关：{exc}") from exc
     config = result.pop("_config", None)
     if config is not None and _state.bootstrap is not None:
         _state.bootstrap.config = config

@@ -276,11 +276,16 @@ export function AssistantMarkdownCell({
     if (!conversationId || state.conversationId !== conversationId
       || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
     setForking(true);
+    // The fork owner is the conversation's own execution root. A projectless or
+    // root-workspace conversation has none, and the browsing directory is not a
+    // substitute: the backend compares it against the source conversation.
+    const conversation = state.conversations.find(item => item.id === conversationId);
+    const forkWorkspaceRoot = conversation?.worktreePath || conversation?.workspaceRoot || "";
     try {
       const result = await sendClientCommandAwaitResult({
         type: "context.fork",
         conversation_id: conversationId,
-        workspace_root: workspaceRoot,
+        ...(forkWorkspaceRoot ? { workspace_root: forkWorkspaceRoot } : {}),
         message_id: cell.messageId,
         create_branch: true,
         activate: true,

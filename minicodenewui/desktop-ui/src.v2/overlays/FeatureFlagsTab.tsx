@@ -1,0 +1,290 @@
+import { useI18n, type Translate, type TranslationKey } from "../i18n";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RotateCw } from "lucide-react";
+import { pushToast } from "./ToastContainer";
+import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
+import { sendClientCommand } from "../protocol/ws-outbox";
+import {
+  secondaryActionStyle,
+  subTabBarStyle,
+  subTabStyle,
+  subTabCountStyle,
+  emptyInlineStyle,
+} from "./settingsShared";
+import { fetchJsonWithStartupRetry, formatSettingsLoadError } from "./settingsLoad";
+import { SelectMenu } from "../components/SelectMenu";
+
+type FeatureFlagEntry = {
+  name: string;
+  default: boolean;
+  enabled: boolean;
+  source: "default" | "settings" | "env" | string;
+  override?: boolean | null;
+  env_var?: string;
+  env_override?: boolean | null;
+};
+
+type FeatureFlagPayload = {
+  flags?: FeatureFlagEntry[];
+};
+
+type DraftOverride = "default" | "on" | "off";
+
+const flagLabels: Record<string, { title: TranslationKey; description: TranslationKey; group: "Runtime" | "Plugins" | "MCP" | "UI" | "SDK" }> = {
+  reactive_compact: { title: "响应式上下文压缩", description: "在提示词预算耗尽前允许运行时压缩上下文。", group: "Runtime" },
+  plugin_lifecycle_api: { title: "插件生命周期 API", description: "启用本地插件列表和启停管理接口。", group: "Plugins" },
+  plugin_skills: { title: "插件技能", description: "发现本地插件中包含的 SKILL.md。", group: "Plugins" },
+  sdk_query: { title: "SDK 查询", description: "启用 Python SDK 查询入口。", group: "SDK" },
+  mcp_roots: { title: "MCP 根目录", description: "响应 MCP 服务的 roots/list 请求。", group: "MCP" },
+  mcp_elicitation: { title: "MCP 结构化提问", description: "允许 MCP 服务向用户请求结构化输入。", group: "MCP" },
+  mcp_websocket_transport: { title: "MCP WebSocket 传输", description: "启用 MCP WebSocket 连接。", group: "MCP" },
+  mcp_streamable_http_transport: { title: "MCP 流式 HTTP 传输", description: "启用 MCP Streamable HTTP 连接。", group: "MCP" },
+  global_search: { title: "全局搜索", description: "启用快速打开和会话搜索入口。", group: "UI" },
+  agent_editor: { title: "智能体编辑器", description: "启用自定义子智能体编辑界面。", group: "UI" },
+  agent_trace_export_v1: { title: "智能体轨迹导出", description: "允许导出智能体轨迹用于诊断。", group: "Runtime" },
+};
+export const FEATURE_FLAG_LABELS = flagLabels;
+
+const GROUPS = ["Runtime", "Plugins", "MCP", "UI", "SDK"] as const;
+const GROUP_LABELS: Record<typeof GROUPS[number], TranslationKey | "MCP" | "SDK"> = {
+  Runtime: "运行时",
+  Plugins: "插件",
+  MCP: "MCP",
+  UI: "界面",
+  SDK: "SDK",
+};
+
+const overrideToDraft = (value: boolean | null | undefined): DraftOverride => {
+  if (value === true) return "on";
+  if (value === false) return "off";
+  return "default";
+};
+
+const draftToOverride = (value: DraftOverride): boolean | null => {
+  if (value === "on") return true;
+  if (value === "off") return false;
+  return null;
+};
+
+const flagTitle = (flag: FeatureFlagEntry, tr: Translate): string => flagLabels[flag.name] ? tr(flagLabels[flag.name].title) : flag.name.replace(/_/g, " ");
+const flagGroup = (flag: FeatureFlagEntry): typeof GROUPS[number] => flagLabels[flag.name]?.group ?? "Runtime";
+
+export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: boolean; searchTarget?: string }) => {
+  const { t: tr } = useI18n();
+  const [flags, setFlags] = useState<FeatureFlagEntry[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, DraftOverride>>({});
+  const [loading, setLoading] = useState(false);
+  const [savingName, setSavingName] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [group, setGroup] = useState<typeof GROUPS[number]>("Runtime");
+  const loadSeqRef = useRef(0);
+  const operationRef = useRef<"" | "refresh" | "save">("");
+  useEffect(() => {
+    const flag = Object.values(flagLabels).find((flag) => flag.title === searchTarget);
+    if (flag) setGroup(flag.group);
+  }, [searchTarget]);
+
+  const refresh = useCallback(async (options: { showToast?: boolean } = {}) => {
+    if (operationRef.current) return;
+    operationRef.current = "refresh";
+    const seq = loadSeqRef.current + 1;
+    loadSeqRef.current = seq;
+    setLoading(true);
+    setLoadError("");
+    try {
+      const payload = await fetchJsonWithStartupRetry<FeatureFlagPayload>(`${apiBase()}/api/settings/feature-flags`, {
+        cache: "no-store",
+        headers: authHeaders(),
+      }, { cacheKey: "settings.feature_flags" });
+      if (loadSeqRef.current !== seq) return;
+      const nextFlags = Array.isArray(payload.flags) ? payload.flags : [];
+      setFlags(nextFlags);
+      setDrafts(Object.fromEntries(nextFlags.map((flag) => [flag.name, overrideToDraft(flag.override)])));
+    } catch (error) {
+      if (loadSeqRef.current !== seq) return;
+      const message = formatSettingsLoadError(error);
+      setLoadError(message);
+      if (options.showToast) pushToast(tr("功能开关加载失败：{v0}", { v0: message }), "error");
+    } finally {
+      if (loadSeqRef.current === seq) setLoading(false);
+      if (operationRef.current === "refresh") operationRef.current = "";
+    }
+  }, [tr]);
+
+  useEffect(() => {
+    if (active) void refresh();
+  }, [active, refresh]);
+
+  const counts = useMemo(() => {
+    const result = Object.fromEntries(GROUPS.map((name) => [name, 0])) as Record<typeof GROUPS[number], number>;
+    for (const flag of flags) result[flagGroup(flag)] += 1;
+    return result;
+  }, [flags]);
+
+  const visibleFlags = flags.filter((flag) => flagGroup(flag) === group);
+
+  const saveFlag = async (flag: FeatureFlagEntry, nextDraft: DraftOverride) => {
+    if (flag.source === "env") return;
+    if (operationRef.current) return;
+    operationRef.current = "save";
+    setDrafts((current) => ({ ...current, [flag.name]: nextDraft }));
+    setSavingName(flag.name);
+    try {
+      const res = await fetchWithTimeout(`${apiBase()}/api/settings/feature-flags`, {
+        method: "PUT",
+        headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ flags: { [flag.name]: draftToOverride(nextDraft) } }),
+      }, { timeoutMessage: tr("保存功能开关超时，请重试。") });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(errorMessageFromResponseText(text, res.statusText));
+      }
+      const payload = await res.json() as FeatureFlagPayload;
+      const nextFlags = Array.isArray(payload.flags) ? payload.flags : [];
+      setFlags(nextFlags);
+      setDrafts(Object.fromEntries(nextFlags.map((item) => [item.name, overrideToDraft(item.override)])));
+      sendClientCommand({ type: "runtime.capabilities.inspect", source: "settings.feature_flags" }, { silent: true });
+      pushToast(tr("功能开关已保存：{v0}", { v0: flagTitle(flag, tr) }), "success");
+    } catch (error) {
+      setDrafts((current) => ({ ...current, [flag.name]: overrideToDraft(flag.override) }));
+      const message = error instanceof Error ? error.message : String(error || tr("未知错误"));
+      pushToast(tr("功能开关保存失败：{v0}", { v0: message }), "error");
+    } finally {
+      setSavingName("");
+      if (operationRef.current === "save") operationRef.current = "";
+    }
+  };
+
+  const busy = loading || Boolean(savingName);
+
+  return (
+    <>
+      <div className="feature-flag-groups" style={subTabBarStyle}>
+        {GROUPS.map((item) => (
+          <button key={item} type="button" onClick={() => setGroup(item)} style={subTabStyle(group === item)}>
+            {GROUP_LABELS[item] === "MCP" || GROUP_LABELS[item] === "SDK" ? GROUP_LABELS[item] : tr(GROUP_LABELS[item] as TranslationKey)}
+            <span style={subTabCountStyle}>{counts[item]}</span>
+          </button>
+        ))}
+      </div>
+
+      {loadError && (
+        <div style={loadErrorStyle}>
+          <span>{tr("功能开关加载失败。")}</span>
+          <code style={loadErrorCodeStyle}>{loadError}</code>
+          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={busy} style={retryButtonStyle}>{tr("重试")}</button>
+        </div>
+      )}
+
+      <div className="feature-flag-list" style={flagListStyle}>
+        {visibleFlags.map((flag) => {
+          const draft = drafts[flag.name] ?? overrideToDraft(flag.override);
+          const lockedByEnv = flag.source === "env";
+          return (
+            <div key={flag.name} className="feature-flag-row" style={flagRowStyle} title={flagLabels[flag.name] ? tr(flagLabels[flag.name].description) : undefined}>
+              <div style={{ minWidth: 0 }}>
+                <span style={flagNameStyle}>{flagTitle(flag, tr)}</span>
+              </div>
+
+              <div className="feature-flag-control" style={controlWrapStyle}>
+                <SelectMenu
+                  className="settings-select"
+                  align="end"
+                  ariaLabel={tr("覆盖 {v0}", { v0: flagTitle(flag, tr) })}
+                  title={lockedByEnv && flag.env_var ? tr("由 {v0} 管理", { v0: flag.env_var }) : tr("{v0} · 默认{v1}", { v0: flag.name, v1: flag.default ? tr("开启") : tr("关闭") })}
+                  value={lockedByEnv ? "default" : draft}
+                  disabled={lockedByEnv || busy}
+                  onValueChange={(value) => void saveFlag(flag, value as DraftOverride)}
+                >
+                  <option value="default">{lockedByEnv ? tr("环境变量 · {v0}", { v0: flag.enabled ? tr("开启") : tr("关闭") }) : tr("默认 · {v0}", { v0: flag.default ? tr("开启") : tr("关闭") })}</option>
+                  <option value="on">{tr("开启")}</option>
+                  <option value="off">{tr("关闭")}</option>
+                </SelectMenu>
+                {savingName === flag.name && <RotateCw size={14} className="animate-spin" aria-label={tr("正在保存")} style={savingStyle} />}
+              </div>
+            </div>
+          );
+        })}
+        {loading && visibleFlags.length === 0 && (
+          <div style={emptyInlineStyle}>{tr("正在加载功能开关…")}</div>
+        )}
+        {!loading && visibleFlags.length === 0 && !loadError && (
+          <div style={emptyInlineStyle}>{tr("这个分组中没有功能开关。")}</div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button className="feature-flag-refresh" aria-label={tr("刷新功能开关")} onClick={() => void refresh({ showToast: true })} disabled={busy} style={{ ...secondaryActionStyle, display: "inline-flex", alignItems: "center", gap: 7 }}>
+          <RotateCw size={14} className={loading ? "animate-spin" : undefined} />
+          {tr("刷新")}</button>
+      </div>
+    </>
+  );
+};
+
+const flagRowStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  gap: 12,
+  alignItems: "center",
+  minHeight: 48,
+  padding: "7px 11px",
+  background: "var(--surface-base)",
+  borderBottom: "1px solid var(--border-subtle)",
+};
+
+const flagListStyle: React.CSSProperties = {
+  display: "grid",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 7px)",
+  overflow: "hidden",
+};
+
+const flagNameStyle: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontSize: "var(--mc-font-body)",
+  fontWeight: "var(--fw-bold)",
+  color: "var(--text-primary)",
+};
+
+const loadErrorStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: "6px 10px",
+  padding: "10px 12px",
+  border: "1px solid color-mix(in oklch, var(--state-danger) 35%, var(--border-subtle))",
+  borderRadius: "var(--radius-sm, 7px)",
+  background: "var(--state-danger-soft)",
+  color: "var(--state-danger)",
+  fontSize: "var(--mc-font-secondary)",
+};
+
+const loadErrorCodeStyle: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--text-secondary)",
+  fontFamily: "var(--font-ui)",
+};
+
+const retryButtonStyle: React.CSSProperties = {
+  ...secondaryActionStyle,
+  gridColumn: "2",
+  gridRow: "1 / span 2",
+  height: 30,
+};
+
+const controlWrapStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const savingStyle: React.CSSProperties = {
+  color: "var(--text-muted)",
+};

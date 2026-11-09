@@ -1,0 +1,40 @@
+.workspace-search-panel { display:flex; flex:1; flex-direction:column; min-height:0; color:var(--text-secondary); font-size:var(--text-xs); }
+.workspace-search-panel > header { display:flex; align-items:center; gap:7px; padding:9px 10px; border-bottom:1px solid var(--border-subtle); }
+.workspace-search-form { display:grid; gap:7px; padding:10px; }
+.workspace-search-form input:not([type=checkbox]) { width:100%; min-width:0; padding:6px 8px; border:1px solid var(--border-subtle); border-radius:var(--radius-sm); background:var(--surface-base); color:var(--text-primary); font:inherit; }
+.workspace-search-input { display:flex; align-items:center; gap:6px; }
+.workspace-search-input input { flex:1; }
+.workspace-search-options { display:flex; align-items:center; gap:4px; }
+.workspace-search-options button, .workspace-search-replace button, .workspace-replacement-dialog footer button { padding:5px 8px; border:1px solid var(--border-subtle); background:var(--surface-soft); color:var(--text-primary); border-radius:var(--radius-sm); font:inherit; cursor:pointer; }
+.workspace-search-options button[aria-pressed=true] { color:var(--accent-primary); background:var(--accent-soft); }
+.workspace-search-options button[type=submit] { margin-left:auto; }
+.workspace-search-replace[open] { display:grid; gap:7px; }
+.workspace-search-replace summary { cursor:pointer; padding:2px 0; }
+.workspace-search-count, .workspace-search-notice, .workspace-search-error { margin:0; padding:7px 10px; line-height:1.5; overflow-wrap:anywhere; }
+.workspace-search-error { color:var(--state-danger); }
+.workspace-search-count strong { display:block; color:var(--state-warning); font-weight:500; }
+.workspace-search-notice button { border:0; background:none; color:var(--accent-primary); cursor:pointer; }
+.workspace-search-results { flex:1; min-height:0; overflow:auto; }
+.workspace-search-file { padding:4px 0 7px; }
+.workspace-search-file > header { display:flex; align-items:center; gap:5px; padding:5px 10px; }
+.workspace-search-file strong { flex:1; min-width:0; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-search-file small { color:var(--text-muted); }
+.workspace-search-match { display:flex; align-items:center; gap:5px; padding:3px 10px 3px 17px; }
+.workspace-search-match button { display:flex; gap:7px; min-width:0; flex:1; padding:2px 0; border:0; background:none; color:inherit; text-align:left; cursor:pointer; font:inherit; }
+.workspace-search-match button:hover { color:var(--text-primary); }
+.workspace-search-match button > span { color:var(--text-muted); flex-shrink:0; }
+.workspace-search-match code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--editor-font-family); }
+.workspace-search-issues { padding:8px 10px; color:var(--text-muted); overflow-wrap:anywhere; }
+.workspace-replacement-backdrop { position:fixed; inset:0; z-index:var(--z-modal,1000); display:grid; place-items:center; background:var(--backdrop-overlay); }
+.workspace-replacement-dialog { width:min(1100px,calc(100vw - 48px)); height:min(720px,calc(100vh - 48px)); display:flex; flex-direction:column; border:1px solid var(--border-subtle); border-radius:var(--radius-md); background:var(--surface-base); box-shadow:var(--shadow-lg); }
+.workspace-replacement-dialog > header, .workspace-replacement-dialog > footer { display:flex; align-items:center; gap:8px; padding:12px 14px; }
+.workspace-replacement-dialog > header { border-bottom:1px solid var(--border-subtle); justify-content:space-between; }
+.workspace-replacement-body { flex:1; min-height:0; display:flex; }
+.workspace-replacement-body nav { width:190px; flex-shrink:0; border-right:1px solid var(--border-subtle); overflow:auto; padding:6px; }
+.workspace-replacement-body nav button { display:grid; gap:3px; width:100%; padding:7px 8px; border:0; background:none; text-align:left; overflow-wrap:anywhere; color:var(--text-secondary); cursor:pointer; font:inherit; }
+.workspace-replacement-body nav button[aria-current=page] { background:var(--surface-active); color:var(--text-primary); }
+.workspace-replacement-diff { flex:1; min-width:0; min-height:0; }
+.workspace-replacement-dialog footer { border-top:1px solid var(--border-subtle); }
+.workspace-replacement-dialog footer span { flex:1; }
+.workspace-replacement-dialog button:disabled, .workspace-search-panel button:disabled { opacity:.5; cursor:default; }
+@media(max-width:700px) { .workspace-replacement-body { flex-direction:column; } .workspace-replacement-body nav { width:auto; max-height:90px; border-right:0; border-bottom:1px solid var(--border-subtle); } }

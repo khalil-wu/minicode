@@ -1,0 +1,48 @@
+import { afterEach, beforeEach, vi } from "vitest";
+import "fake-indexeddb/auto";
+
+// JSDOM has no module Worker. Component tests exercise the real tokenizer;
+// the worker transport has separate tests and real Electron verification.
+vi.mock("../src.v2/lib/code-highlighting-worker-client", () => ({
+  highlightCodeInWorker: async (...args: Parameters<typeof import("../src.v2/lib/code-highlighting").highlightCode>) =>
+    (await import("../src.v2/lib/code-highlighting")).highlightCode(...args),
+}));
+
+// JSDOM has no layout observer. Geometry/lifetime specs install their own
+// callbacks; other UI specs still need the browser API at shared primitives.
+// This shared setup also runs for Node-only store and projection specs.
+if (typeof Element !== "undefined") Element.prototype.scrollIntoView = vi.fn();
+beforeEach(async () => {
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("prefers-reduced-motion"), media: query, addEventListener() {}, removeEventListener() {} })));
+  // Only a real renderer store installs this handle. Partial store mocks and
+  // pure Node specs must not import a second store merely to run setup.
+  if (typeof window !== "undefined" && (window as Window & { __zustandStore?: unknown }).__zustandStore) {
+    const { waitComposerDraftRecovery, useAppStore } = await import("../src.v2/stores");
+    await waitComposerDraftRecovery();
+    const preference = useAppStore.getState().reducedMotionPreference;
+    const reducedMotion = preference !== "off";
+    document.documentElement.setAttribute("data-reduced-motion", String(reducedMotion));
+    useAppStore.setState({ reducedMotion });
+    useAppStore.setState({ activeConversationDraftId: null, conversationDrafts: {}, homeConversationDraftIds: {} });
+    const { resetComposerDraftStorageForTests } = await import("../src.v2/stores/composer-drafts");
+    await resetComposerDraftStorageForTests();
+  }
+  const { resetEditorDraftStorageForTests } = await import("../src.v2/stores/editor-drafts");
+  await resetEditorDraftStorageForTests();
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
+});
+afterEach(async () => {
+  if (typeof window !== "undefined" && (window as Window & { __zustandStore?: unknown }).__zustandStore) {
+    const { waitComposerDraftRecovery, waitEditorDraftRecovery } = await import("../src.v2/stores");
+    await Promise.all([waitComposerDraftRecovery(), waitEditorDraftRecovery()]);
+    // Startup specs reset modules. Drain the same storage instances as their store.
+    const [{ flushComposerDrafts }, { flushEditorDrafts }] = await Promise.all([
+      import("../src.v2/stores/composer-drafts"), import("../src.v2/stores/editor-drafts"),
+    ]);
+    await Promise.all([flushComposerDrafts(), flushEditorDrafts()]);
+  }
+});

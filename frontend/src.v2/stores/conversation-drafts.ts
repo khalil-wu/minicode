@@ -367,7 +367,15 @@ export const materializeConversationDraft = (id: string): Promise<string | null>
       const commandId = context.creationCommandId ?? uniqueMessageId("cmd");
       useAppStore.setState(state => ({ conversationDrafts: { ...state.conversationDrafts,
         [id]: { ...state.conversationDrafts[id], requestedConversationId: owner, creationCommandId: commandId } } }));
-      await flushComposerDrafts();
+      try {
+        await flushComposerDrafts();
+      } catch (error) {
+        // Local draft persistence is best-effort here: the prompt below travels
+        // in the create command itself, so a broken or full IndexedDB must not
+        // block the first send. The storage failure stays visible through the
+        // draft storage status.
+        console.warn("[composer] draft storage failed before conversation creation", error);
+      }
       if (retiredDrafts.has(id)) return null;
       const created = await useAppStore.getState().createConversation({ bindWorkspace: context.bindWorkspace,
         workspaceRoot: context.workspaceRoot, appMode: context.appMode, sidebarSectionId: context.sidebarSectionId,

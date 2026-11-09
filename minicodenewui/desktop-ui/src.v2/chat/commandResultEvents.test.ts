@@ -1,0 +1,402 @@
+/* @vitest-environment jsdom */
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { handleCommandResultEvent as applyCommandResultEvent } from "./commandResultEvents";
+import { useAppStore } from "../stores";
+import type { ServerEvent } from "../protocol/events";
+import type { TurnDiffState } from "../stores/types";
+import { pushToast } from "../overlays/ToastContainer";
+
+vi.mock("../protocol/ws-outbox", () => ({
+  sendClientCommand: vi.fn(() => true),
+  resolveClientCommandResult: vi.fn(() => false),
+}));
+
+vi.mock("../overlays/ToastContainer", () => ({
+  pushToast: vi.fn(),
+}));
+
+const handleCommandResultEvent = (event: ServerEvent) => applyCommandResultEvent({
+  conversation_id: "conv-command", workspace_root: "", ...event,
+} as ServerEvent);
+
+describe("handleCommandResultEvent", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAppStore.setState({
+      conversationId: "conv-command",
+      workingDirectory: "",
+      pendingConversationSwitchId: null,
+      messages: [],
+      conversationMessages: {},
+      conversationStreaming: {},
+      isStreaming: false,
+      agentProgress: [],
+      budgetBuckets: [],
+      totalBudgetPercent: 0,
+      contextUsage: null,
+      runtimeCapabilities: null,
+      skillsMarketplaceOpen: false,
+      quickOpenVisible: false,
+      agentEditorOpen: false,
+      settingsOpen: false,
+      pluginCommandPanelOpen: false,
+      pluginCommandPanelPayload: null,
+      subagents: [],
+    });
+  });
+
+  it("restores the previous chat view when a requested switch is refused", () => {
+    useAppStore.setState({ pendingConversationSwitchId: "conv-archived" });
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "conversation.switch",
+      level: "warning",
+      message: "Restore this conversation from the archive before switching to it.",
+      data: { conversation_id: "conv-archived", reason: "archived" },
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+    expect(useAppStore.getState().conversationId).toBe("conv-command");
+  });
+
+  it("settles an exception result owned by the switch target and preserves the source transcript and draft", () => {
+    const messages = [{ id: "source-user", role: "user" as const, content: "Keep this history", timestamp: 1 }];
+    useAppStore.setState({ pendingConversationSwitchId: "conv-target", messages, draft: "Unsent prompt" });
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      conversation_id: "conv-target",
+      workspace_root: "C:/target",
+      command: "conversation.switch",
+      level: "error",
+      message: "Private checkpoint unreadable",
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-command", pendingConversationSwitchId: null,
+      messages, draft: "Unsent prompt", agentProgress: [] });
+    expect(pushToast).toHaveBeenCalledWith("Private checkpoint unreadable", "error", 7000);
+  });
+
+  it("does not settle a newer navigation from an earlier switch failure", () => {
+    useAppStore.setState({ pendingConversationSwitchId: "conv-newer", draft: "Unsent prompt" });
+    handleCommandResultEvent({ type: "command.result", conversation_id: "conv-older", workspace_root: "C:/older",
+      command: "conversation.switch", level: "error", message: "Earlier switch failed" } as ServerEvent);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-command", pendingConversationSwitchId: "conv-newer",
+      draft: "Unsent prompt" });
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("surfaces inspect-type results as an ephemeral toast, never as a persistent transcript message", () => {
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "status",
+      level: "info",
+      message: "Runtime status: model gpt-5 | mode auto",
+    } as ServerEvent)).toBe(true);
+
+    const state = useAppStore.getState();
+    // The result must NOT pollute the conversation transcript.
+    expect(state.messages).toEqual([]);
+    // It is shown transiently via toast...
+    expect(pushToast).toHaveBeenCalledWith(
+      "/status — Runtime status: model gpt-5 | mode auto",
+      "info",
+      expect.any(Number),
+    );
+    // ...and recorded in the compact activity trace for later review.
+    expect(state.agentProgress).toEqual([
+      expect.objectContaining({
+        id: "command-result-status",
+        stage: "status",
+        status: "completed",
+        label: "/status",
+        message: "Runtime status: model gpt-5 | mode auto",
+        visibility: "compact",
+      }),
+    ]);
+  });
+
+  it("routes error-level results to an error toast", () => {
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "permissions",
+      level: "error",
+      message: "Unknown permission rule",
+    } as ServerEvent)).toBe(true);
+
+    expect(pushToast).toHaveBeenCalledWith(
+      "/permissions — Unknown permission rule",
+      "error",
+      expect.any(Number),
+    );
+    expect(useAppStore.getState().messages).toEqual([]);
+  });
+
+  it("keeps usage budget side effects while surfacing the result transiently", () => {
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "usage",
+      level: "success",
+      message: "Usage: context 20/100 tokens",
+      data: {
+        budget: {
+          used: 20,
+          total: 100,
+          breakdown: { prompt: 12, tools: 8 },
+        },
+      },
+    } as ServerEvent)).toBe(true);
+
+    const state = useAppStore.getState();
+    // Data side effects (budget ring) are preserved — they are functionality, not noise.
+    expect(state.contextUsage).toMatchObject({ used: 20, limit: 100 });
+    expect(state.totalBudgetPercent).toBe(0.2);
+    // But the result itself stays out of the transcript.
+    expect(state.messages).toEqual([]);
+    expect(pushToast).toHaveBeenCalledWith(
+      "/usage — Usage: context 20/100 tokens",
+      "info",
+      expect.any(Number),
+    );
+  });
+
+  it("updates automatic usage inspection without presenting it as a user slash command", () => {
+    handleCommandResultEvent({ type: "command.result", command: "usage", client_command_type: "session.usage.inspect",
+      level: "info", message: "Usage: context 20/100 tokens",
+      data: { budget: { used: 20, total: 100, breakdown: { prompt: 12, tools: 8 } } },
+    } as ServerEvent);
+    expect(useAppStore.getState().contextUsage).toMatchObject({ used: 20, limit: 100 });
+    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().agentProgress).toEqual([]);
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("does not apply usage budget data from an inactive conversation", () => {
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "usage",
+      level: "success",
+      message: "Usage: context 90/100 tokens",
+      data: {
+        conversation_id: "conv-other",
+        budget: {
+          used: 90,
+          total: 100,
+          breakdown: { prompt: 90 },
+        },
+      },
+    } as ServerEvent)).toBe(true);
+
+    const state = useAppStore.getState();
+    expect(state.contextUsage).toBeNull();
+    expect(state.budgetBuckets).toEqual([]);
+    expect(state.totalBudgetPercent).toBe(0);
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("executes whitelisted plugin ui actions from command results", () => {
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "agent-ui",
+      level: "info",
+      message: "Opening plugin command: /agent-ui.",
+      data: { ui_action: "open_agent_editor" },
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().agentEditorOpen).toBe(true);
+    expect(pushToast).toHaveBeenCalledWith(
+      "/agent-ui — Opening plugin command: /agent-ui.",
+      "info",
+      expect.any(Number),
+    );
+  });
+
+  it("keeps disabled feature-gated ui actions closed", () => {
+    useAppStore.setState({
+      runtimeCapabilities: {
+        feature_flags: {
+          agent_editor: { enabled: false, source: "settings" },
+          global_search: { enabled: false, source: "settings" },
+        },
+      },
+    });
+
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "agent-ui",
+      level: "info",
+      message: "Opening plugin command: /agent-ui.",
+      data: { ui_action: "open_agent_editor" },
+    } as ServerEvent)).toBe(true);
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "files-ui",
+      level: "info",
+      message: "Opening plugin command: /files-ui.",
+      data: { ui_action: "open_quick_open" },
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().agentEditorOpen).toBe(false);
+    expect(useAppStore.getState().quickOpenVisible).toBe(false);
+  });
+
+  it.each([
+    ["info", "sent"],
+    ["error", "failed"],
+  ] as const)("projects send_message %s results onto optimistic delivery state", (level, expected) => {
+    useAppStore.setState({
+      subagents: [{
+        id: "subagent-delivery",
+        role: "reviewer",
+        status: "done",
+        messages: [{
+          messageId: "message-delivery",
+          senderId: "user",
+          recipientId: "subagent-delivery",
+          content: "Review this",
+          createdAt: Date.now(),
+          deliveryStatus: "sending",
+        }],
+      }],
+    });
+
+    handleCommandResultEvent({
+      type: "command.result",
+      command: "send_message",
+      level,
+      message: level === "error" ? "Resume failed" : "Message sent",
+      data: {
+        recipient: "subagent-delivery",
+        message_id: "message-delivery",
+      },
+    } as ServerEvent);
+
+    expect(useAppStore.getState().subagents[0].messages?.[0].deliveryStatus).toBe(expected);
+  });
+
+  it.each(["browser", "diff", "artifacts"] as const)(
+    "opens the existing %s right-stack destination",
+    (tab) => {
+      useAppStore.setState({ rightPanelOpen: false, rightStackTab: "tasks" });
+
+      expect(handleCommandResultEvent({
+        type: "command.result",
+        command: `open-${tab}`,
+        level: "info",
+        message: `Opening ${tab}.`,
+        data: { ui_action: `open_right_stack:${tab}` },
+      } as ServerEvent)).toBe(true);
+
+      expect(useAppStore.getState()).toMatchObject({
+        rightPanelOpen: true,
+        rightStackTab: tab,
+      });
+    },
+  );
+
+  it("routes legacy plan and terminal destinations to their canonical surfaces", () => {
+    useAppStore.setState({
+      rightPanelOpen: false,
+      rightStackTab: "preview",
+      dockCollapsed: true,
+      activeBottomTab: "git",
+    });
+
+    handleCommandResultEvent({
+      type: "command.result",
+      command: "open-plan",
+      level: "info",
+      message: "Opening plan.",
+      data: { ui_action: "open_right_stack:plan" },
+    } as ServerEvent);
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, rightStackTab: "tasks" });
+
+    handleCommandResultEvent({
+      type: "command.result",
+      command: "open-terminal",
+      level: "info",
+      message: "Opening terminal.",
+      data: { ui_action: "open_right_stack:terminal" },
+    } as ServerEvent);
+    expect(useAppStore.getState()).toMatchObject({ dockCollapsed: false, activeBottomTab: "terminal" });
+  });
+
+  it.each([
+    ["mcp", "connectors"],
+    ["model", "provider"],
+    ["plugins", "plugins"],
+    ["keyboard", "shortcuts"],
+    ["workspaceGit", "workspaceGit"],
+    ["workspace-git", "workspaceGit"],
+    ["git", "workspaceGit"],
+    ["automations", "scheduler"],
+  ])("routes the %s settings alias to %s", async (alias, expectedTab) => {
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "settings",
+      level: "info",
+      message: "Opening settings.",
+      data: { ui_action: `open_settings:${alias}` },
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().settingsOpen).toBe(true);
+    expect(useAppStore.getState().settingsTab).toBe(expectedTab);
+  });
+
+  it("downloads a versioned conversation export from the command result", () => {
+    const createObjectURL = vi.fn(() => "blob:minicode-export");
+    const revokeObjectURL = vi.fn();
+    const click = vi.fn();
+    const remove = vi.fn();
+    const appendChild = vi.fn();
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => ({ href: "", download: "", style: {}, click, remove })),
+      body: { appendChild },
+    });
+    const events = new EventTarget();
+    vi.stubGlobal("window", events);
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "conversation.export",
+      level: "success",
+      message: "Conversation export is ready to download.",
+      data: {
+        filename: "tree:unsafe?.json",
+        mime_type: "application/json;charset=utf-8",
+        content: '{"schema":"minicode.conversation.export","version":1}',
+      },
+    } as ServerEvent)).toBe(true);
+
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(click).toHaveBeenCalledOnce();
+    expect(appendChild).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    events.dispatchEvent(new Event("pagehide"));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:minicode-export");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("conversation.delete result", () => {
+  it("drops the deleted conversation's turn diff and pending provider progress", () => {
+    const sep = String.fromCharCode(0);
+    const turnDiff = { threadId: "conv-gone", turnId: "turn-gone", updatedAt: 1, diff: "--- a\n+++ b" } as unknown as TurnDiffState;
+    useAppStore.setState({
+      conversationId: "conv-command",
+      turnDiffs: { "conv-gone": turnDiff, "conv-command": { ...turnDiff, threadId: "conv-command" } },
+      pendingProviderProgress: { [`conv-gone${sep}m1`]: [], [`conv-command${sep}m2`]: [] },
+      conversationWorkbenchStates: {},
+      sideChats: {},
+      retainedComposerInputs: {},
+    });
+
+    handleCommandResultEvent({ type: "command.result", command: "conversation.delete", level: "success", message: "deleted",
+      data: { deleted: true, conversation_id: "conv-gone" } } as unknown as ServerEvent);
+
+    expect(Object.keys(useAppStore.getState().turnDiffs)).toEqual(["conv-command"]);
+    expect(Object.keys(useAppStore.getState().pendingProviderProgress)).toEqual([`conv-command${sep}m2`]);
+  });
+});

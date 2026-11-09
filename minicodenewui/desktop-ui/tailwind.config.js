@@ -1,0 +1,131 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ["./index.html", "./src.v2/**/*.{js,ts,jsx,tsx}"],
+  // Single dark-mode trigger, matching tokens.css: dark is the default (:root)
+  // and `[data-theme="light"]` is the only opt-out.
+  darkMode: ["selector", ":root:not([data-theme='light'])"],
+  theme: {
+    extend: {
+      colors: {
+        // Canonical colors live in src.v2/styles/tokens.css.
+        accent: {
+          DEFAULT: "var(--accent-primary)",
+          primary: "var(--accent-primary)",
+          secondary: "var(--accent-secondary)",
+          strong: "var(--accent-strong)",
+          hover: "var(--accent-hover)",
+          active: "var(--accent-active)",
+          soft: "var(--accent-soft)",
+          border: "var(--accent-border)",
+          glow: "var(--accent-glow)",
+          dim: "color-mix(in oklch, var(--accent-primary) 6%, transparent)",
+        },
+        surface: {
+          sunken: "var(--surface-sunken)",
+          base: "var(--surface-base)",
+          page: "var(--surface-page)",
+          panel: "var(--surface-panel)",
+          sidebar: "var(--surface-sidebar)",
+          raised: "var(--surface-raised)",
+          soft: "var(--surface-soft)",
+          input: "var(--surface-input)",
+          hover: "var(--surface-hover)",
+          active: "var(--surface-active)",
+          overlay: "var(--surface-overlay)",
+        },
+        border: {
+          DEFAULT: "var(--border-soft)",
+          subtle: "var(--border-subtle)",
+          soft: "var(--border-soft)",
+          strong: "var(--border-strong)",
+          focus: "var(--border-focus)",
+          accent: "var(--accent-border)",
+        },
+        text: {
+          primary: "var(--text-primary)",
+          secondary: "var(--text-secondary)",
+          muted: "var(--text-muted)",
+          disabled: "var(--text-disabled)",
+          strong: "var(--text-strong)",
+          accent: "var(--text-on-accent)",
+        },
+        state: {
+          success: "var(--state-success)",
+          warning: "var(--state-warning)",
+          danger: "var(--state-danger)",
+          info: "var(--state-info)",
+        },
+      },
+      fontFamily: {
+        // Single source of truth: tokens.css --font-ui / --font-mono (Manrope /
+        // JetBrains Mono). Pointing the utilities at the CSS variables keeps the
+        // Tailwind font-sans path and the body's var(--font-sans) in sync.
+        sans: ["var(--font-ui)", '"Segoe UI"', '"Microsoft YaHei UI"', "system-ui", "sans-serif"],
+        mono: ["var(--font-mono)", '"SF Mono"', "Monaco", "Consolas", '"Liberation Mono"', "monospace"],
+        cjk: ["var(--font-cjk)", '"PingFang SC"', '"Microsoft YaHei UI"', "sans-serif"],
+        prose: ["var(--font-ui)", '"Segoe UI"', '"Microsoft YaHei UI"', "system-ui", "sans-serif"],
+      },
+      lineHeight: {
+        // Single source of truth: tokens.css --leading-* (Pillar 2.4).
+        tight:   "var(--leading-tight)",
+        snug:    "var(--leading-snug)",
+        normal:  "var(--leading-normal)",
+        relaxed: "var(--leading-relaxed)",
+        loose:   "var(--leading-loose)",
+      },
+      fontSize: {
+        "3xs": "var(--text-3xs)",
+        "2xs": "var(--text-2xs)",
+        xxs: "var(--text-xxs)",
+        xs: "var(--text-xs)",
+        sm: "var(--text-sm)",
+        base: "var(--text-base)",
+        md: "var(--text-md)",
+        lg: "var(--text-lg)",
+        xl: "var(--text-xl)",
+        "2xl": "var(--text-2xl)",
+        "3xl": "var(--text-3xl)",
+      },
+      spacing: {
+        "0": "0",
+        "0.5": "2px",
+        "1": "4px",
+        "1.5": "6px",
+        "2": "8px",
+        "2.5": "10px",
+        "3": "12px",
+        "3.5": "14px",
+        "4": "16px",
+        "5": "20px",
+        "6": "24px",
+        "8": "32px",
+        "10": "40px",
+        "12": "48px",
+        "16": "64px",
+      },
+      borderRadius: {
+        sm: "var(--radius-sm)",
+        md: "var(--radius-md)",
+        lg: "var(--radius-lg)",
+        xl: "var(--radius-xl)",
+        "2xl": "var(--radius-xl)",
+        full: "var(--radius-full)",
+      },
+      boxShadow: {
+        sm: "0 1px 2px rgba(0, 0, 0, 0.06)",
+        md: "0 2px 6px rgba(0, 0, 0, 0.08)",
+        lg: "0 2px 8px rgba(0, 0, 0, 0.10)",
+        xl: "0 4px 16px rgba(0, 0, 0, 0.12)",
+        glow: "none",
+      },
+      transitionDuration: {
+        micro: "100ms",
+        fast: "150ms",
+        base: "200ms",
+        normal: "200ms",
+        slow: "250ms",
+      },
+    },
+  },
+  plugins: [],
+};

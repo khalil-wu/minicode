@@ -1,0 +1,815 @@
+/* @vitest-environment jsdom */
+
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.hoisted(() => {
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    value: () => ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+});
+import type { ChatTurnState, HistoryCellState } from "../cells/cellTypes";
+import { ChatTurn, HistoryCellRenderer } from "./ChatTurn";
+import { useAppStore } from "../../stores";
+
+const previousReducedMotion = useAppStore.getState().reducedMotion;
+beforeEach(() => useAppStore.setState({ reducedMotion: true }));
+afterEach(() => { cleanup(); useAppStore.setState({ reducedMotion: previousReducedMotion }); });
+
+it("keeps progress explanations in completed work until the user expands its disclosure", () => {
+  render(<ChatTurn turn={{
+    id: "narration-with-tools", userCell: null, activeCell: null, status: "completed", startedAt: 1, completedAt: 3,
+    committedCells: [
+      { kind: "thinking", id: "explanation", content: "已定位到重复发送，正在核对调用方。", source: "model_preamble", isStreaming: false, createdAt: 1 },
+      { kind: "exec", id: "verify", command: "npm test", status: "success", stdoutPreview: ["Verification passed"], stderrPreview: [], collapsed: false, createdAt: 2 },
+    ],
+    finalAnswerCell: { kind: "assistant_markdown", id: "complete", markdownSource: "修复完成。", phase: "final", copyable: true, createdAt: 3 },
+  }} />);
+  expect(screen.queryByText("已定位到重复发送，正在核对调用方。")).toBeNull();
+  expect(screen.queryByText("Verification passed")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+  expect(screen.getByText("已定位到重复发送，正在核对调用方。")).toBeTruthy();
+  expect(screen.getByText("Verification passed")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+  expect(screen.queryByText("已定位到重复发送，正在核对调用方。")).toBeNull();
+  expect(screen.queryByText("Verification passed")).toBeNull();
+});
+
+it("shows the stopped state when a restored interrupted turn has no retained content", () => {
+  render(<ChatTurn turn={{
+    id: "empty-interrupted", userCell: null, committedCells: [], activeCell: null,
+    finalAnswerCell: null, status: "interrupted", startedAt: 1, completedAt: 2,
+  }} />);
+  expect(screen.getByRole("status").textContent).toContain("已停止");
+});
+
+it("keeps async questions visible and retains the chosen answer across process folding and completion", () => {
+  const turn: ChatTurnState = {
+    id: "async-live", userCell: null, activeCell: null, status: "streaming", startedAt: 1,
+    committedCells: [{ kind: "thinking", id: "work", content: "Reading the workspace.", source: "model_preamble", isStreaming: false, createdAt: 1 }],
+    finalAnswerCell: null,
+    asyncMessages: [{ type: "text", itemId: "async:live", delivery: "async", content: "Which module?", status: "completed",
+      questions: [{ title: "Which module?", options: ["A", "B"] }] }],
+  };
+  const { rerender } = render(<ChatTurn turn={turn} conversationId="async-question-owner" />);
+  expect(screen.getByText("Which module?")).toBeTruthy();
+  fireEvent.click(screen.getByRole("radio", { name: "B", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+  expect((screen.getByRole("radio", { name: "B", exact: true }) as HTMLInputElement).checked).toBe(true);
+  rerender(<ChatTurn conversationId="async-question-owner" turn={{ ...turn, status: "completed", completedAt: 3,
+    finalAnswerCell: { kind: "assistant_markdown", id: "done", markdownSource: "Independent work finished.", phase: "final", copyable: true, createdAt: 3 },
+  }} />);
+  expect((screen.getByRole("radio", { name: "B", exact: true }) as HTMLInputElement).checked).toBe(true);
+  expect(screen.getByText("Independent work finished.")).toBeTruthy();
+});
+
+describe("HistoryCellRenderer", () => {
+  it.each<HistoryCellState>([
+    {
+      kind: "thinking",
+      id: "thinking-1",
+      content: "Checking the request",
+      source: "provider",
+      isStreaming: true,
+      createdAt: 1,
+    },
+    {
+      kind: "activity",
+      id: "activity-1",
+      activityKind: "workspaceSearch",
+      title: "Searched workspace",
+      status: "done",
+      collapsed: false,
+      startedAt: 1,
+    },
+    {
+      kind: "exec",
+      id: "exec-1",
+      command: "npm test",
+      status: "success",
+      stdoutPreview: ["12 passed"],
+      stderrPreview: [],
+      collapsed: false,
+      createdAt: 1,
+    },
+    {
+      kind: "diff",
+      id: "diff-1",
+      status: "updated",
+      files: [{ path: "src/app.ts", additions: 2, deletions: 1 }],
+      summary: { added: 2, deleted: 1, modifiedFiles: 1 },
+      collapsed: false,
+      createdAt: 1,
+    },
+  ])("renders the explicit $kind cell", (cell) => {
+    const { container } = render(<HistoryCellRenderer cell={cell} />);
+    expect(container.firstChild).not.toBeNull();
+  });
+
+  it("keeps a parent-owned child transcript view-only across ordinary cells", () => {
+    const { rerender } = render(<HistoryCellRenderer
+      isTranscriptMode
+      cell={{
+        kind: "user_message",
+        id: "child-user",
+        content: "Inspect the implementation",
+        attachments: [],
+        createdAt: 1,
+      }}
+    />);
+    expect(screen.queryByRole("button", { name: "复制消息" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "撤回到输入框" })).toBeNull();
+
+    rerender(<HistoryCellRenderer
+      isTranscriptMode
+      cell={{
+        kind: "assistant_markdown",
+        id: "child-answer",
+        messageId: "child-answer",
+        markdownSource: "Review complete",
+        phase: "final",
+        copyable: true,
+        createdAt: 2,
+      }}
+    />);
+    expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "引用回复" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重新生成" })).toBeNull();
+
+    rerender(<HistoryCellRenderer
+      isTranscriptMode
+      cell={{
+        kind: "exec",
+        id: "child-exec",
+        command: "npm test",
+        status: "running",
+        stdoutPreview: [],
+        stderrPreview: [],
+        collapsed: false,
+        createdAt: 3,
+      }}
+    />);
+    expect(screen.queryByRole("button", { name: "停止命令" })).toBeNull();
+
+    rerender(<HistoryCellRenderer
+      isTranscriptMode
+      cell={{
+        kind: "diff",
+        id: "child-diff",
+        status: "updated",
+        files: [{ path: "src/app.ts", additions: 1, deletions: 0 }],
+        summary: { added: 1, deleted: 0, modifiedFiles: 1 },
+        collapsed: false,
+        createdAt: 4,
+      }}
+    />);
+    expect(screen.queryByRole("button", { name: "撤销" })).toBeNull();
+  });
+});
+
+describe("ChatTurn live answer", () => {
+  it("folds completed detailed history and retains manually opened work", () => {
+    const previousMode = useAppStore.getState().viewMode;
+    useAppStore.setState({ viewMode: "verbose" });
+    const turn: ChatTurnState = {
+      id: "settled-nested", userCell: null, status: "completed", startedAt: 1, activeCell: null,
+      committedCells: ["first.md", "second.md"].map((path, index) => ({
+        kind: "activity", id: `read-${index}`, activityKind: "fileRead", title: "Read", status: "done", collapsed: true, startedAt: 1, segment: 1, segmentClosed: false,
+        toolCallRecords: [{ id: `read-${index}`, name: "read_file", args: { path }, status: "success", startedAt: 1 }],
+      })),
+      finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
+    };
+    render(<ChatTurn turn={turn} />);
+    expect(screen.queryByRole("button", { name: "已读取文件" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    const group = screen.getByRole("button", { name: "已读取文件" });
+    expect(group.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(group);
+    expect(group.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("first.md")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(screen.getByRole("button", { name: "已读取文件" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("first.md")).toBeTruthy();
+    useAppStore.setState({ viewMode: previousMode });
+  });
+
+  it("renders the first streamed answer text immediately without waiting for completion", () => {
+    const turn: ChatTurnState = {
+      id: "turn-live-answer",
+      userCell: null,
+      committedCells: [],
+      activeCell: {
+        kind: "streaming_assistant_tail",
+        id: "answer-live",
+        partialMarkdown: "正在直接流式输出",
+        updatedAt: 2,
+      },
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    const { container } = render(<ChatTurn turn={turn} />);
+
+    expect(screen.getByText("正在直接流式输出")).toBeTruthy();
+    expect(container.querySelector('[data-zone="reply"]')).toBeTruthy();
+    expect(container.querySelector('[data-zone="work"]')).toBeNull();
+  });
+
+  it("does not append processing status below prior work while the answer is streaming", () => {
+    const turn: ChatTurnState = {
+      id: "turn-live-answer-after-tool",
+      userCell: null,
+      committedCells: [{
+        kind: "activity",
+        id: "search-complete",
+        activityKind: "webSearch",
+        title: "搜索网页",
+        status: "done",
+        collapsed: true,
+        startedAt: 1,
+        completedAt: 2,
+      }],
+      activeCell: {
+        kind: "streaming_assistant_tail",
+        id: "answer-live",
+        partialMarkdown: "这是正在流式输出的答案。",
+        updatedAt: 3,
+      },
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    render(<ChatTurn turn={turn} />);
+
+    expect(screen.getByText("这是正在流式输出的答案。")).toBeTruthy();
+    expect(screen.getByText("已搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
+  });
+
+  it("shows explicitly classified preamble in the work zone while the turn is still running", () => {
+    const turn: ChatTurnState = {
+      id: "turn-live-narration",
+      userCell: null,
+      committedCells: [{
+        kind: "thinking",
+        id: "pending-message",
+        content: "我先检查相关文件。",
+        source: "model_preamble",
+        isStreaming: true,
+        createdAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    const { container } = render(<ChatTurn turn={turn} />);
+
+    expect(screen.getByText("我先检查相关文件。")).toBeTruthy();
+    expect(container.querySelector('[data-zone="work"]')).toBeTruthy();
+    expect(container.querySelector('[data-zone="reply"]')).toBeNull();
+    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
+  });
+});
+
+describe("ChatTurn reasoning summary", () => {
+  it("renders a completed provider summary in the expanded work trace", () => {
+    const turn: ChatTurnState = {
+      id: "turn-summary",
+      userCell: null,
+      committedCells: [{
+        kind: "thinking",
+        id: "reasoning-summary",
+        content: "已核对提交链路并定位重复请求。",
+        source: "provider",
+        providerReasoningType: "reasoning_summary_text",
+        isStreaming: false,
+        createdAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: {
+        kind: "assistant_markdown",
+        id: "answer-summary",
+        messageId: "answer-summary",
+        markdownSource: "修复完成。",
+        phase: "final",
+        copyable: true,
+        createdAt: 2,
+      },
+      status: "completed",
+      startedAt: 1,
+      completedAt: 2,
+    };
+
+    render(<ChatTurn turn={turn} defaultProcessExpanded />);
+
+    expect(screen.getByText("已核对提交链路并定位重复请求。")).toBeTruthy();
+    expect(screen.getByText("修复完成。")).toBeTruthy();
+    expect(document.querySelector(".thinking-cell-summary")).toBeTruthy();
+  });
+});
+
+describe("ChatTurn message interactions", () => {
+  it("does not open a duplicate message context menu on right click", () => {
+    const turn: ChatTurnState = {
+      id: "turn-no-context-menu",
+      userCell: {
+        kind: "user_message",
+        id: "user-no-context-menu",
+        content: "请生成一张图片",
+        createdAt: 1,
+      },
+      committedCells: [],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "completed",
+      startedAt: 1,
+      completedAt: 2,
+    };
+
+    render(<ChatTurn turn={turn} />);
+    fireEvent.contextMenu(screen.getByText("请生成一张图片"));
+
+    expect(screen.queryByText("复制消息")).toBeNull();
+    expect(screen.queryByText("复制为 Markdown")).toBeNull();
+    expect(screen.queryByText("在对话中搜索")).toBeNull();
+  });
+});
+
+describe("ChatTurn", () => {
+  it("keeps a completed open tool group settled while waiting for the model", () => {
+    const cells: ChatTurnState["committedCells"] = ["list", "search"].map((id) => ({
+      kind: "activity", id, activityKind: id === "list" ? "workspaceList" : "workspaceSearch",
+      title: id, status: "done", collapsed: true, startedAt: 1,
+      segment: 0, segmentClosed: false,
+    }));
+    const turn: ChatTurnState = {
+      id: "readme-turn", userCell: null, committedCells: cells,
+      activeCell: null, finalAnswerCell: null, status: "streaming", startedAt: 1,
+    };
+    const { container, rerender } = render(<ChatTurn turn={turn} />);
+    expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
+    rerender(<ChatTurn turn={{ ...turn, committedCells: [cells[0], { ...cells[1], kind: "activity", status: "running" }] }} />);
+    fireEvent.click(screen.getByRole("button", { name: "已读取文件" }));
+    expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
+  });
+
+  it("opens a shortened file reference using the successful read in the owning turn", () => {
+    const root = "E:/记得日记";
+    const path = `${root}/remember-diary/src/backup/backupService.native.ts`;
+    const original = useAppStore.getState().openWorkspaceFileTab;
+    const openWorkspaceFileTab = vi.fn();
+    useAppStore.setState({ workingDirectory: root, openWorkspaceFileTab });
+    try {
+      render(<ChatTurn workspaceRoot={root} turn={{
+        id: "nested-project", userCell: null, activeCell: null, status: "completed", startedAt: 1,
+        committedCells: [{
+          kind: "activity", id: "read", activityKind: "fileRead", title: "读取", status: "done", collapsed: true, startedAt: 1,
+          toolCallRecords: [{ id: "read", name: "read_file", args: { file_path: path }, status: "success" }],
+        }],
+        finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "依据 `src/backup/backupService.native.ts`。", copyable: true, createdAt: 2 },
+      }} />);
+      fireEvent.click(screen.getByRole("button", { name: "src/backup/backupService.native.ts" }));
+      expect(openWorkspaceFileTab).toHaveBeenCalledWith(expect.objectContaining({ executionCwd: root }), path,
+        "backupService.native.ts", undefined, expect.objectContaining({ column: undefined, isPreview: true }));
+    } finally {
+      useAppStore.setState({ openWorkspaceFileTab: original });
+    }
+  });
+
+  it("keeps one aggregate edit card after the final reply", () => {
+    const turn: ChatTurnState = {
+      id: "assistant-diff",
+      turnId: "turn-diff",
+      userCell: null,
+      committedCells: [
+        {
+          kind: "exec",
+          id: "test-command",
+          command: "npm test",
+          status: "success",
+          stdoutPreview: ["passed"],
+          stderrPreview: [],
+          collapsed: false,
+          createdAt: 2,
+        },
+        {
+          kind: "diff",
+          id: "edit-all",
+          status: "updated",
+          files: [
+            { path: "src/app.ts", additions: 2, deletions: 1, patch: "@@ -1 +1 @@\n-old\n+new" },
+            { path: "src/app.test.ts", additions: 3, deletions: 0, patch: "@@ -1,0 +2,3 @@\n+test" },
+          ],
+          summary: { added: 5, deleted: 1, modifiedFiles: 2 },
+          collapsed: false,
+          createdAt: 3,
+        },
+      ],
+      activeCell: null,
+      finalAnswerCell: {
+        kind: "assistant_markdown",
+        id: "answer-diff",
+        messageId: "assistant-diff",
+        markdownSource: "修改完成。",
+        phase: "final",
+        copyable: true,
+        createdAt: 3,
+      },
+      status: "completed",
+      startedAt: 1,
+      completedAt: 3,
+    };
+
+    render(<ChatTurn turn={turn} defaultProcessExpanded />);
+
+    expect(screen.getAllByText("已编辑 2 个文件")).toHaveLength(1);
+    expect(screen.getByText("$ npm test", { selector: ".exec-cell-output-command" })).toBeTruthy();
+    expect(screen.getByText("修改完成。")).toBeTruthy();
+    const workArea = screen.getByLabelText("Agent 处理进度");
+    const replyArea = screen.getByLabelText("Agent 回复");
+    const diffArea = screen.getByLabelText("文件修改");
+    expect(workArea.querySelectorAll(".diff-cell")).toHaveLength(0);
+    expect(diffArea.querySelectorAll(".diff-cell")).toHaveLength(1);
+    expect(replyArea.querySelector(".diff-cell")).toBeTruthy();
+    const actions = replyArea.querySelector(".assistant-cell-actions")!;
+    expect(diffArea.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(replyArea.compareDocumentPosition(diffArea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const processText = workArea.textContent ?? "";
+    expect(processText).toContain("npm test");
+    expect(processText).not.toContain("src/app.ts");
+    expect(diffArea.textContent?.indexOf("src/app.ts")).toBeLessThan(diffArea.textContent?.indexOf("src/app.test.ts"));
+  });
+
+  it("renders committed file evidence without a second live-diff dispatcher", () => {
+    const turn: ChatTurnState = {
+      id: "assistant-diff-fallback",
+      turnId: "turn-diff-fallback",
+      userCell: null,
+      committedCells: [{
+        kind: "diff",
+        id: "fallback-diff",
+        status: "updated",
+        files: [{ path: "src/app.ts", additions: 2, deletions: 1 }],
+        summary: { added: 2, deleted: 1, modifiedFiles: 1 },
+        collapsed: false,
+        createdAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "completed",
+      startedAt: 1,
+    };
+
+    render(<ChatTurn turn={turn} defaultProcessExpanded />);
+
+    expect(screen.getByText("已编辑 1 个文件")).toBeTruthy();
+  });
+
+  it("projects parent messages and closed agents as actual glyph and name rows without worker instructions", () => {
+    useAppStore.setState({ conversationId: "collaboration-owner", subagents: [
+      { id: "kepler-id", teammateName: "Kepler", agentPath: "/root/kepler", role: "subagent", status: "running" },
+      { id: "kant-id", teammateName: "Kant", agentPath: "/root/kant", role: "subagent", status: "done" },
+    ] });
+    const turn: ChatTurnState = {
+      id: "assistant-collaboration",
+      userCell: null,
+      committedCells: [
+        {
+          kind: "collaboration",
+          id: "collaboration-start-kepler",
+          action: "sent_message",
+          status: "success",
+          entries: [{ agentId: "Kepler", agentLabel: "Kepler", content: "请完整审计渲染链路并返回证据。" }],
+          collapsed: false,
+          createdAt: 2,
+        },
+        {
+          kind: "collaboration",
+          id: "collaboration-message-kepler",
+          action: "sent_message",
+          status: "success",
+          entries: [{ agentId: "Kepler", agentLabel: "Kepler", content: "优先核对真实生产问题。" }],
+          collapsed: false,
+          createdAt: 3,
+        },
+        {
+          kind: "collaboration",
+          id: "collaboration-start-kant",
+          action: "sent_message",
+          status: "success",
+          entries: [{ agentId: "Kant", agentLabel: "Kant", content: "复核测试覆盖。" }],
+          collapsed: false,
+          createdAt: 4,
+        },
+        {
+          kind: "collaboration",
+          id: "collaboration-close-kant",
+          action: "closed",
+          status: "success",
+          entries: [{ agentId: "Kant", agentLabel: "Kant" }],
+          collapsed: false,
+          createdAt: 5,
+        },
+      ],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    render(<ChatTurn turn={turn} conversationId="collaboration-owner" />);
+
+    expect(screen.queryByText("已发送消息 · 1 个子任务")).toBeNull();
+    expect(screen.queryByText("请完整审计渲染链路并返回证据。")).toBeNull();
+    expect(screen.queryByText("优先核对真实生产问题。")).toBeNull();
+    expect(screen.queryByText("已停止 · 1 个子任务")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "打开子智能体：Kant" })).toHaveLength(2);
+  });
+
+  it("keeps the completed tool transcript visible and renders the final answer separately", () => {
+    const turn: ChatTurnState = {
+      id: "turn-1",
+      userCell: null,
+      committedCells: [{
+        kind: "activity",
+        id: "activity-1",
+        activityKind: "genericTool",
+        title: "Ran explicit tool",
+        status: "done",
+        collapsed: false,
+        startedAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: {
+        kind: "assistant_markdown",
+        id: "answer-1",
+        messageId: "assistant-1",
+        markdownSource: "Implementation complete.",
+        phase: "final",
+        copyable: true,
+        createdAt: 2,
+      },
+      status: "completed",
+      startedAt: 1,
+      durationMs: 2_000,
+      completedAt: 2_001,
+    };
+
+    render(<ChatTurn turn={turn} />);
+
+    expect(screen.getByText("Implementation complete.")).toBeTruthy();
+    expect(screen.queryByText("运行 explicit tool")).toBeNull();
+    expect(screen.getByText("已处理 2秒")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(screen.getByText("运行 explicit tool", { selector: ".activity-cell-name" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+    expect(screen.queryByText("运行 explicit tool", { selector: ".activity-cell-name" })).toBeNull();
+    expect(screen.queryByText("运行 explicit tool")).toBeNull();
+  });
+
+  it("keeps raw URLs visible when a settled turn has no complete final answer", () => {
+    const command = "https://wttr.in/Beijing?format=%l:+%c+%t+(%f)+wind:%w";
+    const turn: ChatTurnState = {
+      id: "turn-url",
+      userCell: null,
+      committedCells: [{
+        kind: "exec",
+        id: "exec-url",
+        command,
+        status: "success",
+        stdoutPreview: ["Beijing: sunny"],
+        stderrPreview: [],
+        collapsed: false,
+        createdAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "completed",
+      startedAt: 1,
+      completedAt: 26_001,
+      durationMs: 26_000,
+    };
+
+    render(<ChatTurn turn={turn} />);
+
+    expect(screen.getByText(`$ ${command}`, { selector: ".exec-cell-output-command" })).toBeTruthy();
+    expect(screen.getByText("已处理 26秒")).toBeTruthy();
+    expect(screen.queryByText("1 个工具")).toBeNull();
+    expect(screen.queryByText("1 条命令")).toBeNull();
+    expect(screen.queryByRole("button", { name: "展开处理步骤" })).toBeNull();
+  });
+
+  it("renders a failed turn error as process output without fabricating an answer", () => {
+    const turn: ChatTurnState = {
+      id: "turn-failed",
+      userCell: null,
+      committedCells: [{
+        kind: "error",
+        id: "error-1",
+        title: "Tool failed",
+        message: "Process exited with code 1",
+        recoverable: false,
+        createdAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "failed",
+      startedAt: 1,
+      completedAt: 1_001,
+    };
+
+    render(<ChatTurn turn={turn} />);
+    expect(screen.queryByLabelText("Agent reply")).toBeNull();
+    expect(screen.getByText("Process exited with code 1")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "展开处理步骤" })).toBeNull();
+  });
+
+  it("keeps streaming commentary before the running tool without creating a reply area", () => {
+    const turn: ChatTurnState = {
+      id: "turn-commentary",
+      userCell: null,
+      committedCells: [
+        {
+          kind: "thinking",
+          id: "commentary-1",
+          content: "重新发起，将这些调研任务标记为只读以并行执行。",
+          source: "commentary",
+          isStreaming: true,
+          createdAt: 1,
+        },
+        {
+          kind: "activity",
+          id: "tool-1",
+          activityKind: "genericTool",
+          title: "Start subagent",
+          status: "running",
+          collapsed: false,
+          startedAt: 2,
+        },
+      ],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    render(<ChatTurn turn={turn} />);
+
+    const workArea = screen.getByLabelText("Agent 处理进度");
+    const workText = workArea.textContent || "";
+    expect(workText.indexOf("重新发起，将这些调研任务标记为只读以并行执行。"))
+      .toBeLessThan(workText.indexOf(workArea.querySelector(".activity-cell-name")!.textContent!));
+    expect(screen.queryByLabelText("Agent reply")).toBeNull();
+    expect(screen.queryByLabelText("Assistant response")).toBeNull();
+  });
+
+  it("keeps the elapsed heading above the running tool row", () => {
+    const runningTurn: ChatTurnState = {
+      id: "turn-lifecycle",
+      userCell: null,
+      committedCells: [{
+        kind: "activity",
+        id: "tool-lifecycle",
+        activityKind: "genericTool",
+        title: "Inspecting projection",
+        status: "running",
+        collapsed: false,
+        startedAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+    const { rerender } = render(<ChatTurn turn={runningTurn} />);
+
+    expect(screen.getByRole("button", { name: "收起处理步骤" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
+    expect(screen.getByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeTruthy();
+    const workArea = screen.getByLabelText("Agent 处理进度");
+    const summary = workArea.querySelector('[data-position="top"]');
+    const timeline = workArea.querySelector(".agent-loop-timeline");
+    expect(summary).toBeTruthy();
+    expect(timeline).toBeTruthy();
+    expect(summary?.nextElementSibling).toBe(timeline);
+
+    rerender(<ChatTurn turn={{
+      ...runningTurn,
+      committedCells: [{
+        ...runningTurn.committedCells[0],
+        kind: "activity",
+        status: "done",
+        completedAt: 2_001,
+      }],
+      status: "completed",
+      completedAt: 2_001,
+      durationMs: 2_000,
+      finalAnswerCell: {
+        kind: "assistant_markdown",
+        id: "answer-lifecycle",
+        messageId: "answer-lifecycle",
+        markdownSource: "Projection complete.",
+        phase: "final",
+        copyable: true,
+        createdAt: 2_001,
+      },
+    }} />);
+
+    expect(screen.getByRole("button", { name: "展开处理步骤" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByText("已处理 2秒")).toBeTruthy();
+    expect(screen.queryByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeNull();
+  });
+
+  it("keeps elapsed processing above settled tools while awaiting the next output", () => {
+    const turn: ChatTurnState = {
+      id: "turn-between-tool-and-output",
+      userCell: null,
+      committedCells: [{
+        kind: "activity",
+        id: "search-complete",
+        activityKind: "webSearch",
+        title: "搜索网页",
+        status: "done",
+        collapsed: true,
+        startedAt: 1,
+        completedAt: 2,
+      }],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    render(<ChatTurn turn={turn} />);
+
+    const workArea = screen.getByLabelText("Agent 处理进度");
+    const timeline = workArea.querySelector(".agent-loop-timeline");
+    const summary = workArea.querySelector('[data-position="top"]');
+    expect(screen.getByText("已搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起处理步骤" }).textContent).toMatch(/^已处理 /);
+    expect(timeline).toBeTruthy();
+    expect(summary).toBeTruthy();
+    expect(Array.from(workArea.children).indexOf(summary as Element))
+      .toBeLessThan(Array.from(workArea.children).indexOf(timeline as Element));
+  });
+
+  it("uses transcript defaults only on mount and keeps the later disclosure choice", () => {
+    const turn: ChatTurnState = {
+      id: "turn-transcript-default",
+      userCell: null,
+      committedCells: [{
+        kind: "activity",
+        id: "tool-transcript-default",
+        activityKind: "genericTool",
+        title: "Inspecting delegated work",
+        status: "done",
+        collapsed: false,
+        startedAt: 1,
+        completedAt: 2,
+      }],
+      activeCell: null,
+      finalAnswerCell: {
+        kind: "assistant_markdown",
+        id: "answer-transcript-default",
+        messageId: "answer-transcript-default",
+        markdownSource: "Delegated work complete.",
+        phase: "final",
+        copyable: true,
+        createdAt: 2,
+      },
+      status: "completed",
+      startedAt: 1,
+      completedAt: 2,
+    };
+    const { rerender } = render(<ChatTurn turn={turn} defaultProcessExpanded={false} />);
+
+    expect(screen.queryByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeNull();
+    rerender(<ChatTurn turn={turn} defaultProcessExpanded />);
+    expect(screen.queryByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(screen.getByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeTruthy();
+    rerender(<ChatTurn turn={turn} defaultProcessExpanded={false} />);
+    rerender(<ChatTurn turn={turn} defaultProcessExpanded />);
+    expect(screen.getByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+    expect(screen.queryByText("Inspecting delegated work", { selector: ".activity-cell-name" })).toBeNull();
+  });
+});

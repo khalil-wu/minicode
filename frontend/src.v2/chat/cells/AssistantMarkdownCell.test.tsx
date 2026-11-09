@@ -716,7 +716,6 @@ describe("AssistantMarkdownCell run cancellation", () => {
     expect(sendMock).toHaveBeenCalledWith({
       type: "context.fork",
       conversation_id: "conv-fork",
-      workspace_root: "",
       message_id: "assistant-target",
       create_branch: true,
       activate: true,
@@ -818,5 +817,37 @@ describe("AssistantMarkdownCell run cancellation", () => {
       retry_from_message_id: "user-2",
     })));
     expect(sendMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "interrupt" }));
+  });
+});
+
+describe("AssistantMarkdownCell fork workspace owner", () => {
+  it("sends the conversation's own execution root, not the browsing directory", () => {
+    useAppStore.setState({
+      conversationId: "conv-fork",
+      workingDirectory: "C:/proj",
+      conversations: [{ id: "conv-fork", title: "fork", updatedAt: "", workspaceRoot: "C:/proj" }],
+      messages: [
+        { id: "user-1", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+        { id: "assistant-target", role: "assistant", content: "target", artifacts: [], timestamp: 2 },
+      ],
+      conversationMessages: {
+        "conv-fork": [
+          { id: "user-1", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+          { id: "assistant-target", role: "assistant", content: "target", artifacts: [], timestamp: 2 },
+        ],
+      },
+    });
+    sendMock.mockClear();
+
+    render(
+      <AssistantMarkdownCell
+        cell={cell({ id: "assistant-fork-cell", messageId: "assistant-target", markdownSource: "target" })}
+        conversationId="conv-fork"
+        workspaceRoot="C:/proj"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "从此处分支" }));
+
+    expect(sendMock).toHaveBeenCalledWith(expect.objectContaining({ type: "context.fork", conversation_id: "conv-fork", workspace_root: "C:/proj" }));
   });
 });

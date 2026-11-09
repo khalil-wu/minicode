@@ -1,0 +1,67 @@
+import {
+  AppWindow,
+  BookOpenText,
+  Code2,
+  FileSearch,
+  FolderOpen,
+  Globe,
+  ListChecks,
+  MonitorPlay,
+  PencilLine,
+  Search,
+  Wrench,
+} from "../lib/icons";
+import { commandActivityIcon } from "../lib/command-activity-icon";
+
+export const ToolGlyph = ({
+  kind,
+  size = 15,
+  className,
+}: {
+  kind?: string;
+  size?: number;
+  className?: string;
+}) => {
+  const normalized = (kind ?? "").trim().toLowerCase();
+  const props = { size, className: ["mc-tool-glyph", className].filter(Boolean).join(" ") };
+  if (normalized === "websearch" || normalized === "search") return <Search {...props} />;
+  if (normalized === "web") return <Globe {...props} />;
+  if (normalized === "browser") return <AppWindow {...props} />;
+  if (normalized === "preview") return <MonitorPlay {...props} />;
+  if (normalized === "commandexecution" || normalized === "command") return <svg width={size} height={size}
+    viewBox={commandActivityIcon.viewBox} className={props.className} fill="currentColor" aria-hidden="true" data-source-icon="terminal-light-16">
+    {commandActivityIcon.paths.map((path, index) => <path key={index} d={path.d}
+      fillRule={"fill-rule" in path ? path["fill-rule"] : undefined} clipRule={"clip-rule" in path ? path["clip-rule"] : undefined} />)}
+  </svg>;
+  if (normalized === "filechange" || normalized === "edit") return <PencilLine {...props} />;
+  if (normalized === "fileread" || normalized === "file") return <BookOpenText {...props} />;
+  if (normalized === "workspacelist") return <FolderOpen {...props} />;
+  if (normalized === "workspacesearch") return <FileSearch {...props} />;
+  if (normalized === "skill") return <BookOpenText {...props} />;
+  if (normalized === "plan") return <ListChecks {...props} />;
+  if (normalized === "code") return <Code2 {...props} />;
+  return <Wrench {...props} />;
+};
+
+export const summarizeArgs = (args: Record<string, unknown>): { label: string; value: string }[] => {
+  const preferred = ["command", "cmd", "path", "file_path", "target", "filename", "query", "pattern", "url", "cwd"];
+  const rows: { label: string; value: string }[] = [];
+  for (const key of preferred) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) rows.push({ label: humanizeKey(key), value });
+    else if (typeof value === "number" || typeof value === "boolean") rows.push({ label: humanizeKey(key), value: String(value) });
+  }
+  if (rows.length > 0) return rows.slice(0, 4);
+  const fallback = Object.entries(args)
+    .filter(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+    .slice(0, 4)
+    .map(([key, value]) => ({ label: humanizeKey(key), value: String(value) }));
+  return fallback.length > 0 ? fallback : [{ label: "request", value: "No concise parameters available" }];
+};
+
+export const humanizeKey = (key: string) => key.replace(/_/g, " ");
+
+export function extractToolFilePath(args: Record<string, unknown>): string | null {
+  const path = args.file_path ?? args.path ?? args.target ?? args.filename;
+  return typeof path === "string" ? path : null;
+}

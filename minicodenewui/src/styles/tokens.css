@@ -1,0 +1,155 @@
+/*
+ * 设计 token：Anthropic 的暖纸色与陶土强调色 + Apple 的字体栈、圆角、毛玻璃与弹性动效
+ * + Codex 的信息布局（左栏会话、居中对话、右侧审阅）。
+ * 主题与强调色都只在这里定义，组件里只引用变量。
+ */
+:root {
+  --font-ui: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Inter Variable", "PingFang SC",
+    "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Inter Variable", "PingFang SC",
+    "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+  --font-serif: "Newsreader Variable", "Tiempos Text", "Noto Serif SC", "Songti SC", Georgia, serif;
+  --font-mono: "SF Mono", "JetBrains Mono Variable", "Cascadia Code", Menlo, Consolas, monospace;
+  --font-chat: var(--font-ui);
+
+  --fs-ui: 13.5px;
+  --fs-chat: 15px;
+  --fs-small: 12.5px;
+  --fs-mono: 12.5px;
+
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  --row-h: 30px;
+  --pad: 1;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 120ms;
+  --t-med: 220ms;
+
+  --sidebar-w: 268px;
+  --panel-w: 460px;
+  --header-h: 48px;
+  --chat-max: 760px;
+
+  /* 强调色（默认陶土），由 data-accent 覆盖 */
+  --accent-h: 15;
+  --accent: #c6613f;
+  --accent-hover: #b4552f;
+  --accent-ink: #fffaf5;
+  --accent-soft: rgba(198, 97, 63, 0.11);
+  --accent-ring: rgba(198, 97, 63, 0.32);
+}
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #faf9f5;
+  --bg-elev: #ffffff;
+  --sidebar: rgba(240, 238, 231, 0.78);
+  --sidebar-solid: #f1efe8;
+  --surface: #ffffff;
+  --surface-2: #f4f2ec;
+  --surface-3: #ebe8e0;
+  --hover: rgba(31, 30, 29, 0.055);
+  --active: rgba(31, 30, 29, 0.085);
+  --line: rgba(31, 30, 29, 0.09);
+  --line-strong: rgba(31, 30, 29, 0.16);
+  --text: #1f1e1d;
+  --text-2: #5d5c57;
+  --text-3: #8d8b85;
+  --text-4: #b1aea6;
+  --green: #2e8b57;
+  --green-soft: rgba(46, 139, 87, 0.12);
+  --red: #c9423a;
+  --red-soft: rgba(201, 66, 58, 0.1);
+  --amber: #b7791f;
+  --amber-soft: rgba(183, 121, 31, 0.12);
+  --blue: #0a6cdf;
+  --blue-soft: rgba(10, 108, 223, 0.1);
+  --code-bg: #f6f4ee;
+  --diff-add: rgba(46, 160, 87, 0.12);
+  --diff-add-strong: rgba(46, 160, 87, 0.26);
+  --diff-del: rgba(214, 69, 61, 0.1);
+  --diff-del-strong: rgba(214, 69, 61, 0.22);
+  --scrim: rgba(25, 24, 22, 0.28);
+  --shadow-sm: 0 1px 2px rgba(31, 30, 29, 0.05), 0 0 0 0.5px rgba(31, 30, 29, 0.08);
+  --shadow-md: 0 2px 6px rgba(31, 30, 29, 0.05), 0 10px 28px rgba(31, 30, 29, 0.08),
+    0 0 0 0.5px rgba(31, 30, 29, 0.09);
+  --shadow-lg: 0 6px 16px rgba(31, 30, 29, 0.08), 0 24px 64px rgba(31, 30, 29, 0.16),
+    0 0 0 0.5px rgba(31, 30, 29, 0.12);
+  --glass: rgba(255, 255, 255, 0.82);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1f1e1c;
+  --bg-elev: #2a2926;
+  --sidebar: rgba(26, 25, 23, 0.82);
+  --sidebar-solid: #1a1917;
+  --surface: #2a2926;
+  --surface-2: #302f2b;
+  --surface-3: #3a3934;
+  --hover: rgba(255, 252, 240, 0.06);
+  --active: rgba(255, 252, 240, 0.1);
+  --line: rgba(255, 252, 240, 0.08);
+  --line-strong: rgba(255, 252, 240, 0.15);
+  --text: #efeee8;
+  --text-2: #b8b5ac;
+  --text-3: #8a877f;
+  --text-4: #5f5d57;
+  --green: #5cc286;
+  --green-soft: rgba(92, 194, 134, 0.14);
+  --red: #f0766c;
+  --red-soft: rgba(240, 118, 108, 0.13);
+  --amber: #e6aa4f;
+  --amber-soft: rgba(230, 170, 79, 0.14);
+  --blue: #5aa4ff;
+  --blue-soft: rgba(90, 164, 255, 0.14);
+  --code-bg: #262522;
+  --diff-add: rgba(92, 194, 134, 0.12);
+  --diff-add-strong: rgba(92, 194, 134, 0.26);
+  --diff-del: rgba(240, 118, 108, 0.11);
+  --diff-del-strong: rgba(240, 118, 108, 0.24);
+  --scrim: rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(255, 252, 240, 0.08);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.35),
+    0 0 0 0.5px rgba(255, 252, 240, 0.1);
+  --shadow-lg: 0 8px 20px rgba(0, 0, 0, 0.35), 0 28px 72px rgba(0, 0, 0, 0.5),
+    0 0 0 0.5px rgba(255, 252, 240, 0.12);
+  --glass: rgba(42, 41, 38, 0.84);
+  --accent-ink: #1f1e1c;
+}
+
+[data-accent="clay"] { --accent: #c6613f; --accent-hover: #b4552f; --accent-soft: rgba(198, 97, 63, 0.11); --accent-ring: rgba(198, 97, 63, 0.32); }
+[data-accent="blue"] { --accent: #0a72e8; --accent-hover: #075fc4; --accent-soft: rgba(10, 114, 232, 0.1); --accent-ring: rgba(10, 114, 232, 0.3); }
+[data-accent="violet"] { --accent: #7c5cd6; --accent-hover: #6a4bc2; --accent-soft: rgba(124, 92, 214, 0.11); --accent-ring: rgba(124, 92, 214, 0.3); }
+[data-accent="green"] { --accent: #2f8f5b; --accent-hover: #267a4c; --accent-soft: rgba(47, 143, 91, 0.11); --accent-ring: rgba(47, 143, 91, 0.3); }
+[data-accent="graphite"] { --accent: #3d3c39; --accent-hover: #2a2927; --accent-soft: rgba(61, 60, 57, 0.1); --accent-ring: rgba(61, 60, 57, 0.28); }
+[data-theme="dark"][data-accent="clay"] { --accent: #d97757; --accent-hover: #e38a6c; }
+[data-theme="dark"][data-accent="blue"] { --accent: #4a9dff; --accent-hover: #6aafff; }
+[data-theme="dark"][data-accent="violet"] { --accent: #a08af0; --accent-hover: #b3a0f5; }
+[data-theme="dark"][data-accent="green"] { --accent: #5cc286; --accent-hover: #74d199; }
+[data-theme="dark"][data-accent="graphite"] { --accent: #e7e5de; --accent-hover: #ffffff; --accent-soft: rgba(231, 229, 222, 0.1); --accent-ring: rgba(231, 229, 222, 0.28); }
+
+[data-density="compact"] {
+  --row-h: 26px;
+  --fs-chat: 14px;
+  --header-h: 42px;
+}
+
+[data-chat-font="serif"] {
+  --font-chat: var(--font-serif);
+}
+
+[data-reduce-motion="true"] *,
+[data-reduce-motion="true"] *::before,
+[data-reduce-motion="true"] *::after {
+  animation-duration: 1ms !important;
+  transition-duration: 1ms !important;
+}

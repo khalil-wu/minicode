@@ -390,7 +390,7 @@ def _anthropic_stream_protocol_error(
         raw["received_delta_type"] = delta_type[:80]
     return StreamEvent(
         type=StreamEventType.ERROR,
-        content=f"MiniCode Anthropic Messages 协议错误：{messages.get(code, code)}。",
+        content=f"MiniCode Anthropic Messages 协议错误：{messages.get(code, code)}。 protocol_error_code={code}",
         raw=raw,
     )
 

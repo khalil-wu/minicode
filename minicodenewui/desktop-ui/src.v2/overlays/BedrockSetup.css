@@ -1,0 +1,16 @@
+.bedrock-setup-page { display: flex; justify-content: center; width: 100%; min-height: 480px; padding: 36px 24px; color: var(--text-primary); }
+.bedrock-setup-content { display: flex; flex-direction: column; align-items: center; gap: 28px; width: 340px; max-width: 100%; margin: auto 0; }
+.bedrock-setup-heading { display: flex; flex-direction: column; align-items: center; gap: 16px; width: 100%; }
+.bedrock-setup-content h3 { margin: 0; font: inherit; font-size: var(--text-2xl); line-height: 1.3; text-align: center; }
+.bedrock-setup-actions { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+.bedrock-setup-content p { margin: 0; text-align: center; color: var(--text-secondary); font-size: var(--mc-font-body); line-height: 1.45; overflow-wrap: anywhere; }
+.bedrock-setup-content form { display: flex; flex-direction: column; gap: 24px; width: 100%; }
+.bedrock-setup-content label { display: flex; flex-direction: column; gap: 8px; font: inherit; color: var(--text-primary); }
+.bedrock-setup-field { display: flex; flex-direction: column; gap: 8px; }
+.bedrock-setup-content input { width: 100%; min-height: 44px; padding: 11px 14px; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-soft); color: var(--text-primary); font: inherit; }
+.bedrock-setup-content small { font-size: var(--mc-font-caption); color: var(--text-tertiary); }
+.bedrock-setup-button { width: 100%; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 16px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--surface-soft); color: var(--text-primary); font: inherit; cursor: pointer; }
+.bedrock-setup-button[data-primary="true"] { background: var(--text-primary); color: var(--surface-page); border-color: transparent; }
+.bedrock-setup-button:disabled { opacity: .5; cursor: default; }
+.bedrock-setup-button:not(:disabled):hover { filter: brightness(.95); }
+.bedrock-setup-content a { color: var(--text-primary); text-decoration: none; }

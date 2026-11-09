@@ -1,0 +1,18 @@
+.settings-worktrees-content {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+.settings-center-main .settings-card.settings-worktrees-empty-card {
+  padding: 0;
+}
+
+.settings-worktrees-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  padding: 0 16px;
+  text-align: center;
+}

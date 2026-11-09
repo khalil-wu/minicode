@@ -1,0 +1,241 @@
+/*
+ * newui.css — fork-only visual layer, loaded after every other stylesheet.
+ *
+ * Direction: warm Anthropic paper and clay, Apple's calm surfaces and motion
+ * curves, Codex's quiet tool rows. It deliberately keeps the product layout and
+ * retunes tokens first; component rules below only cover what tokens cannot.
+ *
+ * Dark selector is `:root:not([data-theme="light"])`: a bare `:root` would tie
+ * with tokens.css `[data-theme="light"]` and, loading later, overwrite it.
+ */
+
+/* ── Dark ─────────────────────────────────────────────────────────── */
+:root:not([data-theme="light"]) {
+  --desktop-shell-background: #1f1e1d;
+  --desktop-frame-border: #ffffff0f;
+  --desktop-edge-glow: none;
+
+  --surface-sunken: #1a1918;
+  --surface-base: #262624;
+  --surface-sidebar: #1f1e1d;
+  --surface-page: #262624;
+  --surface-soft: #2c2b29;
+  --surface-panel: #2f2e2b;
+  --surface-raised: #30302e;
+  --surface-hover: #393835;
+  --surface-active: #43423e;
+  --workbench-sidebar: #1f1e1d;
+  --workbench-tool: #2c2b29;
+  --workbench-hover: #2e2d2a;
+  --workbench-active: #383733;
+
+  --text-primary: #f5f3ec;
+  --text-secondary: #c4c1b6;
+  --text-muted: #9b988d;
+  --border-subtle: oklch(0.92 0.012 90 / 0.09);
+  --border-soft: oklch(0.92 0.012 90 / 0.15);
+  --border-strong: oklch(0.92 0.012 90 / 0.27);
+
+  --message-user-bg: #34332f;
+  --editor-background: #201f1d;
+  --editor-line-highlight: #2a2926;
+  --editor-widget: #2c2b29;
+  --editor-border: #3a3935;
+
+  --mc-clay: #d97757;
+  --mc-clay-strong: #e08a6d;
+  --mc-clay-soft: oklch(0.70 0.13 40 / 0.16);
+  --mc-canvas-shadow: 0 0 0 0.5px #0000004d, 0 8px 28px #00000040;
+  --mc-composer-shadow: 0 1px 2px #00000033, 0 10px 30px #00000038;
+  --mc-composer-shadow-focus: 0 1px 2px #00000033, 0 14px 38px #00000047;
+  --shadow-refined: 0 1px 2px #00000033, 0 6px 18px #0000002e;
+  --shadow-refined-hover: 0 2px 4px #0000003d, 0 12px 30px #0000003d;
+  --shadow-strong-overlay: 0 0 0 0.5px #00000059, 0 18px 48px #00000061;
+}
+
+/* ── Light ────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --desktop-shell-background: #f0eee6;
+  --desktop-frame-border: #e2dfd4;
+  --desktop-edge-glow: none;
+
+  --surface-sunken: #ebe8de;
+  --surface-base: #faf9f5;
+  --surface-sidebar: #f0eee6;
+  --surface-page: #faf9f5;
+  --surface-soft: #f4f2ea;
+  --surface-panel: #f2f0e8;
+  --surface-raised: #ffffff;
+  --surface-hover: #ebe8de;
+  --surface-active: #e3e0d4;
+  --workbench-sidebar: #f0eee6;
+  --workbench-tool: #f4f2ea;
+  --workbench-hover: #e8e5da;
+  --workbench-active: #e0dccf;
+
+  --text-primary: #1f1e1d;
+  --text-secondary: #5e5d58;
+  --text-muted: #85837b;
+  --border-subtle: oklch(0.30 0.012 85 / 0.09);
+  --border-soft: oklch(0.30 0.012 85 / 0.15);
+  --border-strong: oklch(0.30 0.012 85 / 0.27);
+
+  --message-user-bg: #f0eee6;
+  --attachment-chip-bg: #f4f2ea;
+  --editor-background: #f7f6f0;
+  --editor-line-highlight: #efede4;
+  --editor-border: #e2dfd4;
+
+  --mc-clay: #c6613f;
+  --mc-clay-strong: #b4532f;
+  --mc-clay-soft: oklch(0.62 0.14 40 / 0.14);
+  --mc-canvas-shadow: 0 0 0 0.5px #1f1e1d0f, 0 6px 24px #4a3f2c0f;
+  --mc-composer-shadow: 0 1px 2px #4a3f2c0d, 0 8px 26px #4a3f2c14;
+  --mc-composer-shadow-focus: 0 1px 2px #4a3f2c12, 0 12px 34px #4a3f2c1f;
+  --shadow-refined: 0 1px 2px #4a3f2c0f, 0 6px 18px #4a3f2c0f;
+  --shadow-refined-hover: 0 2px 4px #4a3f2c14, 0 12px 28px #4a3f2c1a;
+  --shadow-strong-overlay: 0 0 0 0.5px #1f1e1d14, 0 18px 46px #4a3f2c2e;
+}
+
+/* ── Shared scale ─────────────────────────────────────────────────── */
+:root {
+  --mc-icon-stroke: 1.4;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+
+  /* Apple's sheet curve for anything that moves; a softer one for colour. */
+  --easing-standard: cubic-bezier(0.25, 0.8, 0.25, 1);
+  --easing-enter: cubic-bezier(0.32, 0.72, 0, 1);
+  --easing-enter-snappy: cubic-bezier(0.32, 0.72, 0, 1);
+  --duration-micro: 120ms;
+  --duration-fast: 170ms;
+  --duration-reveal: 220ms;
+  --duration-base: 240ms;
+  --duration-slow: 320ms;
+
+  --font-display: "Anthropic Serif", "Noto Serif SC", "Songti SC", Georgia, serif;
+}
+
+/* ── Frame ────────────────────────────────────────────────────────── */
+.workbench-mode-body {
+  padding-top: 0;
+  background: var(--desktop-shell-background);
+}
+
+.workbench-stage {
+  overflow: hidden;
+  border-top-left-radius: 14px;
+  background: var(--surface-page);
+  box-shadow: var(--mc-canvas-shadow);
+}
+
+.mc-main-surface {
+  border: 0;
+  border-radius: 0;
+}
+
+/* ── Navigation rail ──────────────────────────────────────────────── */
+.mc-navigation-rail button {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  transition: background-color var(--transition-micro), color var(--transition-micro), transform var(--transition-fast);
+}
+.mc-navigation-rail button:active { transform: scale(0.94); }
+.mc-navigation-rail button > svg { width: 18px; height: 18px; }
+.mc-navigation-rail-main > button:first-child[aria-current="page"] > svg { fill: none; }
+
+/* ── Sidebar ──────────────────────────────────────────────────────── */
+.mc-sidebar-pinned > .mc-sidebar-project-heading { padding: 7px 10px; }
+.mc-sidebar-recents { padding-top: 0; }
+.mc-sidebar-project-label {
+  font-size: var(--text-xs);
+  font-weight: var(--fw-medium);
+}
+.session-row-hover { transition: background-color var(--transition-micro); }
+
+/* ── Home ─────────────────────────────────────────────────────────── */
+.workbench-empty-title {
+  font-family: var(--font-display);
+  font-size: calc(32px * var(--app-text-scale));
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+.workbench-empty-mark { animation: mc-rise 640ms var(--easing-enter) both; }
+.workbench-empty-title { animation: mc-rise 640ms 60ms var(--easing-enter) both; }
+
+/* ── Conversation ─────────────────────────────────────────────────── */
+.user-cell-bubble { border-radius: 18px !important; }
+
+.code-block-wrapper {
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--editor-background);
+}
+.code-block-header { background: transparent !important; }
+.code-block-header > span {
+  color: var(--text-muted) !important;
+  font-size: var(--text-3xs);
+  letter-spacing: 0.02em;
+}
+
+.md-paragraph code,
+.md-body li code {
+  border: 0 !important;
+  background: color-mix(in oklab, var(--text-primary) 6%, transparent) !important;
+}
+
+/* ── Composer ─────────────────────────────────────────────────────── */
+#root .chat-pane .composer-container,
+#root .workbench-home-composer .composer-container {
+  border-radius: 20px !important;
+  background: var(--surface-raised) !important;
+  box-shadow: 0 0 0 1px var(--mc-composer-border, var(--border-subtle)), var(--mc-composer-shadow) !important;
+  transition: box-shadow var(--transition-normal);
+}
+#root .chat-pane .composer-container:focus-within,
+#root .workbench-home-composer .composer-container:focus-within {
+  box-shadow: 0 0 0 1px var(--mc-composer-border, var(--border-soft)), var(--mc-composer-shadow-focus) !important;
+}
+
+.composer-send-btn {
+  transition: background-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast), opacity var(--transition-fast);
+}
+.composer-send-btn:not(:disabled) {
+  background: var(--mc-clay) !important;
+  color: #fff !important;
+}
+.composer-send-btn:not(:disabled):hover { background: var(--mc-clay-strong) !important; }
+.composer-send-btn:not(:disabled):active { transform: scale(0.92); }
+
+/* ── Brand mark ───────────────────────────────────────────────────── */
+.mc-brand-mark { transition: transform var(--transition-slow); }
+.workbench-empty-mark:hover .mc-brand-mark { transform: translateY(-2px) scale(1.03); }
+.mc-brand-mark-cursor { animation: mc-cursor 2.6s ease-in-out infinite; }
+
+/* ── Motion ───────────────────────────────────────────────────────── */
+@keyframes mc-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Shared by every entering message (declared in reset.css). */
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes mc-cursor {
+  0%, 55%, 100% { opacity: 1; }
+  72%, 86% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-brand-mark-cursor,
+  .workbench-empty-mark,
+  .workbench-empty-title { animation: none; }
+  .mc-navigation-rail button:active,
+  .composer-send-btn:not(:disabled):active { transform: none; }
+}

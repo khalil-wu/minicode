@@ -1,0 +1,568 @@
+import { useAppStore } from "../stores";
+import { desktop } from "../desktop/runtime";
+import { mcpProjectionMatches } from "./mcpProjectionScope";
+import type {
+  BackgroundCompletedEvent,
+  BackgroundStalledEvent,
+  BackgroundStartedEvent,
+  EnvListEvent,
+  FileChangedEvent,
+  GitPrStatusEvent,
+  SchedulerListEvent,
+  ServerEvent,
+  WorkspaceImportedEvent,
+} from "../protocol/events";
+import { isReplayedEvent } from "../protocol/events";
+import type { McpServerStatus, TerminalSessionInfo } from "../stores/types";
+import { pushToast } from "../overlays/ToastContainer";
+import { sendClientCommand } from "../protocol/ws-outbox";
+import { normalizeWorkspaceRoot, workspaceRootsEqual } from "../lib/workspace-path";
+import { addInspectorPayload } from "./inspectorEntries";
+import { invalidateMountedWorkspaceIndex } from "../panels/workspaceIndexRegistry";
+
+const terminalEventConversationId = (event: ServerEvent): string => {
+  const value = (event as unknown as { conversation_id?: unknown }).conversation_id;
+  return typeof value === "string" ? value.trim() : "";
+};
+
+const terminalEventTargetsActiveConversation = (event: ServerEvent): boolean => {
+  const owner = terminalEventConversationId(event);
+  return Boolean(owner && owner === (useAppStore.getState().conversationId || ""));
+};
+
+const eventTimestampMs = (event: ServerEvent): number => {
+  const parsed = Date.parse(String(event.timestamp || ""));
+  return Number.isFinite(parsed) ? parsed : Date.now();
+};
+
+const shortBackgroundCommand = (command: string): string =>
+  command.length > 40 ? `${command.slice(0, 37)}...` : command;
+
+const eventTargetsActiveWorkspace = (event: ServerEvent): boolean => {
+  const state = useAppStore.getState();
+  const owner = terminalEventConversationId(event);
+  const workspace = normalizeWorkspaceRoot(
+    (event as unknown as { workspace_root?: unknown }).workspace_root,
+  );
+  return Boolean(
+    owner
+    && owner === String(state.conversationId || "").trim()
+    && workspace
+    && workspace === normalizeWorkspaceRoot(state.workingDirectory),
+  );
+};
+
+// A single agent turn can emit dozens of file.changed events. Each one used to
+// fire a git working-tree + staged diff pair immediately, and those blocking
+// git subprocesses stalled the backend loop that was also delivering stream
+// tokens. Collapse bursts into one trailing refresh.
+const GIT_CHANGES_REFRESH_DEBOUNCE_MS = 400;
+let gitChangesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+const scheduleGitChangesRefresh = () => {
+  if (gitChangesRefreshTimer !== null) clearTimeout(gitChangesRefreshTimer);
+  gitChangesRefreshTimer = setTimeout(() => {
+    gitChangesRefreshTimer = null;
+    useAppStore.getState().requestGitChanges();
+  }, GIT_CHANGES_REFRESH_DEBOUNCE_MS);
+};
+
+export const handlePeripheralEvent = (e: ServerEvent): boolean => {
+  const s = useAppStore.getState();
+  switch (e.type) {
+    case "workspace.project_index.invalidated": {
+      // A completed command can belong to the previous conversation while
+      // its real files still belong to the editor's mounted workspace.
+      if (workspaceRootsEqual(e.workspace_root, s.workingDirectory)) invalidateMountedWorkspaceIndex(e.workspace_root, e.index_instance_id, e.revision);
+      return true;
+    }
+    case "pet.published": {
+      if (isReplayedEvent(e)) return true;
+      const pets = desktop()?.pets;
+      if (pets) void pets.refresh().then(() => pets.update({ selectedPetId: e.pet_id as string, petVisible: true }))
+        .catch(error => pushToast(String(error), "error"));
+      return true;
+    }
+    case "terminal.output":
+      // TerminalPanel subscribes to raw websocket events and owns terminal output.
+      return true;
+    case "terminal.resized":
+      // Resize is an acknowledgement; xterm already owns the requested size.
+      return true;
+    case "workspace.imported": {
+      const ev = e as WorkspaceImportedEvent;
+      const owner = ev.conversation_id.trim();
+      const rootPath = ev.workspace_root.trim();
+      // Index completion describes a workspace; conversation.switched/list
+      // own project identity, including isolated worktree bindings.
+      if (owner !== String(s.conversationId || "").trim() || !workspaceRootsEqual(rootPath, s.workingDirectory)) {
+        return true;
+      }
+      s.bumpFileTreeVersion();
+      addInspectorPayload("workspace", `workspace:${owner}:${normalizeWorkspaceRoot(rootPath)}`, {
+        event: ev.type,
+        conversation_id: owner,
+        workspace_root: rootPath,
+        request_id: ev.request_id,
+        project_name: ev.project.name,
+        project_type: ev.project.project_type,
+        description: ev.project.description,
+        file_count: ev.file_count,
+        total_size: ev.project.total_size,
+        index_truncated: ev.project.index_truncated,
+        summary: ev.summary,
+        replayed: isReplayedEvent(e),
+      });
+
+      if (!isReplayedEvent(e)) {
+        s.requestGitChanges();
+        sendClientCommand({ type: "git.pr_status", conversation_id: owner, workspace_root: rootPath });
+        sendClientCommand({ type: "scheduler.list", conversation_id: owner, workspace_root: rootPath });
+      }
+      return true;
+    }
+    case "file.changed": {
+      const ev = e as FileChangedEvent;
+      if (!eventTargetsActiveWorkspace(e)) return true;
+      // Replay restores the durable event log for the transcript. It is not a
+      // new filesystem mutation and must not mark an already-open preview or
+      // editor buffer as externally changed.
+      if (isReplayedEvent(e)) return true;
+      if (ev.path) {
+        const parsedTimestamp = typeof ev.timestamp === "string" ? Date.parse(ev.timestamp) : Number.NaN;
+        s.addFileChange({
+          path: ev.path,
+          event: ev.event ?? "change",
+          timestamp: Number.isFinite(parsedTimestamp) ? parsedTimestamp : Date.now(),
+        });
+        scheduleGitChangesRefresh();
+      }
+      return true;
+    }
+    case "terminal.created": {
+      if (e.session_id && terminalEventTargetsActiveConversation(e)) {
+        s.upsertTerminalSession({
+          id: e.session_id,
+          conversationId: terminalEventConversationId(e),
+          pid: e.pid,
+          shell: e.shell ?? "",
+          cwd: e.cwd ?? "",
+          status: "running",
+          createdAt: Date.now(),
+          terminalMode: e.terminal_mode === "pty" ? "pty" : "pipe",
+        });
+        s.setActiveTerminalSession(e.session_id);
+      }
+      return true;
+    }
+    case "terminal.killed": {
+      if (e.session_id && terminalEventTargetsActiveConversation(e)) s.removeTerminalSession(e.session_id);
+      return true;
+    }
+    case "terminal.exit": {
+      if (!terminalEventTargetsActiveConversation(e)) return true;
+      const current = useAppStore.getState().terminalSessions.find((session) => session.id === e.session_id);
+      if (e.session_id && current) {
+        const exit = e as unknown as { exit_code?: number | null; exit_signal?: number | string | null; exited_at?: number };
+        s.upsertTerminalSession({ ...current, status: "exited", exitCode: exit.exit_code,
+          exitSignal: exit.exit_signal, exitedAt: exit.exited_at ?? eventTimestampMs(e) });
+      }
+      return true;
+    }
+    case "terminal.list": {
+      const ev = e as unknown as {
+        sessions?: {
+          session_id?: string;
+          pid?: number;
+          shell?: string;
+          cwd?: string;
+          is_alive?: boolean;
+          started_at?: number;
+          exit_code?: number | null;
+          exit_signal?: number | string | null;
+          exited_at?: number;
+          cleanup_pending?: boolean;
+          cleanup_reason?: string;
+          terminal_mode?: string;
+          conversation_id?: string;
+        }[];
+        conversation_id?: string;
+      };
+      if (ev.sessions) {
+        const listOwner = String(ev.conversation_id || "").trim();
+        if (!listOwner || listOwner !== (s.conversationId || "")) return true;
+        const sessions: TerminalSessionInfo[] = ev.sessions
+          .filter((session) => (
+            typeof session.session_id === "string"
+            && session.session_id.length > 0
+            && session.conversation_id === listOwner
+          ))
+          .map((session) => ({
+            id: session.session_id!,
+            conversationId: session.conversation_id || listOwner,
+            pid: session.pid,
+            shell: session.shell ?? "",
+            cwd: session.cwd ?? "",
+            status: session.is_alive === false ? "exited" : "running",
+            createdAt: session.started_at ? session.started_at * 1000 : undefined,
+            exitCode: session.exit_code,
+            exitSignal: session.exit_signal,
+            exitedAt: session.exited_at,
+            cleanupPending: session.cleanup_pending,
+            cleanupReason: session.cleanup_reason,
+            terminalMode: session.terminal_mode === "pty" ? "pty" : "pipe",
+          }));
+        s.setTerminalSessions(sessions);
+        // The list is metadata only.  Rehydrate every owned terminal after a
+        // reconnect so output continuity does not depend on the active tab.
+        for (const terminal of sessions) {
+          sendClientCommand({
+            type: "terminal.snapshot.request",
+            session_id: terminal.id,
+            conversation_id: listOwner,
+          });
+        }
+      }
+      return true;
+    }
+    case "terminal.snapshot": {
+      const ev = e as unknown as {
+        session_id?: string;
+        pid?: number | null;
+        shell?: string;
+        cwd?: string;
+        is_alive?: boolean;
+        terminal_mode?: string;
+        output?: string;
+        output_chars?: number;
+        exit_code?: number | null;
+        exit_signal?: number | string | null;
+        exited_at?: number;
+        cleanup_pending?: boolean;
+        cleanup_reason?: string;
+        total_output_chars?: number;
+        output_start_cursor?: number;
+        output_end_cursor?: number;
+        truncated?: boolean;
+        error?: string;
+        conversation_id?: string;
+      };
+      const id = ev.session_id ?? "";
+      if (!id) return true;
+      const snapshotOwner = String(ev.conversation_id || "").trim();
+      if (!snapshotOwner || snapshotOwner !== (s.conversationId || "")) return true;
+      s.upsertTerminalSnapshot({
+        id,
+        conversationId: snapshotOwner,
+        pid: ev.pid,
+        shell: ev.shell ?? "",
+        cwd: ev.cwd ?? "",
+        status: ev.is_alive === false ? "exited" : "running",
+        exitCode: ev.exit_code,
+        exitSignal: ev.exit_signal,
+        exitedAt: ev.exited_at,
+        cleanupPending: ev.cleanup_pending,
+        cleanupReason: ev.cleanup_reason,
+        terminalMode: ev.terminal_mode === "pty" ? "pty" : "pipe",
+        output: ev.output ?? "",
+        outputChars: ev.output_chars,
+        totalOutputChars: ev.total_output_chars,
+        outputStartCursor: ev.output_start_cursor,
+        outputEndCursor: ev.output_end_cursor,
+        truncated: ev.truncated,
+        capturedAt: Date.now(),
+        error: ev.error,
+      });
+      const current = s.terminalSessions.find((session) => session.id === id && session.conversationId === snapshotOwner);
+      if (current) {
+        s.upsertTerminalSession({ ...current, status: ev.is_alive === false ? "exited" : current.status,
+          exitCode: ev.exit_code, exitSignal: ev.exit_signal, exitedAt: ev.exited_at,
+          cleanupPending: ev.cleanup_pending, cleanupReason: ev.cleanup_reason });
+      }
+      return true;
+    }
+    case "mcp_status": {
+      if (!mcpProjectionMatches(e, s.conversationId, s.workingDirectory)) return true;
+      const ev = e as unknown as {
+        servers?: {
+          name: string;
+          status: string;
+          tools?: number;
+          tools_count?: number;
+          enabled_tools?: string[] | null;
+          disabled_tools?: string[];
+          capabilities?: McpServerStatus["capabilities"];
+          transport?: string;
+          command?: string;
+          args?: string[];
+          env?: Record<string, string>;
+          headers?: Record<string, string>;
+          headers_helper?: string;
+          oauth?: { client_id?: string; callback_port?: number };
+          env_vars?: Array<string | { name?: string; source?: string }>;
+          environment_id?: string;
+          bearer_token_env_var?: string;
+          env_http_headers?: Record<string, string>;
+          cwd?: string;
+          url?: string;
+          auto_start?: boolean;
+          editable?: boolean;
+          enabled?: boolean;
+          disabled_reason?: string;
+          source?: string;
+          plugin_id?: string | null;
+          plugin_server_name?: string | null;
+          approval_status?: "approved" | "rejected" | "pending" | "not_applicable";
+          config_path?: string;
+          project_workspace?: string;
+          error?: string;
+          auth_status?: "unsupported" | "not_logged_in" | "oauth";
+          phase?: string;
+          recoverable?: boolean;
+          requires_user_action?: boolean;
+          setup_hint?: string;
+          docs_url?: string;
+          cleanup?: {
+            pending: boolean;
+            reason: string;
+            requested_at?: number | null;
+            completed_at?: number | null;
+          };
+          operation_failures?: Array<{
+            operation: string;
+            failure_kind: string;
+            message: string;
+            retryable: boolean;
+          }>;
+        }[];
+      };
+      if (ev.servers) {
+        const prev = useAppStore.getState().mcpServers;
+        s.setMcpServers(ev.servers.map((srv) => ({
+          name: srv.name,
+          status: srv.status as "connected" | "disconnected" | "error" | "reconnecting",
+          tools: srv.tools_count ?? srv.tools,
+          enabledTools: srv.enabled_tools,
+          disabledTools: srv.disabled_tools,
+          capabilities: srv.capabilities,
+          transport: srv.transport as McpServerStatus["transport"],
+          command: srv.command,
+          args: srv.args,
+          env: srv.env,
+          headers: srv.headers,
+          headersHelper: srv.headers_helper,
+          oauth: srv.oauth ? {
+            clientId: srv.oauth.client_id,
+            callbackPort: srv.oauth.callback_port,
+          } : undefined,
+          envVars: srv.env_vars,
+          environmentId: srv.environment_id,
+          bearerTokenEnvVar: srv.bearer_token_env_var,
+          envHttpHeaders: srv.env_http_headers,
+          cwd: srv.cwd,
+          url: srv.url,
+          autoStart: srv.auto_start,
+          editable: srv.editable,
+          enabled: srv.enabled,
+          disabledReason: srv.disabled_reason,
+          source: srv.source,
+          pluginId: srv.plugin_id,
+          pluginServerName: srv.plugin_server_name,
+          approvalStatus: srv.approval_status,
+          configPath: srv.config_path,
+          projectWorkspace: srv.project_workspace,
+          lastError: srv.error || undefined,
+          authStatus: srv.auth_status,
+          phase: srv.phase as McpServerStatus["phase"],
+          recoverable: srv.recoverable,
+          requiresUserAction: srv.requires_user_action,
+          setupHint: srv.setup_hint,
+          docsUrl: srv.docs_url,
+          cleanup: srv.cleanup ? {
+            pending: srv.cleanup.pending,
+            reason: srv.cleanup.reason,
+            requestedAt: srv.cleanup.requested_at,
+            completedAt: srv.cleanup.completed_at,
+          } : undefined,
+          operationFailures: srv.operation_failures?.map((failure) => ({
+            operation: failure.operation,
+            failureKind: failure.failure_kind,
+            message: failure.message,
+            retryable: failure.retryable,
+          })),
+        })));
+        for (const srv of ev.servers) {
+          const was = prev.find((p) => p.name === srv.name);
+          if (was?.status !== "error" && srv.status === "error") {
+        pushToast(`MCP：${srv.name} 出错`, "error");
+          }
+        }
+      }
+      return true;
+    }
+    case "env.list": {
+      const ev = e as EnvListEvent;
+      if (ev.entries) s.setEnvVars(ev.entries);
+      return true;
+    }
+    case "git.pr_status": {
+      const ev = e as GitPrStatusEvent;
+      if (!eventTargetsActiveWorkspace(e)) return true;
+      if (ev.error) {
+        s.setPRStatusIssue({ message: ev.error, code: ev.error_code || "request_failed" });
+        return true;
+      }
+      s.setPRStatusIssue(null);
+      s.setPrStatus(ev.pr ?? null, ev.checks ?? []);
+      if (ev.pr) {
+        const checks = ev.checks ?? [];
+        const failedChecks = checks.filter((check) => /fail|error|cancel/i.test(check.status));
+        const ciStatus = failedChecks.length > 0
+          ? "failed"
+          : checks.some((check) => /pending|queued|in_progress|running/i.test(check.status))
+            ? "running"
+            : "passed";
+        s.setPRMonitor({
+          prNumber: ev.pr.number,
+          prUrl: ev.pr.url,
+          ciStatus,
+          failedChecks: failedChecks.map((check) => check.name),
+          autoFix: Boolean(ev.automation?.auto_fix),
+          autoMerge: Boolean(ev.automation?.auto_merge),
+          lastCheckedAt: Date.now(),
+          checksCount: checks.length,
+        });
+      } else {
+        s.setPRMonitor(null);
+      }
+      return true;
+    }
+    case "scheduler.list": {
+      const ev = e as SchedulerListEvent;
+      if (!eventTargetsActiveWorkspace(e)) return true;
+      if (ev.tasks) s.setScheduledTasks(ev.tasks);
+      if (ev.runs) {
+        notifyScheduledCompletions(ev.workspace_root, ev.runs);
+        s.setScheduledTaskRuns(ev.runs);
+      }
+      return true;
+    }
+    case "background.started": {
+      const ev = e as BackgroundStartedEvent;
+      const conversationId = String(ev.conversation_id || "").trim();
+      if (!ev.command_id || !conversationId) return true;
+      s.addBackgroundTask({
+        id: ev.command_id,
+        command: ev.command ?? ev.description ?? "后台命令",
+        status: "running",
+        timestamp: ev.started_at ? ev.started_at * 1000 : Date.now(),
+        conversationId,
+        cwd: ev.cwd,
+      });
+      return true;
+    }
+    case "background.stalled": {
+      const ev = e as BackgroundStalledEvent;
+      const conversationId = String(ev.conversation_id || "").trim();
+      if (!ev.command_id || !conversationId) return true;
+      const existing = s.backgroundTasks.find((task) => (
+        task.id === ev.command_id && task.conversationId === conversationId
+      ));
+      const command = ev.command ?? ev.description ?? existing?.command ?? "后台命令";
+      s.addBackgroundTask({
+        ...existing,
+        id: ev.command_id,
+        command,
+        status: "stalled",
+        timestamp: existing?.timestamp ?? eventTimestampMs(e),
+        conversationId,
+        stalledTail: ev.tail,
+        stalledAdvice: ev.advice,
+        stalledAt: eventTimestampMs(e),
+      });
+      if (!isReplayedEvent(e) && terminalEventTargetsActiveConversation(e)) {
+        const promptTail = ev.tail.trim().replace(/\s+/g, " ");
+        pushToast(
+          `后台命令等待输入：${shortBackgroundCommand(command)}${promptTail ? ` · ${promptTail.slice(0, 120)}` : ""}`,
+          "warning",
+          7000,
+        );
+      }
+      if (!isReplayedEvent(e)) {
+        void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
+          kind: "question",
+          title: "后台命令等待输入",
+          body: shortBackgroundCommand(command),
+          target: { kind: "conversation" as const, conversationId },
+        }));
+      }
+      return true;
+    }
+    case "background.completed": {
+      const ev = e as BackgroundCompletedEvent;
+      const conversationId = String(ev.conversation_id || "").trim();
+      if (!ev.command_id || !conversationId) return true;
+      const existing = s.backgroundTasks.find((task) => (
+        task.id === ev.command_id && task.conversationId === conversationId
+      ));
+      const cmd = ev.command ?? ev.description ?? existing?.command ?? "后台命令";
+      const shortCmd = shortBackgroundCommand(cmd);
+      // An unproven exit is not a clean termination: the backend kept the PID
+      // for a later reaper, so reporting "已取消" would tell the user the
+      // process is gone when it may still be writing to the workspace.
+      const cleanupPending = ev.cleanup_pending === true;
+      const status = cleanupPending
+        ? "failed"
+        : ev.status === "cancelled"
+          ? "cancelled"
+          : ev.status === "failed" || ev.status === "interrupted" || (ev.exit_code != null && ev.exit_code !== 0)
+            ? "failed"
+            : "completed";
+      const replayed = isReplayedEvent(e);
+      if (!replayed && terminalEventTargetsActiveConversation(e)) {
+        pushToast(
+          cleanupPending
+            ? `${shortCmd} 已请求停止，但未能确认进程退出`
+            : status === "cancelled"
+              ? `${shortCmd} 已取消`
+              : ev.status === "interrupted"
+                ? `${shortCmd} 因上次 MiniCode 进程退出而中断`
+                : `${shortCmd} 已结束（exit ${ev.exit_code ?? 0}）`,
+          status === "completed" ? "success" : status === "cancelled" ? "info" : "error",
+        );
+      }
+      s.addBackgroundTask({
+        ...existing,
+        id: ev.command_id,
+        command: cmd,
+        status,
+        exitCode: ev.exit_code,
+        cleanupPending,
+        cleanupReason: ev.cleanup_reason,
+        terminalStatus: ev.status,
+        duration: ev.duration,
+        timestamp: existing?.timestamp ?? (ev.started_at ? ev.started_at * 1000 : eventTimestampMs(e)),
+        completedAt: ev.completed_at ? ev.completed_at * 1000 : eventTimestampMs(e),
+        conversationId,
+        outputPreview: ev.output,
+      });
+      if (!replayed) {
+        void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
+          kind: "completion",
+          title: cleanupPending
+            ? "后台命令未能确认退出"
+            : status === "completed"
+              ? "后台命令已完成"
+              : status === "cancelled"
+                ? "后台命令已取消"
+                : "后台命令失败",
+          body: shortCmd,
+          ...(conversationId ? { target: { kind: "conversation" as const, conversationId } } : {}),
+        }));
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+};
+import { notifyScheduledCompletions } from "./completionNotifications";

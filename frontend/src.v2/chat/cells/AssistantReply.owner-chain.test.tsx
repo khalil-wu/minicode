@@ -36,10 +36,11 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("assistant reply actions", () => {
   it.each(["C:/A", ""])("forks by stable id with explicit conversation and workspace %s", (root) => {
-    useAppStore.setState({ workingDirectory: root });
+    useAppStore.setState({ workingDirectory: root, conversations: [{ id: "A", title: "A", updatedAt: "", workspaceRoot: root }] });
     renderOwned(root);
     fireEvent.click(screen.getByRole("button", { name: "从此处分支" }));
-    expect(mocks.send).toHaveBeenCalledWith({ type: "context.fork", conversation_id: "A", workspace_root: root,
+    // The fork names the conversation's own root; a conversation without one sends no workspace_root.
+    expect(mocks.send).toHaveBeenCalledWith({ type: "context.fork", conversation_id: "A", ...(root ? { workspace_root: root } : {}),
       message_id: "assistant", create_branch: true, activate: true });
     expect(mocks.send.mock.calls[0][0]).not.toHaveProperty("message_index");
   });

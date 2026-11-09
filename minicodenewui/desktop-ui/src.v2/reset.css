@@ -1,0 +1,432 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  line-height: var(--line-height-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+/* ── Keyframe Animations ─────────────────────────────── */
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 0.38; }
+  45%, 55% { opacity: 1; }
+}
+
+@keyframes thinking-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes thinking-wave {
+  0%, 100% { opacity: 0.4; transform: scaleY(0.48); }
+  50% { opacity: 1; transform: scaleY(1); }
+}
+
+
+
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.98) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(4px); }
+}
+
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 命名为 shimmer-slide：styles/animations.css 另有一个 background-position
+   版的 @keyframes shimmer（.anim-shimmer / .panel-skeleton-shimmer 使用），
+   且加载顺序在其后。同名会让下面这条 42%-宽滑块实现被全局覆盖失效。 */
+@keyframes shimmer-slide {
+  0% { transform: translate3d(-120%, 0, 0); }
+  100% { transform: translate3d(220%, 0, 0); }
+}
+
+
+
+
+
+@keyframes preview-flash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes agent-status-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.92); }
+  50% { opacity: 0.85; transform: scale(1); }
+}
+
+/* ── Overlay & Modal Animations ──────────────────────── */
+
+.overlay-backdrop {
+  animation: overlay-in var(--transition-normal) both;
+}
+
+.overlay-backdrop.closing {
+  animation: overlay-out var(--transition-fast) both;
+}
+
+/* 入场用标准 enter 缓动，不用回弹(overshoot)曲线：工作台弹窗承载的是
+   确认 / 设置 / 命令这类严肃操作，弹跳会读作"轻浮"，也与 toast、下拉、
+   命令面板已统一的 --easing-enter 不一致。 */
+.modal-content {
+  animation: modal-in var(--duration-base) var(--easing-enter) both;
+}
+
+/* ── Message Animations ──────────────────────────────── */
+
+.message-enter {
+  animation: message-in var(--transition-normal) both;
+}
+
+.tool-call-enter {
+  animation: slide-up var(--duration-slow) cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* ── Toast Notifications ─────────────────────────────── */
+
+.toast-enter {
+  animation: toast-in var(--duration-base) var(--easing-enter) both;
+}
+
+.toast-exit {
+  animation: toast-out var(--duration-base) var(--easing-exit) both;
+}
+
+/* ── Progress & Loading ──────────────────────────────── */
+
+.progress-bar {
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--surface-soft);
+}
+
+.progress-bar::after {
+  content: '';
+  display: block;
+  width: 25%;
+  height: 100%;
+  background: var(--accent-primary);
+  border-radius: 2px;
+  animation: progress-indeterminate 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-soft);
+  border-radius: var(--radius-sm);
+  contain: paint;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--surface-hover), transparent);
+  transform: translate3d(-120%, 0, 0);
+  will-change: transform;
+  animation: shimmer-slide 1.7s cubic-bezier(0.22, 0.68, 0.26, 1) infinite;
+}
+
+
+
+.thinking-wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  width: 15px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.thinking-wave > span {
+  width: 3px;
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--accent-primary) 72%, white),
+    color-mix(in oklch, var(--accent-primary) 52%, var(--text-muted))
+  );
+  transform-origin: 50% 100%;
+  animation: thinking-wave 2.35s cubic-bezier(0.42, 0, 0.18, 1) infinite;
+}
+
+.thinking-wave > span:nth-child(2) {
+  animation-delay: 220ms;
+}
+
+.thinking-wave > span:nth-child(3) {
+  animation-delay: 440ms;
+}
+
+
+
+/* Breathing dot: 1.4s reads as "alive" where 2.4s read as stalled, and the
+   sine-like easing keeps the loop seamless at both ends. */
+.thinking-mini-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  box-shadow: none;
+  will-change: transform, opacity;
+  animation: thinking-pulse 1.4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+  flex-shrink: 0;
+}
+
+.thinking-pulse-dot {
+  animation: thinking-pulse 1.4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-reduced-motion="false"]) .thinking-mini-dot,
+  html:not([data-reduced-motion="false"]) .thinking-pulse-dot {
+    animation: none;
+  }
+}
+
+.panel-skeleton-shimmer {
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+.preview-refresh-flash {
+  animation: preview-flash 0.6s ease-out forwards;
+}
+
+.agent-status-pulse-dot {
+  animation: agent-status-pulse 1.15s ease-in-out infinite;
+}
+
+.streaming-caret {
+  animation: cursorBlink 1.15s ease-in-out infinite;
+}
+
+/* ── Hover & Interaction ─────────────────────────────── */
+
+.window-control:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+
+}
+
+.window-control-close:hover {
+  background: var(--state-danger) !important;
+  color: var(--text-on-accent) !important;
+
+}
+
+.window-control:active,
+.window-control-close:active {
+  transform: none;
+}
+
+.editor-tab:hover .editor-tab-close {
+  opacity: 1 !important;
+
+}
+
+.editor-tab:hover {
+  background: var(--surface-hover);
+
+}
+
+.code-block-wrapper:hover .code-action-btn,
+.code-block-wrapper:focus-within .code-action-btn {
+  opacity: 1;
+}
+
+.assistant-msg:hover .msg-actions {
+  opacity: 1 !important;
+}
+
+.assistant-msg:focus-within .msg-actions {
+  opacity: 1 !important;
+}
+
+.user-msg:hover .msg-actions {
+  opacity: 1 !important;
+}
+
+.user-msg:focus-within .msg-actions {
+  opacity: 1 !important;
+}
+
+button {
+  transition: background var(--transition-micro),
+              color var(--transition-micro),
+              border-color var(--transition-micro),
+              opacity var(--transition-micro),
+              transform var(--transition-micro),
+              box-shadow var(--transition-micro);
+}
+
+/* 按压反馈只作用于主操作按钮；不再全局缩放所有 button ——
+   窗口控制、菜单项、列表行被整体缩放会显得松散，且干扰拖拽区。 */
+.btn:not(:disabled):active {
+  transform: scale(0.98);
+}
+
+/* ── Sidebar & Panel Transitions ─────────────────────── */
+
+.sidebar-animate {
+  transition: width var(--transition-normal);
+}
+
+
+
+
+/* ── Connection Banner ───────────────────────────────── */
+
+
+
+/* 滚动条的唯一契约在 styles/ui-polish.css（全局作用域，6px 圆角细轨，
+   无箭头按钮）。此处此前的 10px 轨道 + 静止全透明 thumb 与之重复且更早
+   加载，只会制造两套刻度，已删除。 */
+
+/* ── Focus ring for keyboard navigation ──────────────── */
+
+:where(:focus-visible) {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+button:focus-visible {
+  outline-offset: 1px;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+  outline-offset: -1px;
+}
+
+.xterm textarea,
+.xterm .xterm-helper-textarea {
+  position: absolute;
+  left: -9999em;
+  top: 0;
+  width: 0;
+  height: 0;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.xterm textarea:focus-visible,
+.xterm .xterm-helper-textarea:focus-visible {
+  outline: 0;
+
+}
+
+/* ── Selection color ─────────────────────────────────── */
+
+::selection {
+  background: color-mix(in oklch, var(--accent-primary) 30%, transparent);
+}
+
+/* ── Reduced motion ──────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-reduced-motion="false"]) *,
+  html:not([data-reduced-motion="false"]) *::before,
+  html:not([data-reduced-motion="false"]) *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Global Layout Dragging Performance Optimization ── */
+body.layout-dragging iframe,
+body.layout-dragging .xterm-screen,
+body.layout-dragging textarea,
+body.layout-dragging select,
+body.layout-dragging div.xterm {
+  pointer-events: none;
+  user-select: none;
+
+}

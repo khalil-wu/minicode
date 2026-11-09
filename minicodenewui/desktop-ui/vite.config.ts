@@ -1,0 +1,219 @@
+import { defineConfig, loadEnv } from "vite";
+import react from "@vitejs/plugin-react";
+import path from "path";
+import { resolveMiniCodeDevBackendOrigins } from "./src.v2/lib/dev-backend";
+
+const EXPECTED_PROXY_DISCONNECT_CODES = new Set(["ECONNRESET", "ECONNABORTED", "EPIPE"]);
+
+const isExpectedProxyDisconnect = (error: unknown): boolean => {
+  const err = error as { code?: unknown; message?: unknown };
+  const code = typeof err.code === "string" ? err.code : "";
+  const message = typeof err.message === "string" ? err.message.toLowerCase() : "";
+  return (
+    EXPECTED_PROXY_DISCONNECT_CODES.has(code)
+    || message.includes("socket hang up")
+    || message.includes("aborted")
+    || message.includes("premature close")
+  );
+};
+
+const configureQuietProxy = (label: string) => (proxy: { on: (event: "error", handler: (error: unknown) => void) => void }) => {
+  proxy.on("error", (error) => {
+    if (isExpectedProxyDisconnect(error)) return;
+    console.warn(`[MiniCode] Vite proxy error (${label}):`, error);
+  });
+};
+
+// Dev-only: index.html ships a strict CSP (script-src 'self') for the packaged
+// Electron build, but Vite's react-refresh preamble is an inline module script
+// and would be blocked, black-screening the dev renderer. Relax script-src for
+// `vite serve` only; production builds keep the strict policy untouched.
+const devCspRelaxPlugin = {
+  name: "minicode-dev-csp-relax",
+  apply: "serve" as const,
+  transformIndexHtml(html: string): string {
+    return html.replace(
+      "script-src 'self';",
+      "script-src 'self' 'unsafe-inline' http://localhost:* http://127.0.0.1:*;",
+    );
+  },
+};
+
+// Demo mode (`--mode demo`): boot through src.v2/demo/boot.ts, which installs
+// an in-browser mock backend before the app loads. No backend, no proxy.
+const demoEntryPlugin = {
+  name: "minicode-demo-entry",
+  transformIndexHtml(html: string): string {
+    return html
+      .replace("/src.v2/main.tsx", "/src.v2/demo/boot.ts")
+      .replace("<title>MiniCode</title>", "<title>MiniCode · Demo</title>");
+  },
+};
+
+export default defineConfig(async ({ command, mode }) => {
+  if (mode === "demo") {
+    return {
+      base: "./",
+      worker: { format: "es" as const },
+      plugins: [react(), devCspRelaxPlugin, demoEntryPlugin],
+      optimizeDeps: { entries: ["index.html", "src.v2/panels/workspaceTypeScriptWorker.ts"] },
+      resolve: { alias: { "@": path.resolve(__dirname, "./src.v2") } },
+      server: { port: 5190, strictPort: false },
+      preview: { port: 5191 },
+      build: { outDir: "dist-demo", emptyOutDir: true, chunkSizeWarningLimit: 4000 },
+    };
+  }
+  const desktopRelease = mode === "desktop-release";
+  // Always resolve env files from the frontend project directory.
+  const env = loadEnv(mode, __dirname, "");
+  const isVitest = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const isPreview = process.argv.includes("preview");
+  const backendCandidates = [
+    process.env.MINICODE_API_BASE_URL,
+    process.env.MINICODE_WS_BASE_URL,
+    process.env.VITE_DEV_BACKEND_ORIGIN,
+    process.env.VITE_API_BASE_URL,
+    process.env.VITE_WS_BASE_URL,
+    env.MINICODE_API_BASE_URL,
+    env.MINICODE_WS_BASE_URL,
+    env.VITE_DEV_BACKEND_ORIGIN,
+    env.VITE_API_BASE_URL,
+    env.VITE_WS_BASE_URL,
+  ];
+  const resolvedBackend =
+    command === "serve" && !isVitest && !isPreview
+      ? await resolveMiniCodeDevBackendOrigins({ candidates: backendCandidates,
+          wsBaseUrl: process.env.MINICODE_WS_BASE_URL || process.env.VITE_WS_BASE_URL || env.MINICODE_WS_BASE_URL || env.VITE_WS_BASE_URL,
+        })
+      : (() => {
+          const apiBaseUrl =
+            process.env.VITE_API_BASE_URL ||
+            env.VITE_API_BASE_URL ||
+            process.env.VITE_DEV_BACKEND_ORIGIN ||
+            env.VITE_DEV_BACKEND_ORIGIN ||
+            "http://127.0.0.1:8000";
+          const wsBaseUrl =
+            process.env.VITE_WS_BASE_URL ||
+            env.VITE_WS_BASE_URL ||
+            apiBaseUrl.replace(/^http/i, "ws");
+          return { apiBaseUrl, wsBaseUrl };
+        })();
+  const backendOrigin = resolvedBackend.apiBaseUrl;
+  const wsOrigin = resolvedBackend.wsBaseUrl;
+  const wsProxyTarget = wsOrigin.replace(/^ws/i, "http");
+  if (command === "serve" && !isVitest && !isPreview) {
+    console.info(`[MiniCode] Vite dev backend: ${backendOrigin} (${wsOrigin})`);
+  }
+  return {
+    base: "./",
+    worker: { format: "es" },
+    plugins: [react(), devCspRelaxPlugin],
+    // The workspace TypeScript service lives behind a Worker URL. Include its
+    // import graph in the initial scan so opening the editor cannot replace
+    // optimized React dependencies while a lazy panel is being loaded.
+    optimizeDeps: {
+      entries: ["index.html", "src.v2/panels/workspaceTypeScriptWorker.ts"],
+    },
+    test: {
+      setupFiles: [path.resolve(__dirname, "test/setup-browser.ts")],
+      exclude: ["tests/**", "node_modules/**", ".minicode/**"],
+      testTimeout: 10_000,
+    },
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "./src.v2"),
+      },
+    },
+    server: {
+      port: 5173,
+      proxy: {
+        "/ws": {
+          target: wsProxyTarget,
+          ws: true,
+          changeOrigin: true,
+          configure: configureQuietProxy("ws"),
+        },
+        "/api": {
+          target: backendOrigin,
+          changeOrigin: true,
+          configure: configureQuietProxy("api"),
+        },
+        "/health": {
+          target: backendOrigin,
+          changeOrigin: true,
+          configure: configureQuietProxy("health"),
+        },
+      },
+    },
+    build: {
+      outDir: desktopRelease ? ".tmp/desktop-release" : "dist",
+      // An open desktop renderer may still import its previous hashed chunks.
+      // Retain them until that window reloads into the newly built index.
+      emptyOutDir: desktopRelease,
+      chunkSizeWarningLimit: 1000,
+      modulePreload: {
+        resolveDependencies(_filename, dependencies) {
+          return dependencies.filter((dependency) => (
+            !dependency.includes("/monaco-")
+            && !dependency.includes("/editor.worker-")
+          ));
+        },
+      },
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            const normalized = id.replace(/\\/g, "/");
+            // Keep transport, event dispatch and the send-message import cycle together.
+            if (
+              normalized.endsWith("/src.v2/hooks/useWebSocket.ts")
+              || normalized.endsWith("/src.v2/chat/sendChatMessage.ts")
+              || /\/src\.v2\/chat\/[^/]+Events\.tsx?$/.test(normalized)
+            ) return "websocket-runtime";
+            if (!normalized.includes("/node_modules/")) return undefined;
+            if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(normalized)) return "react-vendor";
+            if (/\/node_modules\/(?:prosemirror-[^/]+|orderedmap|rope-sequence|w3c-keyname)\//.test(normalized)) return "composer-richtext-vendor";
+            if (/\/node_modules\/(?:@dnd-kit|@tanstack)\//.test(normalized)) return "interaction-vendor";
+            if (normalized.includes("/@monaco-editor/react/")) return "monaco-react";
+            if (normalized.includes("/monaco-editor/esm/vs/languages/definitions/")) return "monaco-languages";
+            if (normalized.includes("/monaco-editor/esm/vs/features/")) {
+              const feature = normalized.split("/monaco-editor/esm/vs/features/")[1].split("/")[0];
+              return `monaco-contrib-${feature}`;
+            }
+            if (normalized.includes("/monaco-editor/esm/vs/editor/contrib/")) {
+              const feature = normalized.split("/monaco-editor/esm/vs/editor/contrib/")[1].split("/")[0];
+              return `monaco-contrib-${feature}`;
+            }
+            if (normalized.includes("/monaco-editor/esm/vs/editor/browser/")) return "monaco-editor-ui";
+            if (normalized.includes("/monaco-editor/esm/vs/editor/common/")) return "monaco-editor-core";
+            if (normalized.includes("/monaco-editor/esm/vs/platform/")) return "monaco-platform";
+            if (normalized.includes("/monaco-editor/esm/vs/base/")) return "monaco-base";
+            if (
+              normalized.includes("/react-markdown/")
+              || normalized.includes("/remark-")
+              || normalized.includes("/rehype-")
+              || normalized.includes("/unified/")
+              || normalized.includes("/micromark")
+              || normalized.includes("/mdast-")
+              || normalized.includes("/hast-")
+              || normalized.includes("/katex/")
+              || /\/node_modules\/(?:markdown-it|mdurl|linkify-it|uc\.micro|punycode\.js|entities)\//.test(normalized)
+            ) {
+              return "markdown-vendor";
+            }
+            if (
+              normalized.includes("/@iconify/")
+              || normalized.includes("/@iconify-icons/")
+              || normalized.includes("/@lobehub/icons/")
+              || normalized.includes("/lucide-react/")
+              || normalized.includes("/material-icon-theme/")
+            ) {
+              return "icons-vendor";
+            }
+            if (normalized.includes("/@xterm/")) return "terminal-vendor";
+            return undefined;
+          },
+        },
+      },
+    },
+  };
+});

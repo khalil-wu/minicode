@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B2 优化版 — MiniCode UI 风格候选</title>
+    <link rel="stylesheet" href="_tokens.css" />
+    <link rel="stylesheet" href="_chrome.css" />
+    <link rel="stylesheet" href="style-b2-refined.css" />
+  </head>
+  <body>
+    <script type="module">
+      import { renderDemo } from "./_shell.js";
+      import { REFINED_ICONS } from "./_icons-refined.js";
+      renderDemo(
+        "B2 优化版",
+        "在 B 的基础上：表面叠加淡强调色调（不再死灰）+ 图标按 16px 网格重画（描边 1.5，齿轮→滑杆，纸飞机→上箭头）",
+        REFINED_ICONS,
+      );
+    </script>
+  </body>
+</html>

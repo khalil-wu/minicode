@@ -75,14 +75,14 @@ describe("read-only conversation Files tree", () => {
     const row = await screen.findByText("alignment-check.md");
     expect(row.closest('[role="treeitem"]')?.getAttribute("title")).toBe(`${cwd}/outputs/alignment-check.md`);
     fireEvent.click(row);
-    expect(mocks.preview).toHaveBeenCalledWith(taskOwner, file, "alignment-check.md");
+    expect(mocks.preview).toHaveBeenCalledWith(taskOwner, file, "alignment-check.md", undefined, { transient: true });
     await waitFor(() => expect(mocks.branches).toHaveBeenCalledWith(taskOwner, expect.any(AbortSignal), undefined, cwd));
     mocks.search.mockResolvedValue({ results: [{ path: file }] });
     fireEvent.change(screen.getByRole("textbox", { name: "筛选文件" }), { target: { value: "alignment" } });
     const match = await screen.findByText(file);
     expect(match.closest('[role="treeitem"]')?.getAttribute("title")).toBe(`${cwd}/outputs/alignment-check.md`);
     fireEvent.click(match);
-    expect(mocks.preview).toHaveBeenLastCalledWith(taskOwner, file, "alignment-check.md");
+    expect(mocks.preview).toHaveBeenLastCalledWith(taskOwner, file, "alignment-check.md", undefined, { transient: true });
     expect(useAppStore.getState()).toMatchObject({ conversationId: "task", workingDirectory: cwd, draft: "authored draft" });
   });
 
@@ -133,7 +133,7 @@ describe("read-only conversation Files tree", () => {
     show(); fireEvent.click(await screen.findByText("notes"));
     fireEvent.click(await screen.findByText("nested.txt"));
     expect(mocks.tree).toHaveBeenCalledWith(owner, "notes", expect.any(AbortSignal));
-    expect(mocks.preview).toHaveBeenCalledWith(owner, "notes/nested.txt", "nested.txt");
+    expect(mocks.preview).toHaveBeenCalledWith(owner, "notes/nested.txt", "nested.txt", undefined, { transient: true });
     expect(useAppStore.getState().workingDirectory).toBe(owner.executionCwd);
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
   });
@@ -157,7 +157,7 @@ describe("read-only conversation Files tree", () => {
   it("opens text in the editor only inside the execution root and keeps other browser files in read-only preview", async () => {
     const view = show(); await screen.findByText("note.txt");
     selectAction("note.txt", "在 MiniCode 中打开");
-    expect(mocks.preview).toHaveBeenCalledWith(owner, "note.txt", "note.txt");
+    expect(mocks.preview).toHaveBeenCalledWith(owner, "note.txt", "note.txt", undefined, { transient: true });
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
     view.unmount(); mocks.tree.mockResolvedValue(page([entry("main.py"), entry("image.png")], owner.executionCwd));
     const executionOwner = { ...owner, browserRoot: owner.executionCwd };
@@ -168,11 +168,11 @@ describe("read-only conversation Files tree", () => {
     expect(editorOpen).toHaveBeenCalledWith("C:/tasks/a/main.py", "main.py", { exact: true });
     expect(useAppStore.getState().editorOpenRequests).toMatchObject([{ path: "main.py", exact: true }]);
     selectAction("image.png", "在 MiniCode 中打开");
-    expect(mocks.preview).toHaveBeenLastCalledWith(executionOwner, "image.png", "image.png");
+    expect(mocks.preview).toHaveBeenLastCalledWith(executionOwner, "image.png", "image.png", undefined, { transient: true });
     expect(useAppStore.getState().workingDirectory).toBe(owner.executionCwd);
     act(() => useAppStore.setState({ workingDirectory: "C:/other-editor-root", editorOpenRequests: [] }));
     selectAction("main.py", "在 MiniCode 中打开");
-    expect(mocks.preview).toHaveBeenLastCalledWith(executionOwner, "main.py", "main.py");
+    expect(mocks.preview).toHaveBeenLastCalledWith(executionOwner, "main.py", "main.py", undefined, { transient: true });
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
     expect(useAppStore.getState().workingDirectory).toBe("C:/other-editor-root");
   });

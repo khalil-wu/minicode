@@ -9,6 +9,15 @@ from backend.services.chat_api_service import ChatApiServiceError
 from backend.owner_scope import canonical_workspace_root
 
 
+def _repository_read(operation, conversation_id: str):
+    # The repository rejects malformed identifiers with ValueError; that is a
+    # client contract error, not a storage failure.
+    try:
+        return operation(conversation_id)
+    except ValueError as error:
+        raise ChatApiServiceError(409, str(error)) from error
+
+
 def conversation_resource_page(
     *, session_id: str, conversation_id: str, ws_manager: Any,
     after: str = "", limit: int = 60, query: str = "", kind: str = "all", expected_workspace_root: str | None = None,
@@ -16,7 +25,7 @@ def conversation_resource_page(
     session = ws_manager.get_session(session_id)
     if session is None:
         raise ChatApiServiceError(404, "Session is not connected.")
-    conversation = session.conversation_repo.get_conversation(conversation_id)
+    conversation = _repository_read(session.conversation_repo.get_conversation, conversation_id)
     if conversation is None or conversation.archived:
         raise ChatApiServiceError(404, "Conversation is not available.")
     workspace_root = str(session.session_lifecycle.workspace_root_for_conversation(conversation) or "")
@@ -118,7 +127,7 @@ def conversation_resource_page(
 
 
 def background_command_detail(session: Any, conversation_id: str, command_id: str, *, cursor: int, max_chars: int) -> dict[str, Any]:
-    conversation = session.conversation_repo.get_conversation_summary(conversation_id)
+    conversation = _repository_read(session.conversation_repo.get_conversation_summary, conversation_id)
     if conversation is None or conversation.archived:
         raise ChatApiServiceError(404, "Conversation is not available.")
     command = session.background_manager.get_status(command_id, conversation_id=conversation_id)

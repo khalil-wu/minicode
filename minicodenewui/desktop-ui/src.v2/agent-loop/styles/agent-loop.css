@@ -1,0 +1,709 @@
+/*
+ * agent-loop.css — Agent 循环区（turn / process / reply / 文件变更卡片）。
+ *
+ * 单一事实源约定：
+ *  - 本文件只拥有 `agent-loop-*` 选择器，及对少量 cells 类的 scoped 覆盖。
+ *  - 排版 / 表面 / 圆角的最终权威是 styles/ui-polish.css（它用 !important
+ *    接管了 work-area / process-summary / thinking-indicator / user-cell-content
+ *    等的字号字重）。本文件不再重复那些属性，只保留 polish 未管的布局、定位、
+ *    结构与独有元素。
+ *  - 颜色一律引用全局 token，无 hex/rgba 字面量；无 --agent-loop-* 别名层。
+ *
+ * 加载顺序（main.tsx）：cells.css → agent-loop.css → composer → shell → ui-polish。
+ * 因此本文件里与 cells 同优先级、非 !important 的声明会覆盖 cells。与 ui-polish
+ * 冲突的两处历史覆盖（user-cell-bubble 表面、answer-cell 正文字号/行高）已全部
+ * 让位于 polish。唯一保留的 !important 是 ≤820px 响应式回答字号收敛——polish 的
+ * 正文规则带 !important，只有同级权重才能在该断点覆盖；另有 reduced-motion 守卫。
+ */
+
+/* ── Turn / Process / Work & Reply areas ─────────────────────────────── */
+
+.agent-loop-turn {
+  color: var(--text-primary);
+}
+
+.assistant-proposed-plan {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-base);
+}
+
+.assistant-proposed-plan-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+}
+
+.assistant-proposed-plan-heading button {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.assistant-proposed-plan-original pre {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+}
+
+.agent-loop-process {
+  color: var(--text-secondary);
+}
+
+/* Work area: 进程时间线在视觉上从属于回答区（字号由 ui-polish 定为 secondary）。 */
+.agent-loop-work-area {
+  color: var(--text-secondary);
+}
+
+/* Reply area: 与折叠的进程时间线之间留出顶部间距，让主回答读作一级内容。 */
+.agent-loop-reply-area {
+  margin-top: 4px;
+}
+
+/* The aggregate diff is the durable outcome of file mutations. It lives
+   after the reply and remains rendered even when the work timeline collapses. */
+.agent-loop-diff-area {
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* 进程容器在 chat-turn 内被拉平（宽高/间距由 ui-polish 接管），这里只去边框与底色。 */
+.agent-loop-process.chat-turn-process {
+  width: 100%;
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.chat-turn-process,
+.agent-loop-process.chat-turn-process,
+.chat-turn-process-stack,
+.agent-loop-timeline {
+  border: 0;
+  box-shadow: none;
+}
+
+/* 进程容器不渲染 ::before/::after 装饰条。 */
+.chat-turn-process::before,
+.chat-turn-process::after,
+.agent-loop-process.chat-turn-process::before,
+.agent-loop-process.chat-turn-process::after {
+  content: none;
+  display: none;
+}
+
+/* ── User cell（scoped 覆盖 cells 的 user-cell）───────────────────────── */
+
+.agent-loop-user-cell .user-cell-wrap {
+  align-items: flex-end;
+  align-self: flex-end;
+  width: 70%;
+  max-width: 70%;
+  margin: 0 0 0 auto;
+}
+
+.agent-loop-user-cell .edit-bubble-wrap {
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+/* 用户气泡的表面/几何由 ui-polish 的 .user-cell-bubble 单一定义
+   (--message-user-bg + 22px 圆角 + 无边框无影)。本文件不再重复覆盖。 */
+.agent-loop-user-cell .user-cell-bubble {
+  width: fit-content;
+  max-width: 100%;
+}
+
+.user-cell-quote {
+  width: 100%;
+  min-width: 0;
+}
+
+.user-cell-quote .message-quote {
+  margin-bottom: 0;
+}
+
+.workbench-empty-project {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline dotted;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--text-muted);
+  text-underline-offset: 4px;
+  cursor: pointer;
+}
+
+.workbench-empty-project:hover {
+  color: var(--text-secondary);
+}
+
+/* ── Process summary（尺寸/字重由 ui-polish 接管，仅保留布局与图标色）─── */
+
+.agent-loop-process-summary {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.agent-loop-process-summary-static {
+  cursor: default;
+}
+
+.agent-loop-process-summary-body {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.agent-loop-process-summary-status {
+  display: inline-block;
+  color: var(--text-muted);
+}
+
+.agent-loop-process-summary-status-label {
+  display: inline-block;
+  font-size: var(--text-base);
+  line-height: 1.45;
+}
+
+.agent-loop-process-summary-failure {
+  display: inline-block;
+  margin-left: 0.35em;
+  color: var(--text-muted);
+  font-size: var(--text-base);
+  line-height: 1.45;
+}
+
+.agent-loop-process-summary-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+.agent-loop-process-summary svg {
+  color: var(--text-muted);
+}
+
+.agent-loop-done-icon {
+  color: var(--text-muted);
+}
+
+.agent-loop-process-summary .agent-loop-failed-icon {
+  color: var(--text-muted);
+}
+
+/* 每轮只从左向右刷新；不反向、不呼吸，末段短暂停在主文字色。 */
+@keyframes agent-loop-processing-sheen {
+  0%, 8% {
+    background-position: 100% 0;
+  }
+
+  82%, 100% {
+    background-position: 0 0;
+  }
+}
+
+/* ── Timeline ────────────────────────────────────────────────────────── */
+
+.agent-loop-timeline {
+  gap: 8px;
+  padding: 8px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-loop-process[data-collapsed="true"] .agent-loop-timeline {
+  display: none;
+}
+
+/* ── Process-cell 对 cells 类的 scoped 覆盖（拉平时间线 / 统一表面）─────
+   cells.css 以 (0,1,0) 非 !important 定义基值，本文件 (0,2,0) 非 !important 且加载
+   更晚，故无需 !important 即生效。工具行保持 transcript 平铺，展开证据才有外框。 */
+
+.agent-loop-process-cell .activity-cell,
+.agent-loop-process-cell .exec-cell {
+  margin-left: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.agent-loop-process-cell .activity-cell-main-button,
+.agent-loop-process-cell .exec-cell-header-button {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  min-height: 30px;
+  padding: 3px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  transition:
+    background-color var(--transition-fast);
+}
+
+.agent-loop-process-cell .activity-cell-main-button:disabled {
+  border: 0;
+  background: transparent;
+  opacity: 1;
+}
+
+.agent-loop-process-cell .activity-cell-main-button[data-clickable="true"]:hover,
+.agent-loop-process-cell .exec-cell-header-button:hover {
+  border: 0;
+  background-color: var(--workbench-hover);
+  border-radius: var(--radius-sm);
+}
+
+/* Provider retry rows are transcript status text as well. Keep their icon and
+   typed 1/N label intact while applying the same flat geometry as every tool. */
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-main-button {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-main-button[data-clickable="true"]:hover,
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-main-button:disabled {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-name {
+  color: var(--text-muted);
+  font-weight: var(--fw-regular);
+  background: none;
+  background-image: none;
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+  animation: none;
+}
+
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-name[data-failed="true"] {
+  color: var(--text-muted);
+}
+
+.agent-loop-process-cell .activity-cell-provider-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-muted);
+}
+
+.agent-loop-process-cell .activity-cell-provider-icon[data-failed="true"] {
+  color: var(--text-muted);
+}
+
+/* Nested record cards do not add hierarchy once the cell owns the single
+   disclosure frame. Keep separators in the content itself only where a
+   command/output or diff needs them. */
+.agent-loop-process-cell .activity-cell-expanded {
+  margin: 4px 0 6px;
+}
+
+.agent-loop-process-cell .activity-cell-tool-detail-card,
+.agent-loop-process-cell .activity-cell-change-card,
+.agent-loop-process-cell .activity-cell-artifact-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-loop-process-cell .activity-cell-artifact-button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.agent-loop-process-cell .activity-cell-error-detail {
+  padding-left: 0;
+}
+
+.activity-cell-change-disclosure {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 6px;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-cell-change-disclosure:disabled {
+  cursor: default;
+}
+
+.activity-cell-change-disclosure svg {
+  flex-shrink: 0;
+}
+
+.agent-loop-process-cell :is(.activity-cell-failure-summary, .exec-cell-failure-summary) {
+  margin: 0 0 4px 23px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-loop-process-cell .activity-cell-error-pre {
+  border-left-width: 2px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.agent-loop-process-cell .exec-cell-header-row {
+  gap: 6px;
+}
+
+.agent-loop-process-cell .exec-cell-stop-button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+}
+
+.agent-loop-process-cell .activity-cell-name,
+.agent-loop-process-cell .exec-cell-title {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-regular);
+  line-height: 1.5;
+}
+
+.agent-loop-process-cell .activity-cell-file-change-target,
+.agent-loop-process-cell .activity-cell-file-change-stats,
+.agent-loop-process-cell .exec-cell-meta {
+  font-size: var(--text-sm);
+}
+
+.agent-loop-process-cell :is(
+  .activity-cell-tool-record-target,
+  .activity-cell-change-card-path,
+  .activity-cell-inline-output,
+  .activity-cell-output-pre,
+  .activity-cell-detail-row,
+  .activity-cell-detail-path,
+  .activity-cell-plan-summary,
+  .activity-cell-plan-step,
+  .activity-cell-error-label,
+  .activity-cell-error-pre,
+  .exec-cell-expanded-heading,
+  .exec-cell-shell-label,
+  .exec-cell-output-pre,
+  .inline-diff
+) {
+  font-size: var(--text-sm);
+}
+
+.agent-loop-process-cell :is(
+  .activity-cell-progress,
+  .activity-cell-elapsed,
+  .activity-cell-long-running,
+  .activity-cell-detail-meta,
+  .activity-cell-detail-count,
+  .activity-cell-detail-duration,
+  .exec-cell-meta,
+  .exec-cell-no-output
+) {
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.agent-loop-diff-area .diff-cell-title {
+  font-size: var(--text-sm);
+}
+
+.agent-loop-diff-area .diff-cell-file-path {
+  font-size: var(--text-sm);
+}
+
+.agent-loop-process-chevron {
+  flex-shrink: 0;
+  transition: transform var(--duration-base) var(--easing-enter);
+}
+
+.agent-loop-process-summary[aria-expanded="true"] .agent-loop-process-chevron {
+  transform: rotate(90deg);
+}
+
+.agent-loop-diff-area .diff-cell-stats {
+  font-size: var(--text-xs);
+}
+
+.agent-loop-diff-area :is(.diff-cell-action-button, .diff-cell-more-files) {
+  font-size: var(--text-sm);
+}
+
+.agent-loop-process-cell .activity-cell-read-target,
+.agent-loop-process-cell .activity-cell-detail,
+.agent-loop-process-cell .exec-cell-command-preview {
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.agent-loop-timeline-group-work[data-processing="true"] > .agent-loop-timeline-group-title .agent-loop-timeline-group-live-title,
+.agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
+.agent-loop-process-cell .exec-cell-header-button[data-processing="true"],
+.agent-loop-process-cell .status-notice-cell[data-processing="true"] .status-notice-title,
+.agent-loop-process-cell .context-compaction-cell[data-processing="true"] > span,
+.agent-loop-process-cell .thinking-cell[data-processing="true"] {
+  background-image: linear-gradient(
+    90deg,
+    var(--text-primary) 0%,
+    var(--text-primary) 34%,
+    color-mix(in oklch, var(--text-primary) 22%, white) 38%,
+    var(--text-muted) 43%,
+    var(--text-muted) 100%
+  );
+  background-position: 100% 0;
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: agent-loop-processing-sheen var(--duration-status-sweep) var(--easing-status-sweep) infinite both;
+}
+
+.agent-loop-process-cell .activity-cell-dot[data-running="true"],
+.agent-loop-process-cell .activity-cell-tool-icon[data-running="true"],
+.agent-loop-process-cell .exec-cell-status-info {
+  color: var(--text-muted);
+  animation: none;
+}
+
+.agent-loop-process-cell > .thinking-cell-commentary {
+  padding: 0;
+}
+
+.thinking-cell-commentary > .md-body > :first-child { margin-top: 0; }
+.thinking-cell-commentary > .md-body > :last-child { margin-bottom: 0; }
+
+/* ── Final answer（回答正文 + 流式光标）───────────────────────────────── */
+
+.agent-loop-final-answer {
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: 0;
+  box-shadow: none;
+}
+
+.chat-turn-answer-zone,
+.chat-turn-answer {
+  border-top: 0;
+  box-shadow: none;
+}
+
+/* 回答正文的字号/行高由 ui-polish 统一为全站正文刻度(--mc-font-reading/1.62),
+   不再单独放大一档——对话区与全局保持一致。仅保留字色与字重。 */
+.agent-loop-answer-cell .assistant-cell-content,
+.agent-loop-answer-cell .md-prose {
+  color: var(--text-primary);
+  font-weight: var(--fw-regular);
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-reduced-motion="false"]) .agent-loop-timeline-group-work[data-processing="true"] > .agent-loop-timeline-group-title .agent-loop-timeline-group-live-title,
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .exec-cell-header-button[data-processing="true"],
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .status-notice-cell[data-processing="true"] .status-notice-title,
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .context-compaction-cell[data-processing="true"] > span,
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .thinking-cell[data-processing="true"] {
+    color: var(--text-primary);
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+
+}
+
+.agent-loop-timeline-group {
+  margin: 0;
+}
+
+.agent-loop-timeline-group-title {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  width: 100%;
+  gap: 6px;
+  padding: 3px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-prose);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  font-weight: var(--fw-regular);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast);
+}
+
+.agent-loop-timeline-group-title:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.agent-loop-timeline-group[data-group-expanded="true"] > .agent-loop-timeline-group-title {
+  border: 0;
+}
+
+.agent-loop-timeline-group-title svg {
+  flex: 0 0 auto;
+}
+
+.agent-loop-timeline-group-icon,
+.agent-loop-timeline-group-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.agent-loop-timeline-group-chevron {
+  margin-left: 0;
+}
+
+.agent-loop-timeline-group-label,
+.agent-loop-timeline-group-live-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-loop-timeline-group-items {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding-left: 0;
+}
+
+.agent-loop-timeline-group-disclosure {
+  overflow: hidden;
+}
+
+.agent-loop-timeline-group-work .agent-loop-timeline-group-items {
+  max-height: min(14rem, 55vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.agent-loop-timeline-group-work .agent-loop-timeline-group-items[data-overflow-bottom="true"] {
+  mask-image: linear-gradient(to bottom, var(--text-primary) calc(100% - 20px), transparent);
+}
+
+.agent-loop-process-cell .activity-cell-main-button .activity-cell-file-change-stats {
+  color: var(--text-muted);
+}
+
+.agent-loop-process-cell .activity-cell-main-button .activity-cell-file-change-stats > span {
+  color: inherit;
+}
+
+.agent-loop-process-cell .exec-cell-title {
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-weight: var(--fw-regular);
+}
+
+.agent-loop-process-cell .activity-cell-detail,
+.agent-loop-process-cell .activity-cell-detail-path,
+.agent-loop-process-cell .activity-cell-file-change-target {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-regular);
+  line-height: 1.5;
+}
+
+.agent-loop-process-cell .exec-cell-command-preview {
+  flex: 0 1 auto;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-regular);
+  line-height: 1.5;
+}
+
+.agent-loop-process-cell .activity-cell-detail {
+  max-width: none;
+}
+
+.agent-loop-process-cell .activity-cell-read-target:not(.activity-cell-detail-multi) {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-loop-process-cell .exec-cell-status-success {
+  color: var(--text-muted);
+}
+
+.agent-loop-open-work-group {
+  min-width: 0;
+}
+
+.agent-loop-open-work-group .agent-loop-timeline-group-items {
+  margin-left: 0;
+}
+
+/* Expanded group records are static; only the live group header owns sheen. */
+.agent-loop-timeline-group-work .agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
+.agent-loop-timeline-group-work .agent-loop-process-cell .exec-cell-header-button[data-processing="true"] {
+  background: none;
+  background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+  animation: none;
+}
+
+.agent-loop-open-work-group > .agent-loop-timeline-group {
+  margin: 0;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+
+@media (max-width: 820px) {
+  .agent-loop-user-cell .user-cell-wrap {
+    width: min(92%, 760px);
+    max-width: min(92%, 760px);
+  }
+
+}

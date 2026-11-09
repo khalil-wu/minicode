@@ -1,0 +1,57 @@
+.mc-editor-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+}
+.mc-editor-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+.mc-editor-actions button:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.mc-editor-actions button[aria-pressed="true"] {
+  color: var(--text-primary);
+  background: color-mix(in oklch, var(--text-primary) 5%, transparent);
+}
+
+.mc-editor-index-status {
+  flex-shrink: 0;
+  max-width: 150px;
+  height: 22px;
+  overflow: hidden;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-xxs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mc-editor-index-status:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mc-editor-index-status[data-phase="error"],
+.mc-editor-index-status[data-phase="partial"] { color: var(--state-warning); }
+.mc-editor-index-status:disabled { cursor: progress; }
+
+.editor-tab-close[data-dirty] .editor-tab-dismiss,
+.editor-tab:hover .editor-tab-dirty,
+.editor-tab:focus-within .editor-tab-dirty { display: none; }
+.editor-tab:hover .editor-tab-dismiss,
+.editor-tab:focus-within .editor-tab-dismiss { display: block; }
+.editor-tab-close:hover { background: var(--surface-hover); }

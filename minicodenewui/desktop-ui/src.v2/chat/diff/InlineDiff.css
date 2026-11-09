@@ -1,0 +1,82 @@
+.inline-diff .inline-diff-line {
+  border-left: 2px solid transparent;
+}
+html[data-diff-marker-style="color"] .inline-diff-marker { visibility: hidden; }
+html[data-diff-marker-style="symbols"] .inline-diff .inline-diff-line { border-left-color: transparent; }
+
+.inline-diff[data-diff-palette] { background: var(--diff-view-background); color: var(--diff-view-foreground); }
+.inline-diff[data-diff-palette] .inline-diff-line { color: var(--diff-view-foreground); }
+.inline-diff[data-diff-palette] .inline-diff-line-added .inline-diff-number { background: var(--diff-added-gutter-background); color: var(--diff-added-foreground); }
+.inline-diff[data-diff-palette] .inline-diff-line-removed .inline-diff-number { background: var(--diff-removed-gutter-background); color: var(--diff-removed-foreground); }
+
+.inline-diff .inline-diff-line-added {
+  border-left-color: var(--diff-added-foreground);
+  background: var(--diff-added-background);
+  color: var(--text-secondary);
+}
+
+.inline-diff .inline-diff-line-removed {
+  border-left-color: var(--diff-removed-foreground);
+  background: var(--diff-removed-background);
+  color: var(--text-secondary);
+}
+
+.inline-diff .inline-diff-line-added .inline-diff-marker {
+  color: var(--diff-added-foreground);
+}
+
+.inline-diff .inline-diff-line-removed .inline-diff-marker {
+  color: var(--diff-removed-foreground);
+}
+
+.inline-diff-context-toggle,
+.inline-diff-context-gap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  margin: 3px 0;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+}
+
+.inline-diff-context-toggle {
+  cursor: pointer;
+}
+
+.inline-diff-context-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.inline-diff-context-toggle svg {
+  flex: 0 0 auto;
+}
+
+.inline-diff-context-gap {
+  padding-left: 30px;
+}
+
+.inline-diff-file-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.inline-diff-file-title:hover { color: var(--text-primary); background: var(--surface-soft); }
+.inline-diff-file-title > svg { flex: 0 0 auto; }
+.inline-diff-file-title > span { min-width: 0; overflow-wrap: anywhere; }

@@ -1,0 +1,59 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const dist = path.resolve(root, process.env.MINICODE_BUILD_OUTPUT || "dist");
+const assets = path.join(dist, "assets");
+const limits = {
+  entry: 900 * 1024,
+  javascript: 1500 * 1024,
+  css: 350 * 1024,
+  // Monaco 0.56's compiler and standard libraries live in a lazy language
+  // worker, rather than the UI entry. Keep a separate raw and transfer budget.
+  typescriptWorker: 7 * 1024 * 1024,
+  typescriptWorkerGzip: 1500 * 1024,
+};
+
+if (!fs.existsSync(assets)) {
+  console.error("Bundle budget check requires frontend/dist. Run npm run build first.");
+  process.exit(1);
+}
+
+const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");
+const entryMatch = html.match(/<script[^>]+type=["']module["'][^>]+src=["']\.\/assets\/([^"']+\.js)["']/i)
+  || html.match(/<script[^>]+src=["']\.\/assets\/([^"']+\.js)["'][^>]+type=["']module["']/i);
+const entryName = entryMatch?.[1] ?? "";
+const failures = [];
+const rows = [];
+
+for (const name of fs.readdirSync(assets)) {
+  if (!name.endsWith(".js") && !name.endsWith(".css")) continue;
+  const bytes = fs.statSync(path.join(assets, name)).size;
+  const typescriptWorker = /^(?:ts\.worker|workspaceTypeScriptWorker)-.*\.js$/.test(name);
+  const limit = name === entryName ? limits.entry : typescriptWorker ? limits.typescriptWorker : name.endsWith(".js") ? limits.javascript : limits.css;
+  rows.push({ name, bytes, limit });
+  if (bytes > limit) failures.push({ name, bytes, limit });
+  if (typescriptWorker) {
+    const compressed = { name: `${name} (gzip)`, bytes: gzipSync(fs.readFileSync(path.join(assets, name))).length, limit: limits.typescriptWorkerGzip };
+    rows.push(compressed);
+    if (compressed.bytes > compressed.limit) failures.push(compressed);
+  }
+}
+
+rows.sort((a, b) => b.bytes - a.bytes);
+console.log(`Entry: ${entryName || "not detected"}`);
+for (const row of rows.slice(0, 12)) {
+  console.log(`${row.name}: ${(row.bytes / 1024).toFixed(1)} KiB / ${(row.limit / 1024).toFixed(0)} KiB`);
+}
+
+if (failures.length) {
+  console.error("Bundle budget exceeded:");
+  for (const item of failures) {
+    console.error(`- ${item.name}: ${(item.bytes / 1024).toFixed(1)} KiB > ${(item.limit / 1024).toFixed(0)} KiB`);
+  }
+  process.exit(1);
+}
+
+console.log("Bundle budget check passed.");

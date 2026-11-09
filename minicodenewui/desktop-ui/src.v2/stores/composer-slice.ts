@@ -1,0 +1,324 @@
+import type { StateCreator } from "zustand";
+import type { AppStore, ComposerSlice } from "./types";
+import { initialUiPermissionMode, toBackendPermissionMode } from "../protocol/permissions";
+import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { pushToast } from "../overlays/ToastContainer";
+import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
+import { LS, readLS, writeLS } from "./shared-helpers";
+import { uniqueMessageId } from "./shared-helpers";
+import { activeComposerDraftKey, composerDraftOf, updateComposerDraftAttachment } from "./composer-drafts";
+import { emptyConversationWorkbenchState, liveConversationWorkbenchState } from "./ui-slice";
+import { editConversationDraftModel, isConversationDraftMaterializing } from "./conversation-drafts";
+import { isConversationMessageAwaitingReceipt } from "../chat/sendChatMessage";
+
+/**
+ * The permission mode and reasoning effort pills only move when the backend
+ * echoes the new value back, so a refusal leaves the UI silently unchanged: the
+ * user accepts the 完全访问 danger dialog and nothing at all happens. Note that
+ * `sendClientCommandAwaitResult` *resolves* with an error-level `command.result`
+ * rather than rejecting, so a bare `.catch()` never sees a refusal — the level
+ * has to be inspected.
+ */
+const reportCommandOutcome = async (
+  pending: Promise<Awaited<ReturnType<typeof sendClientCommandAwaitResult>>>,
+  failureTitle: string,
+): Promise<boolean> => {
+  try {
+    const result = await pending;
+    if (commandResultSucceeded(result)) return true;
+    pushToast(result.message ? `${failureTitle}：${result.message}` : `${failureTitle}。`, "error", 6000);
+    return false;
+  } catch (error) {
+    pushToast(
+      `${failureTitle}：${error instanceof Error ? error.message : "请检查连接后重试"}`,
+      "error",
+      6000,
+    );
+    return false;
+  }
+};
+
+const isFilesystemMention = (kind: string): boolean => kind === "file" || kind === "folder";
+
+const revokeBlobDataUrl = (dataUrl: string | undefined | null): void => {
+  if (
+    typeof dataUrl === "string" &&
+    dataUrl.startsWith("blob:") &&
+    typeof URL !== "undefined" &&
+    typeof URL.revokeObjectURL === "function"
+  ) {
+    URL.revokeObjectURL(dataUrl);
+  }
+};
+
+const initialPermissionMode = (): ComposerSlice["permissionMode"] => {
+  const stored = readLS(LS.permissionMode);
+  const normalized = initialUiPermissionMode(stored);
+  if (stored !== normalized) {
+    writeLS(LS.permissionMode, normalized);
+  }
+  return normalized;
+};
+
+export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> = (set, get) => ({
+  workspaceComposerDrafts: {},
+  composerDraftsReady: false,
+  composerDraftStoragePending: false,
+  composerDraftStorageError: null,
+  composerDraftRevision: 0,
+  draft: "",
+  richDraft: undefined,
+  retainedInputEdit: undefined,
+  goalMode: false,
+  attachments: [],
+  quotedMessage: null,
+  permissionMode: initialPermissionMode(),
+  pendingPermissionModeChanges: {},
+  agentMode: "build",
+  pendingAgentModeChanges: {},
+  latestAgentModeCommandIds: {},
+  // Match MiniCode's balanced default; model/runtime capabilities still decide
+  // which effort levels are actually exposed and accepted.
+  effortLevel: "medium" as const,
+  prMonitor: null,
+  prStatusIssue: null,
+  actionChip: null,
+  mentionResults: [],
+  selectedMentions: [],
+  selectedSkills: [],
+  slashPanelOpen: false,
+  mentionPanelOpen: false,
+  setDraft: (d, richDraft) => set(state => {
+    const nextRichDraft = d ? richDraft ?? (state.draft === d ? state.richDraft : undefined) : undefined;
+    // Clearing an already empty composer must not notify every subscriber.
+    return state.draft === d && state.richDraft === nextRichDraft ? state : { draft: d, richDraft: nextRichDraft };
+  }),
+  setQuotedMessage: (message) => set({ quotedMessage: message }),
+  clearQuotedMessage: () => set(state => (state.quotedMessage === null ? state : { quotedMessage: null })),
+  addAttachment: (a) =>
+    set((s) => ({ attachments: [...s.attachments, a] })),
+  updateAttachment: (id, patch) =>
+    set((s) => {
+      const live = updateComposerDraftAttachment(composerDraftOf(s), id, patch);
+      return { attachments: live.attachments, queuedEdit: live.queuedEdit, retainedInputEdit: live.retainedInputEdit,
+      workspaceComposerDrafts: Object.fromEntries(Object.entries(s.workspaceComposerDrafts).map(([root, draft]) => [root,
+        updateComposerDraftAttachment(draft, id, patch)])),
+      conversationWorkbenchStates: Object.fromEntries(
+        Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
+          conversationId,
+          updateComposerDraftAttachment(state, id, patch),
+        ]),
+      ),
+    }; }),
+  removeAttachment: (id) =>
+    set((s) => {
+      const removed = s.attachments.find((a) => a.id === id);
+      revokeBlobDataUrl(removed?.dataUrl);
+      return {
+        attachments: s.attachments.filter((a) => a.id !== id),
+        workspaceComposerDrafts: Object.fromEntries(Object.entries(s.workspaceComposerDrafts).map(([root, draft]) => [root,
+          { ...draft, attachments: draft.attachments.filter(attachment => attachment.id !== id) }])),
+        conversationWorkbenchStates: Object.fromEntries(
+          Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
+            conversationId,
+            { ...state, attachments: (state.attachments ?? []).filter((attachment) => attachment.id !== id) },
+          ]),
+        ),
+      };
+    }),
+  clearAttachments: () =>
+    set((s) => {
+      // With no live attachments there is nothing to remove from any draft.
+      // Returning the same state keeps dormant draft identities, so draft
+      // persistence does not re-serialize every record on each send.
+      if (s.attachments.length === 0) return s;
+      // Revoke every blob: dataURL so image blob URLs don't leak when the
+      // composer is cleared on send / conversation switch / long sessions.
+      for (const attachment of s.attachments) revokeBlobDataUrl(attachment.dataUrl);
+      const removedIds = new Set(s.attachments.map((attachment) => attachment.id));
+      return {
+        attachments: [],
+        workspaceComposerDrafts: Object.fromEntries(Object.entries(s.workspaceComposerDrafts).map(([root, draft]) => [root,
+          { ...draft, attachments: draft.attachments.filter(attachment => !removedIds.has(attachment.id)) }])),
+        conversationWorkbenchStates: Object.fromEntries(
+          Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
+            conversationId,
+            { ...state, attachments: (state.attachments ?? []).filter((attachment) => !removedIds.has(attachment.id)) },
+          ]),
+        ),
+      };
+    }),
+  setPermissionMode: (m) => {
+    const before = get();
+    const conversationId = String(before.conversationId || "").trim();
+    if (!conversationId) {
+      const id = before.activeConversationDraftId ?? before.startConversationDraft({ bindWorkspace: Boolean(before.workingDirectory), appMode: before.appMode });
+      if (get().conversationDrafts[id].materializing) return Promise.resolve(false);
+      set(state => ({ permissionMode: m, conversationDrafts: { ...state.conversationDrafts,
+        [id]: { ...state.conversationDrafts[id], permissionMode: m, permissionEdited: true } },
+        ...(state.runtimeCapabilities?.permission ? { runtimeCapabilities: { ...state.runtimeCapabilities,
+          permission: { ...state.runtimeCapabilities.permission, mode: m } } } : {}) }));
+      return Promise.resolve(true);
+    }
+    const workspaceRoot = before.workingDirectory;
+    const previous = before.pendingPermissionModeChanges[conversationId];
+    const confirmation = (async () => {
+      if (previous) await previous.confirmation;
+      const accepted = await reportCommandOutcome(
+        sendClientCommandAwaitResult({
+          type: "conversation.permission_mode.set",
+          mode: toBackendPermissionMode(m),
+          source: "frontend.ui",
+          conversation_id: conversationId,
+        }, "conversation.permission_mode.set"),
+        "切换权限模式失败",
+      );
+      const current = get();
+      if (accepted && String(current.conversationId || "").trim() === conversationId
+        && workspaceRootsEqual(current.workingDirectory, workspaceRoot)) set({ permissionMode: m });
+      return accepted;
+    })().finally(() => {
+      set((state) => {
+        if (state.pendingPermissionModeChanges[conversationId]?.confirmation !== confirmation) return state;
+        const pendingPermissionModeChanges = { ...state.pendingPermissionModeChanges };
+        delete pendingPermissionModeChanges[conversationId];
+        return { pendingPermissionModeChanges };
+      });
+    });
+    set((state) => ({ pendingPermissionModeChanges: {
+      ...state.pendingPermissionModeChanges, [conversationId]: { workspaceRoot, confirmation },
+    } }));
+    return confirmation;
+  },
+  setAgentMode: async (m, conversationId) => {
+    const before = get();
+    const owner = conversationId ?? before.conversationId;
+    if (isConversationDraftMaterializing(before, owner) || (owner && isConversationMessageAwaitingReceipt(owner))) return false;
+    if (!owner) {
+      set(state => ({ agentMode: m, workspaceComposerDrafts: { ...state.workspaceComposerDrafts,
+        [activeComposerDraftKey(state)]: composerDraftOf({ ...state, agentMode: m }) } }));
+      return true;
+    }
+    const commandId = uniqueMessageId("cmd");
+    set(state => ({ ...(owner === state.conversationId ? { agentMode: m } : {}),
+      conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
+        [owner]: { ...(owner === state.conversationId ? liveConversationWorkbenchState(state)
+          : state.conversationWorkbenchStates[owner] ?? emptyConversationWorkbenchState()), agentMode: m } },
+      pendingAgentModeChanges: { ...state.pendingAgentModeChanges, [owner]: { commandId, mode: m } },
+      latestAgentModeCommandIds: { ...state.latestAgentModeCommandIds, [owner]: commandId },
+    }));
+    let acceptedRevision: number | undefined;
+    const accepted = await reportCommandOutcome(sendClientCommandAwaitResult({
+      type: "conversation.agent_mode.set", conversation_id: owner, agent_mode: m, client_command_id: commandId,
+    }, "conversation.agent_mode.set").then(result => {
+      if (commandResultSucceeded(result) && typeof result.data?.revision === "number") acceptedRevision = result.data.revision;
+      return result;
+    }), "切换会话模式失败");
+    if (get().latestAgentModeCommandIds[owner] !== commandId) return false;
+    set(state => {
+      const pending = { ...state.pendingAgentModeChanges };
+      delete pending[owner];
+      return { pendingAgentModeChanges: pending };
+    });
+    const actualMode = accepted ? m : get().conversations.find(conversation => conversation.id === owner)?.agentMode ?? "build";
+    get().syncConversationAgentMode(actualMode, owner, commandId, acceptedRevision);
+    return accepted;
+  },
+  syncConversationAgentMode: (m, owner, commandId, revision) => set(state => {
+    if (state.pendingAgentModeChanges[owner]) return state;
+    if (commandId && state.latestAgentModeCommandIds[owner] && state.latestAgentModeCommandIds[owner] !== commandId) return state;
+    const meta = state.conversations.find(conversation => conversation.id === owner);
+    if (revision !== undefined && meta?.revision !== undefined && revision < meta.revision) return state;
+    const active = owner === state.conversationId;
+    const activeChanged = active && state.agentMode !== m;
+    const cachedWorkbench = state.conversationWorkbenchStates[owner];
+    // Unopened rows already have their authoritative mode in the directory.
+    // Update a real cached workbench, or retain an owner not in this page yet.
+    const workbenchChanged = activeChanged || (cachedWorkbench ? cachedWorkbench.agentMode !== m : !meta);
+    const metadataChanged = meta && (meta.agentMode !== m || revision !== undefined && meta.revision !== revision);
+    if (!activeChanged && !workbenchChanged && !metadataChanged) return state;
+    return {
+      ...(activeChanged ? { agentMode: m } : {}),
+      ...(workbenchChanged ? { conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
+        [owner]: { ...(active ? liveConversationWorkbenchState(state) : cachedWorkbench ?? emptyConversationWorkbenchState()), agentMode: m },
+      } } : {}),
+      ...(metadataChanged ? { conversations: state.conversations.map(conversation => conversation.id === owner
+        ? { ...conversation, agentMode: m, ...(revision !== undefined ? { revision } : {}) } : conversation) } : {}),
+    };
+  }),
+  setEffortLevel: (e) => {
+    const before = get();
+    if (!before.conversationId) {
+      const id = before.activeConversationDraftId ?? before.startConversationDraft({ bindWorkspace: Boolean(before.workingDirectory), appMode: before.appMode });
+      if (get().conversationDrafts[id].materializing) return Promise.resolve(false);
+      return editConversationDraftModel({ mode: "model", model: before.currentModel, effort: e });
+    }
+    return reportCommandOutcome(
+      sendClientCommandAwaitResult({
+        type: "llm.config.set",
+        provider: before.currentProvider || "openai",
+        ...(before.conversationId ? { conversation_id: before.conversationId } : {}),
+        reasoning_effort: e,
+        source: "frontend.footer",
+      }, "effort"),
+      "切换推理强度失败",
+    );
+  },
+  setModelSelection: (selection) => {
+    const before = get();
+    if (!before.conversationId) {
+      const id = before.activeConversationDraftId ?? before.startConversationDraft({ bindWorkspace: Boolean(before.workingDirectory), appMode: before.appMode });
+      if (get().conversationDrafts[id].materializing) return Promise.resolve(false);
+      if (selection.mode === "default") return editConversationDraftModel({ mode: "default" });
+      const option = before.availableModelOptions.find(item => item.model === selection.model);
+      const effort = option?.reasoningEffortLevels.includes(before.effortLevel) ? before.effortLevel : option?.defaultReasoningEffort;
+      return editConversationDraftModel({ mode: "model", model: selection.model, effort });
+    }
+    return reportCommandOutcome(sendClientCommandAwaitResult({
+      type: "llm.model.set",
+      selection_mode: selection.mode,
+      ...(selection.mode === "model" ? { model: selection.model } : {}),
+      ...(before.conversationId ? { conversation_id: before.conversationId } : {}),
+    }, "model.set"), "切换模型失败");
+  },
+  setPRMonitor: (pr) => set({ prMonitor: pr }),
+  setPRStatusIssue: (prStatusIssue) => set({ prStatusIssue }),
+  setActionChip: (c) => set({ actionChip: c }),
+  setMentionResults: (items) => set((s) => (s.mentionResults === items || (items.length === 0 && s.mentionResults.length === 0) ? s : { mentionResults: items })),
+  addSelectedMention: (item) =>
+    set((s) => ({
+      selectedMentions: s.selectedMentions.some((existing) => (
+        isFilesystemMention(existing.kind) && isFilesystemMention(item.kind)
+          ? workspaceFilePathsEqual(existing.path, item.path, s.workingDirectory)
+          : existing.kind === item.kind && existing.path === item.path
+      ))
+        ? s.selectedMentions
+        : [...s.selectedMentions, item],
+    })),
+  removeSelectedMention: (path) =>
+    set((s) => ({
+      selectedMentions: s.selectedMentions.filter((item) => (
+        isFilesystemMention(item.kind)
+          ? !workspaceFilePathsEqual(item.path, path, s.workingDirectory)
+          : item.path !== path
+      )),
+    })),
+  clearSelectedMentions: () => set((s) => (s.selectedMentions.length === 0 ? s : { selectedMentions: [] })),
+  addSelectedSkill: (skill) =>
+    set((s) => ({
+      selectedSkills: s.selectedSkills.some((existing) => (
+        existing.path && skill.path
+          ? workspaceFilePathsEqual(existing.path, skill.path, s.workingDirectory)
+          : existing.name === skill.name
+      ))
+        ? s.selectedSkills
+        : [...s.selectedSkills, { ...skill, kind: "skill" as const }],
+    })),
+  removeSelectedSkill: (name) =>
+    set((s) => ({ selectedSkills: s.selectedSkills.filter((skill) => skill.name !== name) })),
+  clearSelectedSkills: () => set((s) => (s.selectedSkills.length === 0 ? s : { selectedSkills: [] })),
+  openSlashPanel: () => set({ slashPanelOpen: true, mentionPanelOpen: false }),
+  closeSlashPanel: () => set((s) => (s.slashPanelOpen ? { slashPanelOpen: false } : s)),
+  openMentionPanel: () => set({ mentionPanelOpen: true, slashPanelOpen: false }),
+  closeMentionPanel: () => set((s) => (s.mentionPanelOpen ? { mentionPanelOpen: false } : s)),
+});

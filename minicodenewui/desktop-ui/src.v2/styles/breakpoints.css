@@ -1,0 +1,34 @@
+/**
+ * breakpoints.css - Responsive breakpoint system
+ *
+ * Standard breakpoints for responsive design
+ */
+
+/* Responsive text sizing */
+@media (max-width: 639px) and (pointer: coarse) {
+  :root {
+    --text-xs: 12px;
+    --text-sm: 13px;
+    --text-md: 15px;
+    --text-lg: 17px;
+  }
+}
+
+/* Mobile-specific optimizations */
+@media (max-width: 767px) and (pointer: coarse) {
+  /* Prevent iOS zoom on input focus */
+  input,
+  textarea,
+  select {
+    font-size: max(16px, var(--text-md)) !important;
+  }
+
+  /* Improve touch targets */
+  button:not(.md-file-chip),
+  a:not(.md-web-link):not(.md-text-link),
+  .clickable {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+}

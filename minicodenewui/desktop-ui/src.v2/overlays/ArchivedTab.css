@@ -1,0 +1,28 @@
+.settings-archived-chats, .settings-archive-groups { display: flex; flex-direction: column; gap: 40px; }
+.settings-archive-delete-all { display: flex; justify-content: flex-end; }
+.settings-archive-delete-all:empty, .settings-archive-search-status:empty { display: none; }
+.settings-archive-toolbar { display: flex; align-items: center; gap: 8px; }
+.settings-archive-toolbar > .settings-search { flex: 1; min-width: 0; height: 32px; padding-inline: 10px; border: 1px solid var(--border-subtle); background: var(--surface-base); font-size: var(--mc-font-body); line-height: 18px; }
+.settings-archive-filter { width: 144px; flex-shrink: 0; }
+.settings-archive-filter:last-child { width: 176px; }
+.settings-archive-filter > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-archive-filter > svg { flex-shrink: 0; }
+.settings-archive-filter > svg:last-child { margin-left: auto; }
+.settings-archive-project-heading { gap: 8px; min-width: 0; }
+.settings-archive-project-heading > h3 { margin: 0; color: var(--text-primary); font: inherit; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.settings-archive-project-heading > span { margin-left: auto; flex-shrink: 0; color: var(--text-secondary); font-size: var(--mc-font-secondary); font-weight: var(--fw-regular); }
+.settings-archive-project-heading > svg { color: var(--text-secondary); flex-shrink: 0; }
+.settings-archive-title, .settings-archive-date { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-archive-icon-action { width: 28px; height: 28px; border: 0; background: transparent; }
+.settings-archive-project-chats .settings-archive-icon-action { color: var(--state-danger); }
+.settings-archive-project-chats .settings-archive-icon-action:hover:not(:disabled) { background: var(--state-danger-soft); }
+.settings-archive-menu-heading { display: block; padding: 6px 10px; color: var(--text-muted); font-size: var(--mc-font-caption); }
+.settings-archive-empty { min-height: 190px; display: grid; place-content: center; justify-items: center; gap: 6px; padding: 24px; color: var(--text-muted); text-align: center; }
+.settings-archive-empty > svg { width: 22px; height: 22px; margin-bottom: 3px; stroke-width: var(--mc-icon-stroke); }
+.settings-archive-empty > strong { color: var(--text-primary); font-size: var(--text-sm); font-weight: var(--fw-bold); }
+.settings-archive-empty > span { font-weight: var(--fw-medium); }
+@media (max-width: 760px) {
+  .settings-archive-toolbar { flex-wrap: wrap; }
+  .settings-archive-toolbar > .settings-search { flex-basis: 100%; }
+  .settings-archive-filter { flex: 1; }
+}

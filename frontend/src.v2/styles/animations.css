@@ -49,8 +49,64 @@
 
 /* Skeleton shimmer sweep for loading placeholders */
 @keyframes shimmer {
-  from { background-position: 200% 0; }
-  to   { background-position: -200% 0; }
+  from { background-position: -200% 0; }
+  to   { background-position: 200% 0; }
+}
+
+/* ── StyleKit 精确动效 ────────────────────────────────── */
+
+/* Collapse/Expand - 折叠展开（350ms，平滑） */
+@keyframes collapse-in {
+  from {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  to {
+    max-height: var(--collapse-max-height, 500px);
+    opacity: 1;
+    padding-top: var(--collapse-padding, 8px);
+    padding-bottom: var(--collapse-padding, 8px);
+  }
+}
+
+@keyframes collapse-out {
+  from {
+    max-height: var(--collapse-max-height, 500px);
+    opacity: 1;
+    padding-top: var(--collapse-padding, 8px);
+    padding-bottom: var(--collapse-padding, 8px);
+  }
+  to {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+}
+
+/* Proximity Reveal - 辅助操作hover显现（180ms） */
+@keyframes proximity-reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Crossfade - 内容切换（300ms，对称） */
+@keyframes crossfade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes crossfade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 
@@ -105,8 +161,33 @@
     color-mix(in oklch, var(--surface-soft) 92%, white) 45%,
     var(--surface-soft) 100%);
   background-size: 200% 100%;
-  animation: shimmer 1.6s linear infinite;
+  animation: shimmer var(--anim-shimmer, 2s) var(--ease-shimmer, linear) infinite;
   border-radius: var(--radius-sm);
+}
+
+/* ── StyleKit 精确动效工具类 ────────────────────────────────── */
+
+/* Collapse - 折叠展开 */
+.anim-collapse-in {
+  animation: collapse-in var(--anim-collapse, 350ms) var(--ease-collapse, cubic-bezier(0.4, 0, 0.2, 1)) both;
+}
+
+.anim-collapse-out {
+  animation: collapse-out var(--anim-collapse, 350ms) var(--ease-collapse, cubic-bezier(0.4, 0, 0.2, 1)) both;
+}
+
+/* Crossfade - 内容切换 */
+.anim-crossfade-out {
+  animation: crossfade-out var(--anim-crossfade, 300ms) var(--ease-crossfade, ease-in-out) both;
+}
+
+.anim-crossfade-in {
+  animation: crossfade-in var(--anim-crossfade, 300ms) var(--ease-crossfade, ease-in-out) both;
+}
+
+/* Proximity Reveal - 辅助操作显现 */
+.anim-proximity-reveal {
+  animation: proximity-reveal-in var(--anim-proximity-reveal, 180ms) var(--ease-proximity, ease-out) both;
 }
 
 /* Staggered list entrance — pure CSS, capped after 10 children so long

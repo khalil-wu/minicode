@@ -30,7 +30,10 @@ def voice_target(conversation_id: str, response: Response, session_id: str = Que
     session = _session(session_id)
     if not session.is_connected:
         raise HTTPException(404, "The original session is not connected")
-    conversation = session.conversation_repo.get_conversation_summary(conversation_id)
+    try:
+        conversation = session.conversation_repo.get_conversation_summary(conversation_id)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
     if conversation is None or conversation.archived:
         raise HTTPException(404, "The destination voice task does not exist or is archived")
     response.headers["Cache-Control"] = "no-store"
@@ -46,6 +49,8 @@ async def _mutate(repository, background_tasks, operation):
         result = await to_thread_cancel_safe(operation)
     except ValueError as error:
         raise HTTPException(409, str(error)) from error
+    except OSError as error:
+        raise HTTPException(500, f"无法保存会话资源：{error}") from error
     background_tasks.add_task(publish_thread_metadata, repository)
     return result
 

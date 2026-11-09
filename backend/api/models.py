@@ -128,7 +128,7 @@ class UploadResponse(BaseModel):
 
 
 class OpenAISettingsPayload(BaseModel):
-    display_name: str = ""
+    display_name: str = Field(default="", max_length=256)
     api_key: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     auth_header: bool = False
@@ -155,7 +155,7 @@ class OpenAISettingsPayload(BaseModel):
 
 
 class AnthropicSettingsPayload(BaseModel):
-    display_name: str = ""
+    display_name: str = Field(default="", max_length=256)
     api_key: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     auth_header: bool = False
@@ -179,7 +179,7 @@ class AnthropicSettingsPayload(BaseModel):
 
 class CustomSettingsPayload(BaseModel):
     aws: dict[str, Any] | None = None
-    display_name: str = ""
+    display_name: str = Field(default="", max_length=256)
     api_key: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     auth_header: bool = False

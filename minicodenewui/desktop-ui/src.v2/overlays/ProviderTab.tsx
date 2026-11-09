@@ -1,0 +1,1921 @@
+import { useI18n, type Translate, type TranslationKey } from "../i18n";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, Trash2 } from "../lib/icons";
+import { pushToast } from "./ToastContainer";
+import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
+import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import type { ProviderOAuthCommand } from "../protocol/events";
+import { ModelBrandIcon } from "../components/ModelBrandIcon";
+import { SelectMenu } from "../components/SelectMenu";
+import type { BedrockGuidance, BedrockSignIn } from "./BedrockSetup";
+import { showConfirm } from "./DialogService";
+import type { EffortLevel } from "../stores/types";
+import { useAppStore } from "../stores";
+import { selectableModelsForProvider } from "../lib/provider-models";
+import { isDesktop, openExternal, runtime } from "../desktop/runtime";
+import { saveDictationPreferences } from "../lib/dictation-preferences";
+import { workspaceRootsEqual } from "../lib/workspace-path";
+import {
+  type ProviderId,
+  type CustomWireApi,
+  type LLMSettingsPayload,
+  type LLMModelsRefreshResult,
+  type ProviderHistoryEntry,
+  type ProviderModelMetadata,
+  type ProviderProxyMode,
+  type ProviderSection,
+  PROVIDERS,
+  Section,
+  backendProvider,
+  defaultSectionForProvider,
+  savedOrHistorySectionForUiProvider,
+  sectionFromHistoryEntry,
+  buildModelChoices,
+  effectiveCustomWireApi,
+  canChooseApiFormat,
+  defaultPromptCacheRetention,
+  promptCacheRetentionAfterWireChange,
+  providerDisplayName,
+  formatProviderError,
+  inputStyle,
+  statusStyle,
+  actionBarStyle,
+  primaryActionStyle,
+  secondaryActionStyle,
+} from "./settingsShared";
+
+const credentialEndpointIdentity = (value: string): string => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const path = parsed.pathname.replace(/\/+$/, "");
+    const scopedPath = path.toLowerCase() === "/v1" ? "" : path;
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${scopedPath}`;
+  } catch {
+    return raw.replace(/[?#].*$/, "").replace(/\/+$/, "").replace(/\/v1$/i, "").toLowerCase();
+  }
+};
+
+const isDedicatedImageModel = (value: string): boolean =>
+  String(value || "").trim().toLowerCase().split("/").pop()?.startsWith("gpt-image-") === true;
+
+const DRAFT_MODEL_PREFIX = "__draft_model_";
+const BedrockSetup = lazy(() => import("./BedrockSetup").then(module => ({ default: module.BedrockSetup })));
+
+const isDraftModelId = (value: string): boolean =>
+  String(value || "").startsWith(DRAFT_MODEL_PREFIX);
+
+const cardIdentityForDraft = (
+  provider: ProviderId,
+  section: Pick<ProviderSection, "base_url" | "wire_api">,
+): string => {
+  const endpoint = credentialEndpointIdentity(String(section.base_url || ""));
+  return endpoint
+    ? `${provider}::${endpoint}`
+    : `provider::${provider}`;
+};
+
+const normalizeEffortLevels = (value: unknown): EffortLevel[] => {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter((item): item is EffortLevel => Boolean(item))));
+};
+
+type ProviderDraft = {
+  aws: ProviderSection["aws"];
+  awsEndpoint: string;
+  provider: ProviderId;
+  displayName: string;
+  apiKey: string;
+  headers: Record<string, string>;
+  authHeader: boolean;
+  baseUrl: string;
+  modelName: string;
+  smallFastModel: string;
+  availableModelList: string[];
+  modelsSource: string;
+  modelMetadata: Record<string, ProviderModelMetadata>;
+  modelLabels: Record<string, string>;
+  configuredReasoningEffort: string;
+  reasoningEffortLevels: EffortLevel[];
+  customWireApi: CustomWireApi;
+  proxyMode: ProviderProxyMode;
+  thinkingBudget: number;
+  responsesReasoningSummary: string;
+  promptCacheRetention: string;
+  maxTokens: number;
+  imageModel: string;
+  imageSize: string;
+  imageQuality: string;
+  dictationModel: string;
+};
+
+type ProviderCard = {
+  key: string;
+  provider: ProviderId;
+  title: string;
+  subtitle: string;
+  model: string;
+  wireApi: string;
+  section: ProviderSection;
+  entry?: ProviderHistoryEntry;
+  historyIndex?: number;
+  source: "saved" | "history" | "preset";
+};
+
+type ProviderOperation = "" | "save" | "models" | "delete" | "oauth" | "bedrock";
+
+export const ProviderTab = ({
+  selectedProvider,
+  settingsPayload,
+  settingsPayloadRef,
+  onProviderChange,
+  onSettingsPayloadChange,
+  searchTarget,
+  isActive = true,
+}: {
+  selectedProvider: ProviderId;
+  settingsPayload: LLMSettingsPayload | null;
+  settingsPayloadRef: React.MutableRefObject<LLMSettingsPayload | null>;
+  onProviderChange: (id: ProviderId) => void;
+  onSettingsPayloadChange?: (payload: LLMSettingsPayload) => void;
+  searchTarget?: string;
+  isActive?: boolean;
+}) => {
+  const { t: tr } = useI18n();
+  const localDictationProvider = !runtime()?.remoteHost;
+  const dictationRevision = useAppStore(state => JSON.stringify([state.workbenchPreferences.speechProvider, state.workbenchPreferences.speechModel]));
+  const [provider, setProvider] = useState<ProviderId>(selectedProvider);
+  const activeConversationId = useAppStore((state) => state.conversationId);
+  const oauthFlow = useAppStore((state) => {
+    const owner = state.conversationId?.trim();
+    if (!owner) return undefined;
+    return state.providerOAuthFlowsByConversation[owner]?.[backendProvider(provider)];
+  });
+  const [displayName, setDisplayName] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [providerHeaders, setProviderHeaders] = useState<Record<string, string>>({});
+  const [providerAws, setProviderAws] = useState<ProviderSection["aws"]>(null);
+  const [awsEndpoint, setAwsEndpoint] = useState("");
+  const [providerAuthHeader, setProviderAuthHeader] = useState(false);
+  const [oauthSupported, setOauthSupported] = useState(false);
+  const [oauthConfigured, setOauthConfigured] = useState(false);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [modelName, setModelName] = useState("");
+  const [smallFastModel, setSmallFastModel] = useState("");
+  const [availableModelList, setAvailableModelList] = useState<string[]>([]);
+  const [discoveredModelList, setDiscoveredModelList] = useState<string[]>([]);
+  const [modelMetadata, setModelMetadata] = useState<Record<string, ProviderModelMetadata>>({});
+  const [modelLabels, setModelLabels] = useState<Record<string, string>>({});
+  const [configuredReasoningEffort, setConfiguredReasoningEffort] = useState("");
+  const [reasoningEffortLevels, setReasoningEffortLevels] = useState<EffortLevel[]>([]);
+  const [customWireApi, setCustomWireApi] = useState<CustomWireApi>("chat");
+  const [proxyMode, setProxyMode] = useState<ProviderProxyMode>("inherit");
+  const [thinkingBudget, setThinkingBudget] = useState(0);
+  const [responsesReasoningSummary, setResponsesReasoningSummary] = useState("off");
+  const [promptCacheRetention, setPromptCacheRetention] = useState("24h");
+  const [maxTokens, setMaxTokens] = useState(0);
+  const [imageModel, setImageModel] = useState("");
+  const [imageSize, setImageSize] = useState("1024x1024");
+  const [imageQuality, setImageQuality] = useState("");
+  const [dictationModel, setDictationModel] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [modelsStatus, setModelsStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [modelsResult, setModelsResult] = useState<LLMModelsRefreshResult | null>(null);
+  const [modelsSource, setModelsSource] = useState("");
+  const [deletingHistoryKey, setDeletingHistoryKey] = useState("");
+  const [activeOperation, setActiveOperation] = useState<ProviderOperation>("");
+  const [providerView, setProviderView] = useState<"list" | "detail" | "bedrock">("list");
+  const bedrockEntryRef = useRef<HTMLButtonElement>(null);
+  const bedrockReturnFocus = useRef(false);
+  const [activeIdentityOverride, setActiveIdentityOverride] = useState("");
+  const detailDraftPinnedRef = useRef(false);
+  const draftModelCounterRef = useRef(0);
+  const operationRef = useRef<ProviderOperation>("");
+  const [oauthNow, setOauthNow] = useState(() => Date.now());
+  const detailDrafts = useRef(new Map<string, ProviderDraft>());
+  const detailKey = useRef("");
+
+  const beginOperation = (operation: Exclude<ProviderOperation, "">): boolean => {
+    if (operationRef.current) return false;
+    operationRef.current = operation;
+    setActiveOperation(operation);
+    return true;
+  };
+
+  const endOperation = (operation: Exclude<ProviderOperation, "">) => {
+    if (operationRef.current !== operation) return;
+    operationRef.current = "";
+    setActiveOperation("");
+  };
+
+  const busy = Boolean(activeOperation);
+
+  const providerConfig = PROVIDERS.find((p) => p.id === provider)!;
+  const effectiveWireApi = effectiveCustomWireApi(provider, baseUrl, customWireApi);
+  const isBedrockProvider = provider === "custom" && !!providerAws && credentialEndpointIdentity(baseUrl) === awsEndpoint;
+
+  const responsesCachingEnabled = effectiveWireApi === "responses";
+  const showApiFormat = !isBedrockProvider && canChooseApiFormat(provider, baseUrl);
+  const showFixedAnthropicFormat = backendProvider(provider) === "anthropic";
+  const configuredModelList = availableModelList.filter((item) => item.trim() && !isDraftModelId(item));
+  const hasIncompleteModelMapping = availableModelList.some(isDraftModelId);
+  const hasRequiredBaseUrl = provider !== "custom" || Boolean(baseUrl.trim());
+  const hasRequiredModel = configuredModelList.length > 0;
+  const canDiscoverModels = !busy && hasRequiredBaseUrl;
+  const canSaveProvider = !busy && hasRequiredBaseUrl && hasRequiredModel && !hasIncompleteModelMapping;
+
+  const draftFromState = (): ProviderDraft => ({
+    aws: providerAws, awsEndpoint,
+    provider,
+    displayName,
+    apiKey,
+    headers: providerHeaders,
+    authHeader: providerAuthHeader,
+    baseUrl,
+    modelName,
+    smallFastModel,
+    availableModelList,
+    modelsSource,
+    modelMetadata,
+    modelLabels,
+    configuredReasoningEffort,
+    reasoningEffortLevels,
+    customWireApi,
+    proxyMode,
+    thinkingBudget,
+    responsesReasoningSummary,
+    promptCacheRetention,
+    maxTokens,
+    imageModel,
+    imageSize,
+    imageQuality,
+    dictationModel,
+  });
+
+  const restoreDetailDraft = (draft: ProviderDraft) => {
+    setProviderAws(draft.aws); setAwsEndpoint(draft.awsEndpoint);
+    setProvider(draft.provider); setDisplayName(draft.displayName); setApiKey(draft.apiKey);
+    setProviderHeaders(draft.headers); setProviderAuthHeader(draft.authHeader);
+    setBaseUrl(draft.baseUrl); setModelName(draft.modelName); setSmallFastModel(draft.smallFastModel);
+    setAvailableModelList(draft.availableModelList); setModelsSource(draft.modelsSource);
+    setModelMetadata(draft.modelMetadata); setModelLabels(draft.modelLabels);
+    setConfiguredReasoningEffort(draft.configuredReasoningEffort); setReasoningEffortLevels(draft.reasoningEffortLevels);
+    setCustomWireApi(draft.customWireApi); setProxyMode(draft.proxyMode); setThinkingBudget(draft.thinkingBudget);
+    setResponsesReasoningSummary(draft.responsesReasoningSummary); setPromptCacheRetention(draft.promptCacheRetention);
+    setMaxTokens(draft.maxTokens); setImageModel(draft.imageModel); setImageSize(draft.imageSize); setImageQuality(draft.imageQuality);
+    setDictationModel(draft.dictationModel);
+  };
+  const rememberDetail = () => {
+    if (providerView === "detail" && detailKey.current) detailDrafts.current.set(detailKey.current, draftFromState());
+  };
+
+  const applyCapabilitySection = (
+    nextProvider: ProviderId,
+    section: ProviderSection | undefined,
+    selectedModel: string,
+  ) => {
+    const metadata = section?.model_metadata ?? {};
+    const declared = metadata[selectedModel];
+    const levels = normalizeEffortLevels(
+      declared?.reasoning_effort_levels ?? section?.reasoning_effort_levels,
+    );
+    const configured = String(
+      section?.configured_reasoning_effort ?? section?.reasoning_effort ?? "",
+    ).trim().toLowerCase();
+    const wireApi = effectiveCustomWireApi(
+      nextProvider,
+      section?.base_url ?? "",
+      (section?.wire_api === "responses" || section?.wire_api === "anthropic"
+        ? section.wire_api
+        : "chat") as CustomWireApi,
+    );
+    setModelMetadata(metadata);
+    setModelLabels(section?.model_labels ?? {});
+    setConfiguredReasoningEffort(wireApi === "anthropic" ? "" : configured);
+    setReasoningEffortLevels(wireApi === "anthropic" ? [] : levels);
+  };
+
+  const selectModel = (nextModel: string) => {
+    setModelName(nextModel);
+    const declared = modelMetadata[nextModel];
+    const levels = normalizeEffortLevels(declared?.reasoning_effort_levels);
+    setReasoningEffortLevels(effectiveWireApi === "anthropic" ? [] : levels);
+  };
+
+  const applyProviderSection = (nextProvider: ProviderId, section?: ProviderSection) => {
+    const fallback = defaultSectionForProvider(nextProvider);
+    setDisplayName(providerDisplayName(section));
+    setApiKey(section?.api_key ?? "");
+    setProviderHeaders(section?.headers ?? {});
+    setProviderAws(section?.aws ?? null);
+    setAwsEndpoint(credentialEndpointIdentity(section?.base_url || ""));
+    setProviderAuthHeader(Boolean(section?.auth_header));
+    setBaseUrl(section?.base_url ?? fallback.base_url ?? "");
+    const selectedModel = section?.model ?? fallback.model ?? "";
+    setModelName(selectedModel);
+    setSmallFastModel(section?.small_fast_model ?? fallback.small_fast_model ?? "");
+    const savedModels = section?.available_models ?? fallback.available_models ?? [];
+    const models = buildModelChoices(savedModels, section?.model ?? fallback.model ?? "");
+    setAvailableModelList(models);
+    setDiscoveredModelList([]);
+    setModelsSource(section?.models_source ?? "");
+    if (backendProvider(nextProvider) === "anthropic") {
+      setCustomWireApi("anthropic");
+    } else {
+      const wire = section?.wire_api === "anthropic" || section?.wire_api === "responses" ? section.wire_api : "chat";
+      setCustomWireApi(effectiveCustomWireApi(nextProvider, section?.base_url ?? fallback.base_url ?? "", wire as CustomWireApi));
+    }
+    setProxyMode(section?.proxy_mode ?? fallback.proxy_mode ?? "inherit");
+    setThinkingBudget(Number(section?.thinking_budget ?? fallback.thinking_budget ?? 0) || 0);
+    setMaxTokens(Math.max(0, Number(section?.max_tokens ?? fallback.max_tokens ?? 0) || 0));
+    setResponsesReasoningSummary(section?.responses_reasoning_summary ?? fallback.responses_reasoning_summary ?? "off");
+    const rawWire = section?.wire_api === "anthropic" || section?.wire_api === "responses" ? section.wire_api : "chat";
+    const effectiveWire = effectiveCustomWireApi(nextProvider, section?.base_url ?? fallback.base_url ?? "", rawWire as CustomWireApi);
+    setPromptCacheRetention(section?.prompt_cache_retention ?? defaultPromptCacheRetention(effectiveWire));
+    setImageModel(section?.image_model ?? fallback.image_model ?? "");
+    setImageSize(section?.image_size ?? fallback.image_size ?? "1024x1024");
+    setImageQuality(section?.image_quality ?? fallback.image_quality ?? "");
+    const speech = useAppStore.getState().workbenchPreferences;
+    const speechProvider = speech.speechProvider || settingsPayloadRef.current?.provider;
+    setDictationModel(localDictationProvider && speechProvider === backendProvider(nextProvider) ? speech.speechModel : "");
+    applyCapabilitySection(nextProvider, section ?? fallback, selectedModel);
+  };
+
+  const pinDetailDraft = () => {
+    detailDraftPinnedRef.current = true;
+  };
+
+  const clearDetailDraftPin = () => {
+    detailDraftPinnedRef.current = false;
+  };
+
+  const openProviderList = () => {
+    if (operationRef.current) return;
+    rememberDetail();
+    setProviderView("list");
+  };
+  useEffect(() => {
+    if (providerView === "detail" && bedrockReturnFocus.current) {
+      bedrockReturnFocus.current = false;
+      bedrockEntryRef.current?.focus();
+    }
+  }, [providerView]);
+  const openBedrockSetup = () => {
+    if (operationRef.current) return;
+    rememberDetail(); pinDetailDraft(); setProviderView("bedrock");
+  };
+  const checkBedrockGovCloud = async (): Promise<BedrockGuidance> => {
+    try {
+      const response = await fetchWithTimeout(`${apiBase()}/api/llm/bedrock/gov-cloud-check`, { headers: authHeaders() });
+      if (!response.ok) return "unverified";
+      const result = await response.json() as { isGovCloud: boolean; shouldWarn: boolean };
+      return result.shouldWarn ? "warning" : null;
+    } catch { return "unverified"; }
+  };
+  const configureBedrock = async (input: BedrockSignIn): Promise<BedrockGuidance> => {
+    if (!beginOperation("bedrock")) throw new Error(tr("正在保存…"));
+    const owner = useAppStore.getState();
+    const conversationId = owner.conversationId || "";
+    const workspaceRoot = owner.workingDirectory;
+    const isCurrentOwner = () => {
+      const current = useAppStore.getState();
+      return (current.conversationId || "") === conversationId && workspaceRootsEqual(current.workingDirectory, workspaceRoot);
+    };
+    let profileSaved = false;
+    try {
+      const { method, ...credentials } = input;
+      const type = { profile: "profile", environment: "environment", accessKeys: "amazonBedrockAccessKeys", apiKey: "amazonBedrock" }[method];
+      const response = await fetchWithTimeout(`${apiBase()}/api/llm/bedrock/setup`, {
+        method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ type, ...credentials, confirm_sensitive_change: true,
+          ...(isBedrockProvider && providerAws?.endpoint ? { endpoint: providerAws.endpoint } : {}) }),
+      }, { timeoutMessage: tr("保存提供商配置超时，请重试。") });
+      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
+      const savedPayload = await response.json() as LLMSettingsPayload;
+      profileSaved = true;
+      settingsPayloadRef.current = savedPayload;
+      onSettingsPayloadChange?.(savedPayload);
+      const section = savedPayload.custom!;
+      const active = section.model!;
+      // A blank composer draft has no durable conversation owner yet. The
+      // HTTP save above updates the global provider profile; applying an
+      // empty owner through the websocket would race the session's last
+      // durable conversation and is rejected by the backend as a stale blank
+      // conversation. Apply the per-conversation override only once an
+      // actual conversation id exists.
+      if (conversationId) {
+        const result = await sendClientCommandAwaitResult({ type: "llm.config.set", provider: "custom", model: active,
+          conversation_id: conversationId, workspace_root: workspaceRoot, source: "settings.provider.bedrock" }, "llm.config.set", { silent: true });
+        if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法应用到发起会话"));
+      }
+      setProvider("custom"); onProviderChange("custom"); applyProviderSection("custom", section);
+      setActiveIdentityOverride(cardIdentityForDraft("custom", section));
+      if (isCurrentOwner()) useAppStore.setState({ currentProvider: "custom", currentProviderId: "custom", currentModel: active,
+        currentProviderBaseUrl: section.base_url ?? "", currentWireApi: "responses",
+        availableModels: selectableModelsForProvider(section.available_models ?? [], active, "custom", section.models_source),
+        availableModelLabels: section.model_labels ?? {}, modelsSource: section.models_source ?? "" });
+      return await checkBedrockGovCloud();
+    } catch (failure) {
+      if (profileSaved) throw new Error(`${tr("提供商已保存，但应用失败")}：${formatProviderError(failure)}`);
+      throw failure;
+    } finally { endOperation("bedrock"); }
+  };
+
+  useEffect(() => {
+    if (!searchTarget) return;
+    pinDetailDraft();
+    setProviderView("detail");
+  }, [searchTarget]);
+
+  useEffect(() => {
+    if (detailDraftPinnedRef.current) return;
+    setProvider(selectedProvider);
+    applyProviderSection(selectedProvider, savedOrHistorySectionForUiProvider(settingsPayload, selectedProvider));
+  }, [selectedProvider, settingsPayload, dictationRevision]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    if (!oauthFlow?.expiresAt) return undefined;
+    setOauthNow(Date.now());
+    const timer = window.setInterval(() => setOauthNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [oauthFlow?.expiresAt, isActive]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    let active = true;
+    setOauthSupported(false);
+    setOauthConfigured(false);
+    const owner = activeConversationId?.trim();
+    if (!owner) return () => { active = false; };
+    void sendClientCommandAwaitResult(
+      {
+        type: "llm.provider.oauth.status",
+        provider: backendProvider(provider),
+        conversation_id: owner,
+      } as ProviderOAuthCommand,
+      "llm.provider.oauth.status",
+      { timeoutMs: 10_000, silent: true },
+    ).then((result) => {
+      if (!active || !commandResultSucceeded(result)) return;
+      const data = (result as { data?: Record<string, unknown> }).data ?? {};
+      setOauthSupported(Boolean(data.oauth_supported));
+      setOauthConfigured(Boolean(data.configured));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [provider, activeConversationId, isActive]);
+
+  const oauthAction = async (action: "login" | "logout") => {
+    const owner = activeConversationId?.trim();
+    if (!owner) {
+      pushToast(tr("请先打开一个会话，再进行提供商 OAuth 登录。"), "warning");
+      return;
+    }
+    if (!beginOperation("oauth")) return;
+    const providerId = backendProvider(provider);
+    try {
+      const command: ProviderOAuthCommand = {
+        type: `llm.provider.oauth.${action}`,
+        provider: providerId,
+        conversation_id: owner,
+      };
+      const result = await sendClientCommandAwaitResult(command, command.type, { timeoutMs: 300_000 });
+      if (!commandResultSucceeded(result)) throw new Error(String((result as { message?: string }).message || tr("OAuth 操作失败")));
+      setOauthConfigured(action === "login");
+      useAppStore.getState().clearProviderOAuthFlow(owner, providerId);
+      pushToast(action === "login" ? tr("提供商已登录") : tr("已退出提供商登录"), "success");
+    } catch (error) {
+      const message = formatProviderError(error);
+      const state = useAppStore.getState();
+      const existing = state.providerOAuthFlowsByConversation[owner]?.[providerId];
+      state.setProviderOAuthFlow({
+        ...existing,
+        conversationId: owner,
+        provider: providerId,
+        phase: "error",
+        message,
+        updatedAt: Date.now(),
+      });
+      pushToast(tr("OAuth 操作失败：{v0}", { v0: message }), "error");
+    } finally {
+      endOperation("oauth");
+    }
+  };
+
+  const openOAuthTarget = async (target: string) => {
+    if (!isSafeOAuthUrl(target)) {
+      pushToast(tr("OAuth 链接不是安全的 HTTP(S) 地址，已拒绝打开。"), "error");
+      return;
+    }
+    try {
+      let opened = false;
+      if (isDesktop()) {
+        opened = (await openExternal(target)) === true;
+      } else if (typeof window !== "undefined" && typeof window.open === "function") {
+        const popup = window.open(target, "_blank", "noopener,noreferrer");
+        if (popup) popup.opener = null;
+        opened = Boolean(popup);
+      }
+      if (!opened) pushToast(tr("浏览器未能打开授权链接，请检查弹窗设置后重试。"), "warning");
+    } catch (error) {
+      pushToast(tr("打开授权链接失败：{v0}", { v0: formatProviderError(error) }), "error");
+    }
+  };
+
+  const selectProviderPreset = (id: ProviderId) => {
+    if (operationRef.current) return;
+    pinDetailDraft();
+    setProvider(id);
+    applyProviderSection(id, defaultSectionForProvider(id));
+    setDisplayName("");
+    setApiKey("");
+    setModelsStatus("idle");
+    setModelsResult(null);
+    setModelsSource("");
+    onProviderChange(id);
+  };
+
+  const clearDiscoveredModels = () => {
+    setDiscoveredModelList([]);
+    setModelsStatus("idle");
+    setModelsResult(null);
+    setModelsSource("");
+  };
+
+  const addProvider = () => {
+    if (operationRef.current) return;
+    rememberDetail();
+    detailKey.current = "new";
+    const existingDraft = detailDrafts.current.get("new");
+    if (existingDraft) {
+      restoreDetailDraft(existingDraft); pinDetailDraft(); setProviderView("detail"); onProviderChange(existingDraft.provider);
+      return;
+    }
+    setProvider("custom");
+    applyProviderSection("custom", {
+      display_name: "",
+      base_url: "",
+      model: "",
+      available_models: [],
+      wire_api: "chat",
+      proxy_mode: "inherit",
+      thinking_budget: 0,
+      responses_reasoning_summary: "off",
+      prompt_cache_retention: "",
+    });
+    setDisplayName("");
+    setApiKey("");
+    setModelsStatus("idle");
+    setModelsResult(null);
+    setModelsSource("");
+    pinDetailDraft();
+    setProviderView("detail");
+    onProviderChange("custom");
+  };
+
+  const providerForHistoryEntry = (entry: ProviderHistoryEntry): ProviderId => {
+    const rawProvider = String(entry.provider || "").trim().toLowerCase();
+    const providerId = String(entry.provider_id || "").trim().toLowerCase();
+    if (rawProvider === "anthropic" || providerId === "anthropic") return "anthropic";
+    if (rawProvider === "openai" || providerId === "openai") return "openai";
+    return "custom";
+  };
+
+  const historyEntryKey = (entry: ProviderHistoryEntry, index = 0) =>
+    [
+      entry.provider || backendProvider(provider),
+      entry.provider_id || "",
+      entry.base_url || "",
+      entry.wire_api || "",
+      entry.model || "",
+      index,
+    ].join("::");
+
+  const deleteHistoryEntry = async (entry: ProviderHistoryEntry, index: number) => {
+    const key = historyEntryKey(entry, index);
+    if (!beginOperation("delete")) return;
+    const confirmed = await showConfirm({
+      title: tr("删除提供商配置"),
+      message: tr("确定删除“{v0}”吗？保存的配置和凭据将被移除。", { v0: historyLabel(entry) }),
+      confirmLabel: tr("删除"),
+      cancelLabel: tr("取消"),
+      danger: true,
+    });
+    if (!confirmed) {
+      endOperation("delete");
+      return;
+    }
+    setDeletingHistoryKey(key);
+    try {
+      const res = await fetchWithTimeout(`${apiBase()}/api/llm/provider-history`, {
+        method: "DELETE",
+        headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          confirm_sensitive_change: true,
+          provider: entry.provider || backendProvider(provider),
+          provider_id: entry.provider_id || "",
+          base_url: entry.base_url || "",
+          model: entry.model || "",
+          wire_api: entry.wire_api || "",
+          clear_api_key: true,
+        }),
+      }, { timeoutMessage: tr("删除提供商配置超时，请重试。") });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(errorMessageFromResponseText(text, res.statusText));
+      }
+      const savedPayload = await res.json() as LLMSettingsPayload;
+      settingsPayloadRef.current = savedPayload;
+      onSettingsPayloadChange?.(savedPayload);
+      applyProviderSection(provider, savedOrHistorySectionForUiProvider(savedPayload, provider));
+      if (localDictationProvider) window.dispatchEvent(new CustomEvent("dictation:service-changed", { detail: { provider: entry.provider || backendProvider(provider) } }));
+      pushToast(tr("提供商配置已删除"), "success");
+    } catch (error) {
+      pushToast(tr("提供商删除失败：{v0}", { v0: formatProviderError(error) }), "error");
+    } finally {
+      setDeletingHistoryKey("");
+      endOperation("delete");
+    }
+  };
+
+  const payload = (draft = draftFromState(), options: { activate?: boolean; includeProvider?: boolean } = {}) => {
+    const bp = backendProvider(draft.provider);
+    const wireApi = effectiveCustomWireApi(draft.provider, draft.baseUrl, draft.customWireApi);
+    const configuredModels = draft.availableModelList
+      .map((item) => item.trim())
+      .filter((item) => item && !isDraftModelId(item));
+    const activeModel = configuredModels.includes(draft.modelName.trim())
+      ? draft.modelName.trim()
+      : configuredModels[0] || "";
+    const configuredModelMetadata = Object.fromEntries(
+      configuredModels
+        .filter((id) => draft.modelMetadata[id])
+        .map((id) => [id, draft.modelMetadata[id]]),
+    );
+    const configuredModelLabels = Object.fromEntries(
+      configuredModels.map((id) => [id, id]),
+    );
+    const section = {
+      display_name: draft.displayName.trim(),
+      aws: draft.aws && draft.awsEndpoint === credentialEndpointIdentity(draft.baseUrl) ? draft.aws : null,
+      ...(draft.apiKey.trim() ? { api_key: draft.apiKey.trim() } : {}),
+      headers: draft.headers,
+      auth_header: draft.authHeader,
+      base_url: draft.baseUrl.trim(),
+      model: activeModel,
+      small_fast_model: draft.smallFastModel.trim(),
+      available_models: configuredModels,
+      models_source: draft.modelsSource || undefined,
+      model_metadata: configuredModelMetadata,
+      model_labels: configuredModelLabels,
+      reasoning_effort: wireApi !== "anthropic" && (bp === "openai" || bp === "custom") ? draft.configuredReasoningEffort : undefined,
+      reasoning_effort_levels: wireApi !== "anthropic" && (bp === "openai" || bp === "custom") ? draft.reasoningEffortLevels : undefined,
+      thinking_budget: backendProvider(draft.provider) === "anthropic" || wireApi === "anthropic" ? draft.thinkingBudget : undefined,
+      wire_api: bp === "openai" || bp === "custom" ? wireApi : undefined,
+      proxy_mode: draft.proxyMode,
+      responses_reasoning_summary: bp === "openai" || wireApi === "responses" ? draft.responsesReasoningSummary : undefined,
+      prompt_cache_retention: wireApi === "responses" ? draft.promptCacheRetention : undefined,
+      max_tokens: Math.max(0, Math.trunc(draft.maxTokens || 0)),
+      // Images are a capability of this Provider profile. New saves never
+      // create a second endpoint/key; old image_* fields remain readable by
+      // the backend for migration compatibility.
+      image_mode: "inherit",
+      image_base_url: "",
+      image_model: draft.imageModel.trim()
+        || (isDedicatedImageModel(activeModel)
+          ? activeModel
+          : configuredModels.find(isDedicatedImageModel) || ""),
+      image_size: draft.imageSize || "1024x1024",
+      image_quality: draft.imageQuality,
+    };
+    return {
+      confirm_sensitive_change: true,
+      ...(options.activate || options.includeProvider ? { provider: bp } : {}),
+      [bp]: section,
+    };
+  };
+
+  const saveProvider = async (draft = draftFromState(), options: { activate?: boolean; quiet?: boolean } = {}) => {
+    if (!beginOperation("save")) return;
+    const ownerAtSave = useAppStore.getState();
+    const conversationId = ownerAtSave.conversationId || "";
+    const workspaceRoot = ownerAtSave.workingDirectory;
+    const isCurrentOwner = () => {
+      const current = useAppStore.getState();
+      return (current.conversationId || "") === conversationId
+        && workspaceRootsEqual(current.workingDirectory, workspaceRoot);
+    };
+    let profileSaved = false;
+    setSaving(true);
+    try {
+      const res = await fetchWithTimeout(`${apiBase()}/api/llm/settings`, {
+        method: "PUT",
+        headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify(payload(draft, { activate: options.activate })),
+      }, { timeoutMessage: tr("保存提供商配置超时，请重试。") });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(errorMessageFromResponseText(text, res.statusText));
+      }
+      const saved = await res.json();
+      profileSaved = true;
+      const savedPayload = saved as LLMSettingsPayload;
+      settingsPayloadRef.current = savedPayload;
+      onSettingsPayloadChange?.(savedPayload);
+      const bp = backendProvider(draft.provider);
+      const speech = useAppStore.getState().workbenchPreferences;
+      if (localDictationProvider && !options.activate && effectiveCustomWireApi(draft.provider, draft.baseUrl, draft.customWireApi) !== "anthropic"
+        && (draft.dictationModel.trim() || (speech.speechProvider || savedPayload.provider) === bp)) {
+        await saveDictationPreferences({ speechProvider: bp, speechModel: draft.dictationModel.trim(), speechEnabled: Boolean(draft.dictationModel.trim()) });
+      }
+      if (localDictationProvider) window.dispatchEvent(new CustomEvent("dictation:service-changed", { detail: { provider: bp } }));
+      const section = savedPayload[bp] as ProviderSection | undefined;
+      setProvider(draft.provider);
+      onProviderChange(draft.provider);
+      setDisplayName(providerDisplayName(section) || draft.displayName);
+      // The local settings surface intentionally echoes the endpoint-scoped
+      // key so reopening a profile never turns a valid key into a fake
+      // "Missing API key" state.
+      setApiKey(section?.api_key ?? draft.apiKey);
+      setBaseUrl(section?.base_url ?? draft.baseUrl);
+      setSmallFastModel(section?.small_fast_model ?? draft.smallFastModel);
+      const active = String(section?.model || draft.modelName || saved.active_model || "");
+      if (active) {
+        setModelName(active);
+      }
+      if (section?.available_models) {
+        setAvailableModelList(section.available_models);
+      }
+      const savedModels = section?.available_models ?? draft.availableModelList.filter((id) => !isDraftModelId(id));
+      const identityModelLabels = Object.fromEntries(savedModels.map((id) => [id, id]));
+      setModelLabels(identityModelLabels);
+      setModelsSource(section?.models_source ?? "");
+      setProxyMode(section?.proxy_mode ?? draft.proxyMode);
+      setThinkingBudget(Number(section?.thinking_budget ?? draft.thinkingBudget) || 0);
+      setMaxTokens(Math.max(0, Number(section?.max_tokens ?? draft.maxTokens) || 0));
+      setImageModel(section?.image_model ?? draft.imageModel);
+      setImageSize(section?.image_size ?? draft.imageSize);
+      setImageQuality(section?.image_quality ?? draft.imageQuality);
+      setResponsesReasoningSummary(section?.responses_reasoning_summary ?? draft.responsesReasoningSummary);
+      setPromptCacheRetention(section?.prompt_cache_retention ?? draft.promptCacheRetention);
+      applyCapabilitySection(draft.provider, section, active || draft.modelName);
+      // Persisting a global profile and applying it to this conversation are
+      // separate operations. The latter retains the initiating owner across IO.
+      if (conversationId) {
+        const result = await sendClientCommandAwaitResult({
+          type: "llm.config.set", provider: bp, model: active || draft.modelName,
+          conversation_id: conversationId, workspace_root: workspaceRoot,
+          source: options.activate ? "settings.provider.activate" : "settings.provider.save",
+        }, "llm.config.set", { silent: true });
+        if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法应用到发起会话"));
+      }
+      const composerModels = selectableModelsForProvider(
+        section?.available_models ?? draft.availableModelList,
+        active || draft.modelName,
+        bp,
+        section?.models_source ?? draft.modelsSource,
+      );
+      if (isCurrentOwner()) useAppStore.setState({
+        currentProvider: bp,
+        currentModel: active || draft.modelName,
+        availableModels: composerModels,
+        availableModelLabels: identityModelLabels,
+        modelsSource: section?.models_source ?? draft.modelsSource ?? "",
+        currentProviderId: bp,
+        currentProviderBaseUrl: section?.base_url ?? draft.baseUrl,
+        currentWireApi: section?.wire_api ?? effectiveCustomWireApi(
+          draft.provider,
+          section?.base_url ?? draft.baseUrl,
+          draft.customWireApi,
+        ),
+      });
+      const appliedWireApi = bp === "openai" || bp === "custom"
+        ? effectiveCustomWireApi(draft.provider, section?.base_url || draft.baseUrl, ((section?.wire_api as CustomWireApi | undefined) || effectiveCustomWireApi(draft.provider, draft.baseUrl, draft.customWireApi)))
+        : undefined;
+      if (appliedWireApi) setCustomWireApi(appliedWireApi);
+      if (options.activate) {
+        setActiveIdentityOverride(cardIdentityForDraft(draft.provider, {
+          base_url: section?.base_url || draft.baseUrl,
+          wire_api: section?.wire_api || effectiveCustomWireApi(
+            draft.provider,
+            section?.base_url || draft.baseUrl,
+            draft.customWireApi,
+          ),
+        }));
+      }
+      if (!options.quiet) {
+        pushToast(
+          options.activate
+            ? tr("提供商已启用 · 模型：{v0}", { v0: active || draft.modelName })
+            : tr("提供商已保存 · 模型：{v0}", { v0: active || draft.modelName }),
+          "success",
+        );
+      }
+      setProviderView("list");
+      if (!options.activate) { detailDrafts.current.delete(detailKey.current); detailKey.current = ""; }
+      clearDetailDraftPin();
+    } catch (error) {
+      pushToast(`${profileSaved ? tr("提供商已保存，但应用失败") : tr("提供商保存失败")}：${formatProviderError(error)}`, "error");
+    } finally {
+      setSaving(false);
+      endOperation("save");
+    }
+  };
+
+  const draftFromSection = (nextProvider: ProviderId, section?: ProviderSection): ProviderDraft => {
+    const fallback = defaultSectionForProvider(nextProvider);
+    const nextBaseUrl = section?.base_url ?? fallback.base_url ?? "";
+    const nextModel = section?.model ?? fallback.model ?? "";
+    const savedModels = section?.available_models ?? fallback.available_models ?? [];
+    const nextModels = buildModelChoices(savedModels, nextModel);
+    const wire = backendProvider(nextProvider) === "anthropic"
+      ? "anthropic"
+      : effectiveCustomWireApi(
+        nextProvider,
+        nextBaseUrl,
+        (section?.wire_api === "anthropic" || section?.wire_api === "responses" ? section.wire_api : "chat") as CustomWireApi,
+      );
+    return {
+      provider: nextProvider,
+      aws: section?.aws ?? null,
+      awsEndpoint: credentialEndpointIdentity(nextBaseUrl),
+      displayName: providerDisplayName(section),
+      apiKey: section?.api_key ?? "",
+      headers: section?.headers ?? {},
+      authHeader: section?.auth_header === true,
+      baseUrl: nextBaseUrl,
+      modelName: nextModel,
+      smallFastModel: section?.small_fast_model ?? fallback.small_fast_model ?? "",
+      availableModelList: nextModels,
+      modelsSource: section?.models_source ?? "",
+      modelMetadata: section?.model_metadata ?? {},
+      modelLabels: section?.model_labels ?? {},
+      configuredReasoningEffort: String(
+        section?.configured_reasoning_effort ?? section?.reasoning_effort ?? "",
+      ).trim().toLowerCase(),
+      reasoningEffortLevels: normalizeEffortLevels(section?.reasoning_effort_levels),
+      customWireApi: wire,
+      proxyMode: section?.proxy_mode ?? fallback.proxy_mode ?? "inherit",
+      thinkingBudget: Number(section?.thinking_budget ?? fallback.thinking_budget ?? 0) || 0,
+      responsesReasoningSummary: section?.responses_reasoning_summary ?? fallback.responses_reasoning_summary ?? "off",
+      promptCacheRetention: section?.prompt_cache_retention ?? defaultPromptCacheRetention(wire),
+      maxTokens: Math.max(0, Number(section?.max_tokens ?? fallback.max_tokens ?? 0) || 0),
+      imageModel: section?.image_model ?? fallback.image_model ?? "",
+      imageSize: section?.image_size ?? fallback.image_size ?? "1024x1024",
+      imageQuality: section?.image_quality ?? fallback.image_quality ?? "",
+      dictationModel: (useAppStore.getState().workbenchPreferences.speechProvider || settingsPayloadRef.current?.provider) === backendProvider(nextProvider)
+        ? useAppStore.getState().workbenchPreferences.speechModel : "",
+    };
+  };
+
+  const editProviderCard = (card: ProviderCard) => {
+    if (operationRef.current) return;
+    rememberDetail();
+    const key = cardKeyFor(card.provider, card.section, "saved").replace(/::saved$/, "");
+    detailKey.current = key;
+    pinDetailDraft();
+    setProvider(card.provider);
+    const savedDraft = detailDrafts.current.get(key);
+    if (savedDraft) restoreDetailDraft(savedDraft);
+    else applyProviderSection(card.provider, card.section);
+    setModelsStatus("idle");
+    setModelsResult(null);
+    setProviderView("detail");
+    onProviderChange(card.provider);
+  };
+
+  const useProviderCard = async (card: ProviderCard) => {
+    if (operationRef.current) return;
+    rememberDetail();
+    clearDetailDraftPin();
+    setProvider(card.provider);
+    applyProviderSection(card.provider, card.section);
+    await saveProvider(draftFromSection(card.provider, card.section), { activate: true });
+  };
+
+  const addModelMapping = () => {
+    draftModelCounterRef.current += 1;
+    const draftId = `${DRAFT_MODEL_PREFIX}${draftModelCounterRef.current}`;
+    setAvailableModelList((current) => [...current, draftId]);
+    setModelMetadata((current) => ({ ...current, [draftId]: {} }));
+    setModelLabels((current) => ({ ...current, [draftId]: "" }));
+  };
+
+  const updateModelMappingId = (previousId: string, rawNextId: string) => {
+    const nextId = String(rawNextId || "").trim();
+    if (!nextId || isDraftModelId(nextId)) return isDraftModelId(previousId) ? "" : previousId;
+    if (nextId === previousId) return previousId;
+    if (availableModelList.some((item) => item === nextId && item !== previousId)) {
+      pushToast(tr("这个模型已经添加。"), "warning");
+      return previousId;
+    }
+
+    setAvailableModelList((current) => current.map((item) => item === previousId ? nextId : item));
+    setModelMetadata((current) => {
+      const next = { ...current };
+      next[nextId] = next[nextId] ?? {};
+      delete next[previousId];
+      return next;
+    });
+    setModelLabels((current) => {
+      const next = { ...current };
+      next[nextId] = String(next[previousId] || next[nextId] || nextId).trim() || nextId;
+      delete next[previousId];
+      return next;
+    });
+    if (!modelName.trim() || isDraftModelId(modelName) || modelName === previousId) {
+      selectModel(nextId);
+    }
+    return nextId;
+  };
+
+  const removeModelMapping = (modelId: string) => {
+    const next = availableModelList.filter((item) => item !== modelId);
+    setAvailableModelList(next);
+    setModelMetadata((current) => {
+      const copy = { ...current };
+      delete copy[modelId];
+      return copy;
+    });
+    setModelLabels((current) => {
+      const copy = { ...current };
+      delete copy[modelId];
+      return copy;
+    });
+    if (modelName === modelId) {
+      selectModel(next.find((item) => !isDraftModelId(item)) || "");
+    }
+  };
+
+  const updateModelContext = (modelId: string, rawValue: string) => {
+    const value = Math.max(0, Math.trunc(Number(rawValue) || 0));
+    setModelMetadata((current) => {
+      const existing = { ...(current[modelId] ?? {}) };
+      if (value > 0) existing.context_window = value;
+      else delete existing.context_window;
+      return { ...current, [modelId]: existing };
+    });
+  };
+
+  const discoverModels = async () => {
+    if (!beginOperation("models")) return;
+    setModelsStatus("loading");
+    setModelsResult(null);
+    try {
+      const res = await fetchWithTimeout(`${apiBase()}/api/llm/models/refresh`, {
+        method: "POST",
+        headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify(payload(undefined, { includeProvider: true })),
+      }, { timeoutMessage: tr("发现模型超时，请检查接口后重试。") });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(errorMessageFromResponseText(text, res.statusText));
+      }
+      const data = await res.json() as LLMModelsRefreshResult;
+      setModelsResult(data);
+      setProxyMode(data.proxy_mode ?? proxyMode);
+      if (data.source === "live") {
+        const discovered = buildModelChoices(data.models ?? [], "");
+        const models = availableModelList.filter((item) => !isDraftModelId(item));
+        const nextModel = models.includes(modelName) ? modelName : models[0] || "";
+        setDiscoveredModelList(discovered);
+        setModelsSource("live");
+        const nextSection: ProviderSection = {
+          base_url: baseUrl,
+          wire_api: effectiveWireApi,
+          proxy_mode: data.proxy_mode ?? proxyMode,
+          available_models: models,
+          model: nextModel,
+          models_source: "live",
+          model_metadata: data.model_metadata ?? {},
+          model_labels: Object.fromEntries(models.map((id) => [id, id])),
+          configured_reasoning_effort: configuredReasoningEffort,
+          effective_reasoning_effort: data.effective_reasoning_effort || "",
+          reasoning_effort_supported: Boolean(data.reasoning_effort_supported),
+          reasoning_effort_levels: normalizeEffortLevels(data.reasoning_effort_levels),
+          context_window: Number(data.context_window || 0),
+          context_window_source: data.context_window_source || "",
+          context_window_verified: Boolean(data.context_window_verified),
+          max_context_window: Number(data.max_context_window || 0),
+          max_context_window_source: data.max_context_window_source || "",
+          max_context_window_verified: Boolean(data.max_context_window_verified),
+          max_output_tokens: Number(data.max_output_tokens || 0),
+          max_output_tokens_source: data.max_output_tokens_source || "",
+          max_output_tokens_verified: Boolean(data.max_output_tokens_verified),
+          default_reasoning_effort: data.default_reasoning_effort || "",
+          default_reasoning_summary: data.default_reasoning_summary || "",
+        };
+        setModelsStatus("success");
+        applyCapabilitySection(provider, nextSection, nextModel);
+        pushToast(tr("已获取 {v0} 个模型，可在新增映射中选择。", { v0: discovered.length }), "success");
+      } else {
+        setModelsStatus("error");
+        setModelsSource("");
+        pushToast(modelDiscoveryFailureSummary(tr, data), data.retryable ? "warning" : "error");
+      }
+    } catch (error) {
+      setModelsStatus("error");
+      pushToast(tr("模型发现失败：{v0}", { v0: formatProviderError(error) }), "error");
+    } finally {
+      endOperation("models");
+    }
+  };
+
+  const historyLabel = (entry: ProviderHistoryEntry) => {
+    const name = providerDisplayName(entry);
+    if (name) return name;
+    try {
+      const url = new URL(String(entry.base_url || ""));
+      return url.host || entry.base_url || entry.model || tr("已保存配置");
+    } catch {
+      return entry.base_url || entry.model || tr("已保存配置");
+    }
+  };
+
+  const hostLabel = (value: string) => {
+    try {
+      const url = new URL(value);
+      return url.host || value;
+    } catch {
+      return value || tr("未配置接口");
+    }
+  };
+
+  const providerTypeLabel = (nextProvider: ProviderId) =>
+    nextProvider === "custom"
+      ? tr("自定义网关")
+      : PROVIDERS.find((item) => item.id === nextProvider)?.label ?? tr("提供商");
+
+  const wireApiLabel = (wireApi: string) => {
+    const normalized = wireApi.trim().toLowerCase();
+    if (normalized === "responses") return "Responses";
+    if (normalized === "anthropic") return "Anthropic Messages";
+    return "Chat Completions";
+  };
+
+  const updateWireApi = (next: CustomWireApi) => {
+    const effectiveNext = effectiveCustomWireApi(provider, baseUrl, next);
+    setCustomWireApi(effectiveNext);
+    setPromptCacheRetention((current) =>
+      promptCacheRetentionAfterWireChange(current, effectiveNext));
+  };
+
+  const fallbackCardTitle = (nextProvider: ProviderId, section: ProviderSection) => {
+    if (nextProvider === "custom") {
+      const host = section.base_url ? hostLabel(section.base_url) : "";
+      return host && host !== tr("未配置接口") ? host : tr("自定义网关");
+    }
+    return providerTypeLabel(nextProvider);
+  };
+
+  const cardTitle = (nextProvider: ProviderId, section: ProviderSection, entry?: ProviderHistoryEntry) =>
+    providerDisplayName(section) || providerDisplayName(entry) || fallbackCardTitle(nextProvider, section);
+
+  const draftTitle = displayName.trim() || fallbackCardTitle(provider, { base_url: baseUrl });
+  const cardKeyFor = (nextProvider: ProviderId, section: ProviderSection, suffix: string) =>
+    `${cardIdentityForDraft(nextProvider, section)}::${suffix}`;
+
+  const providerCards = (() => {
+    const cards: ProviderCard[] = [];
+    const seen = new Set<string>();
+    const history = settingsPayload?.provider_history ?? [];
+    history.forEach((entry, index) => {
+      const entryProvider = providerForHistoryEntry(entry);
+      const section = sectionFromHistoryEntry(entry) ?? defaultSectionForProvider(entryProvider);
+      const identity = cardKeyFor(entryProvider, section, "saved").replace(/::saved$/, "");
+      if (seen.has(identity)) return;
+      seen.add(identity);
+      cards.push({
+        key: cardKeyFor(entryProvider, section, `history-${index}`),
+        provider: entryProvider,
+        title: historyLabel(entry),
+        subtitle: section.aws ? "Amazon Bedrock" : providerTypeLabel(entryProvider),
+        model: section.model || tr("选择模型"),
+        wireApi: effectiveCustomWireApi(
+          entryProvider,
+          section.base_url || "",
+          (section.wire_api === "responses" || section.wire_api === "anthropic" ? section.wire_api : "chat") as CustomWireApi,
+        ),
+        section,
+        entry,
+        historyIndex: index,
+        source: "history",
+      });
+    });
+    const activeProvider = toActiveUiProvider(settingsPayload);
+    const activeSection = activeProvider ? settingsPayload?.[backendProvider(activeProvider)] : undefined;
+    if (activeProvider && activeSection?.model?.trim()) {
+      const identity = cardIdentityForDraft(activeProvider, activeSection);
+      if (!seen.has(identity)) {
+        cards.unshift({
+          key: cardKeyFor(activeProvider, activeSection, "saved"),
+          provider: activeProvider,
+          title: cardTitle(activeProvider, activeSection),
+          subtitle: activeSection.aws ? "Amazon Bedrock" : providerTypeLabel(activeProvider),
+          model: activeSection.model,
+          wireApi: effectiveCustomWireApi(activeProvider, activeSection.base_url || "",
+            activeSection.wire_api === "responses" || activeSection.wire_api === "anthropic" ? activeSection.wire_api : "chat"),
+          section: activeSection,
+          source: "saved",
+        });
+      }
+    }
+    return cards;
+  })();
+
+  const activeCardIdentity = (() => {
+    const activeProvider = toActiveUiProvider(settingsPayload);
+    const activeSection = activeProvider ? savedOrHistorySectionForUiProvider(settingsPayload, activeProvider) : undefined;
+    return activeIdentityOverride || (activeProvider && activeSection ? cardKeyFor(activeProvider, activeSection, "saved").replace(/::saved$/, "") : "");
+  })();
+  const draftCardIdentity = cardIdentityForDraft(provider, {
+    base_url: baseUrl,
+    wire_api: effectiveWireApi,
+  });
+  const oauthRemainingSeconds = oauthFlow?.expiresAt
+    ? Math.max(0, Math.ceil((oauthFlow.expiresAt - oauthNow) / 1_000))
+    : undefined;
+  const oauthTargets: Array<{ url: string; label: string }> = [];
+  const addOAuthTarget = (url: string | undefined, label: string) => {
+    if (!url || oauthTargets.some((target) => target.url === url)) return;
+    oauthTargets.push({ url, label });
+  };
+  addOAuthTarget(oauthFlow?.url, tr("授权页面"));
+  addOAuthTarget(oauthFlow?.verificationUri, tr("设备验证页面"));
+  for (const link of oauthFlow?.links ?? []) addOAuthTarget(link.url, link.label || tr("相关页面"));
+
+  const providerList = (
+    <div className="provider-settings">
+      <div className="provider-settings-header">
+        <div className="provider-settings-heading">
+          <h3>{tr("模型提供商")}</h3>
+        </div>
+        <button type="button" onClick={addProvider} disabled={busy} className="provider-add-button">
+          <Plus size={14} />
+          <span>{tr("添加提供商")}</span>
+        </button>
+      </div>
+
+      {providerCards.length > 0 ? (
+        <div className="provider-card-list">
+        {providerCards.map((card) => {
+          const cardIdentity = card.key.replace(/::(?:saved|history-\d+)$/, "");
+          const active = activeCardIdentity === cardIdentity;
+          const editing = draftCardIdentity === cardIdentity;
+          return (
+            <div key={card.key} className="provider-card" data-active={active ? "true" : "false"} data-editing={editing ? "true" : "false"}>
+              <button
+                type="button"
+                onClick={() => editProviderCard(card)}
+                disabled={busy}
+                className="provider-card-main"
+                title={[card.subtitle, card.section.base_url, card.model, wireApiLabel(card.wireApi)].filter(Boolean).join(" · ")}
+              >
+                <ModelBrandIcon
+                  entity="provider"
+                  provider={`${card.provider} ${card.title} ${card.section.base_url || ""}`}
+                  websiteUrl={card.section.base_url}
+                  size={21}
+                />
+                <span className="provider-card-copy">
+                  <span className="provider-card-title">{card.title}</span>
+                  <span className="provider-card-url">{card.section.base_url || tr("未配置接口地址")}</span>
+                  <span className="provider-card-meta">
+                    <span>{card.subtitle}</span>
+                    <i aria-hidden="true" />
+                    <span>{card.model}</span>
+                  </span>
+                </span>
+              </button>
+              <div className="provider-card-actions">
+                <button
+                  type="button"
+                  onClick={() => editProviderCard(card)}
+                  disabled={busy}
+                  className="provider-icon-action"
+                  aria-label={tr("编辑 {v0}", { v0: card.title })}
+                  title={tr("编辑")}
+                >
+                  <Pencil size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void useProviderCard(card)}
+                  disabled={active || busy}
+                  className="provider-use-action"
+                  data-active={active ? "true" : "false"}
+                  aria-label={active ? tr("{v0} 已启用", { v0: card.title }) : tr("使用 {v0}", { v0: card.title })}
+                  title={active ? tr("已启用") : tr("使用提供商")}
+                >
+                  {active ? <Check size={14} /> : <Play size={14} />}
+                  <span>{active ? tr("已启用") : tr("使用")}</span>
+                </button>
+                {card.entry && card.historyIndex != null && (
+                  <button
+                    type="button"
+                    onClick={() => void deleteHistoryEntry(card.entry!, card.historyIndex!)}
+                    disabled={busy}
+                    className="provider-icon-action provider-delete-action"
+                    title={tr("删除已保存的提供商")}
+                    aria-label={deletingHistoryKey === historyEntryKey(card.entry, card.historyIndex)
+                      ? tr("正在删除提供商 {v0}", { v0: card.title })
+                      : tr("删除已保存的提供商 {v0}", { v0: card.title })}
+                  >
+                    {deletingHistoryKey === historyEntryKey(card.entry, card.historyIndex)
+                      ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
+                      : <Trash2 size={14} />}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        </div>
+      ) : (
+        <div className="provider-empty-list">
+          <div className="provider-empty-title">{tr("尚未配置提供商")}</div>
+          <div>{tr("添加提供商，填写接口地址、API 密钥和模型即可开始使用。")}</div>
+        </div>
+      )}
+    </div>
+  );
+
+  const providerDetails = (
+    <div className="provider-settings provider-settings-detail">
+      <div className="provider-detail-header">
+        <button type="button" onClick={openProviderList} disabled={busy} className="provider-detail-back" aria-label={tr("返回提供商列表")} title={tr("返回提供商列表")}><ArrowLeft /></button>
+        <div className="provider-detail-heading">
+          <div>{draftTitle}</div>
+          <p>{tr("配置提供商的连接方式、凭据和默认模型。")}</p>
+          {detailKey.current && <span className="settings-unsaved">{tr("编辑草稿会保留")}</span>}
+        </div>
+      </div>
+
+      {searchTarget && ((searchTarget.startsWith("Responses") && effectiveWireApi !== "responses")
+        || (searchTarget === tr("扩展思考 Token 预算") && effectiveWireApi !== "anthropic")
+        || (searchTarget === tr("OAuth 登录") && !oauthSupported)) && <Section title={searchTarget}>
+          <p className="settings-page-note">{searchTarget === tr("OAuth 登录") ? tr("当前提供商未提供 OAuth 登录；可使用下方 API 密钥配置认证。") : tr("此选项仅适用于 {v0}。请在提供商列表选择对应接口后配置。", { v0: searchTarget.startsWith("Responses") ? "Responses API" : "Anthropic Messages" })}</p>
+        </Section>}
+
+      <Section title={tr("显示名称")}>
+        <input
+          type="text"
+          aria-label={tr("提供商显示名称")}
+          value={displayName}
+          disabled={busy}
+          onChange={(e) => setDisplayName(e.target.value)}
+          placeholder={provider === "custom" && baseUrl ? hostLabel(baseUrl) : tr("{v0} 配置", { v0: providerConfig.label })}
+          spellCheck={false}
+          style={{ ...inputStyle, fontFamily: "var(--font-ui)" }}
+        />
+      </Section>
+
+      <Section title={tr("提供商类型")}>
+        <div style={presetGridStyle}>
+          {PROVIDERS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => selectProviderPreset(item.id)}
+              disabled={busy}
+              style={presetButtonStyle(provider === item.id && !isBedrockProvider)}
+            >
+              <ModelBrandIcon entity="provider" provider={item.id} size={19} />
+              <span style={presetTitleStyle}>{item.label}</span>
+            </button>
+          ))}
+          <button ref={bedrockEntryRef} type="button" onClick={openBedrockSetup} disabled={busy} style={presetButtonStyle(isBedrockProvider)}>
+            <ModelBrandIcon entity="provider" provider="Amazon Bedrock" size={19} /><span style={presetTitleStyle}>{tr("使用 Amazon Bedrock")}</span>
+          </button>
+        </div>
+      </Section>
+
+      {providerConfig.hasBaseUrl && !isBedrockProvider && (
+        <Section title={tr("接口地址")}>
+          <input
+            type="text"
+            aria-label={tr("接口地址")}
+            value={baseUrl}
+            disabled={busy}
+            required
+            onChange={(event) => {
+              setBaseUrl(event.target.value);
+              clearDiscoveredModels();
+            }}
+            placeholder="https://api.example.com/v1"
+            style={inputStyle}
+          />
+        </Section>
+      )}
+
+      {!isBedrockProvider && <Section title={tr("API 密钥")}>
+        <input
+          type="text"
+          aria-label={tr("API 密钥")}
+          value={apiKey}
+          disabled={busy}
+          onChange={(event) => {
+            setApiKey(event.target.value);
+            clearDiscoveredModels();
+          }}
+          placeholder={providerConfig.placeholder}
+          autoComplete="off"
+          spellCheck={false}
+          style={inputStyle}
+        />
+      </Section>}
+
+      {showApiFormat && (
+        <Section title={tr("API 格式")}>
+          <SelectMenu
+            ariaLabel={tr("API 格式")}
+            className="settings-select settings-select-regular"
+            align="end"
+            value={customWireApi}
+            disabled={busy}
+            onValueChange={(value) => updateWireApi(value as CustomWireApi)}
+          >
+            <option value="chat">OpenAI Chat Completions</option>
+            <option value="responses">OpenAI Responses</option>
+            {backendProvider(provider) === "custom" && <option value="anthropic">Anthropic Messages</option>}
+          </SelectMenu>
+        </Section>
+      )}
+
+      {showFixedAnthropicFormat && (
+        <Section title={tr("API 格式")}>
+          <div style={readOnlyFormatStyle}>Anthropic Messages</div>
+        </Section>
+      )}
+
+      <Section title={tr("模型")} description={tr("只显示你添加的模型；模型 ID 会原样出现在 Composer 中。")}>
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" onClick={discoverModels} disabled={!canDiscoverModels} title={hasRequiredBaseUrl ? tr("从接口获取模型列表") : tr("请先填写接口地址")} style={secondaryActionStyle}>
+              <RefreshCw size={14} />{modelsStatus === "loading" ? tr("正在获取…") : tr("获取模型列表")}
+            </button>
+            <button type="button" onClick={addModelMapping} disabled={busy} title={tr("添加一个模型映射")} style={secondaryActionStyle}>
+              <Plus size={14} />{tr("添加模型")}</button>
+          </div>
+          {modelsStatus !== "idle" && (
+            <div style={statusStyle(modelsStatus === "error" ? "error" : modelsStatus === "loading" ? "testing" : "success")}>
+              {modelsStatus === "loading" && tr("正在获取模型列表…")}
+              {modelsStatus === "success" && modelsResult && (
+                <span>
+                  {tr("已获取 {count} 个候选模型", { count: discoveredModelList.length })}{modelsResult.source_message ? ` · ${modelsResult.source_message}` : ""}
+                </span>
+              )}
+              {modelsStatus === "error" && (
+                <span>{modelsResult ? modelDiscoveryFailureSummary(tr, modelsResult) : tr("模型列表获取失败；仍可手动填写模型 ID。")}</span>
+              )}
+            </div>
+          )}
+          {availableModelList.length === 0 && (
+            <div style={{ padding: "18px 12px", border: "1px dashed var(--border-subtle)", borderRadius: 8, color: "var(--text-tertiary)", fontSize: "var(--mc-font-body)", textAlign: "center" }}>
+              {tr("尚未添加模型")}</div>
+          )}
+          {availableModelList.map((modelId) => {
+            const metadata = modelMetadata[modelId] ?? {};
+            const isDraft = isDraftModelId(modelId);
+            const selectableCandidates = !isDraft && !discoveredModelList.includes(modelId)
+              ? [modelId, ...discoveredModelList]
+              : discoveredModelList;
+            return (
+              <div key={modelId} className="provider-model-mapping">
+                {discoveredModelList.length > 0 ? (
+                  <SelectMenu
+                    ariaLabel={tr("{v0} 实际请求模型", { v0: modelId })}
+                    value={isDraft ? "" : modelId}
+                    disabled={busy}
+                    onValueChange={(value) => updateModelMappingId(modelId, value)}
+                    className="settings-select settings-select-regular mc-select-menu-mono"
+                    align="end"
+                  >
+                    <option value="">{tr("选择实际请求模型")}</option>
+                    {selectableCandidates.map((candidate) => (
+                      <option
+                        key={candidate}
+                        value={candidate}
+                        disabled={availableModelList.some((item) => item === candidate && item !== modelId)}
+                      >
+                        {candidate}
+                      </option>
+                    ))}
+                  </SelectMenu>
+                ) : (
+                  <input
+                    aria-label={tr("{v0} 实际请求模型", { v0: modelId })}
+                    defaultValue={isDraft ? "" : modelId}
+                    disabled={busy}
+                    onBlur={(event) => {
+                      event.target.value = updateModelMappingId(modelId, event.target.value);
+                    }}
+                    placeholder={tr("实际请求模型 ID")}
+                    spellCheck={false}
+                    style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
+                  />
+                )}
+                <input
+                  type="number"
+                  min={0}
+                  step={1024}
+                  aria-label={tr("{v0} 上下文窗口", { v0: modelId })}
+                  value={metadata.context_window || ""}
+                  disabled={busy}
+                  onChange={(event) => updateModelContext(modelId, event.target.value)}
+                  placeholder={tr("例如 128000")}
+                  style={inputStyle}
+                />
+                <button type="button" onClick={() => removeModelMapping(modelId)} disabled={busy} title={tr("移除模型映射")} style={secondaryActionStyle} aria-label={tr("移除 {v0}", { v0: modelId })}><Trash2 size={14} /></button>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+
+      {(oauthSupported || oauthFlow) && (
+        <Section title={tr("OAuth 登录")}>
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={capabilityValueStyle}>{oauthConfigured ? tr("已登录") : oauthFlow ? oauthPhaseLabel(tr, oauthFlow.phase) : tr("未登录")}</span>
+            {oauthConfigured ? (
+              <button type="button" onClick={() => void oauthAction("logout")} disabled={busy} title={tr("退出 OAuth 登录")} style={secondaryActionStyle}>
+                <LogOut size={14} />{activeOperation === "oauth" ? tr("正在退出…") : tr("退出登录")}
+              </button>
+            ) : (
+              <button type="button" onClick={() => void oauthAction("login")} disabled={busy} title={tr("登录 OAuth 提供商")} style={secondaryActionStyle}>
+                <LogIn size={14} />{activeOperation === "oauth" ? tr("正在登录…") : tr("登录")}
+              </button>
+            )}
+            </div>
+
+            {oauthFlow && (
+              <div style={oauthFlowPanelStyle} aria-live="polite">
+                <div style={oauthFlowHeaderStyle}>
+                  <strong>{oauthPhaseLabel(tr, oauthFlow.phase)}</strong>
+                  <span>{oauthFlow.provider}</span>
+                </div>
+                {oauthFlow.instructions && <p style={oauthFlowMessageStyle}>{oauthFlow.instructions}</p>}
+                {oauthFlow.message && <p style={oauthFlowMessageStyle}>{oauthFlow.message}</p>}
+                {oauthFlow.userCode && (
+                  <div style={oauthDeviceCodeRowStyle}>
+                    <span>{tr("设备码")}</span>
+                    <code style={oauthDeviceCodeStyle}>{oauthFlow.userCode}</code>
+                  </div>
+                )}
+                {(oauthFlow.intervalSeconds || oauthFlow.expiresInSeconds) && (
+                  <div style={oauthMetaStyle}>
+                    {oauthFlow.intervalSeconds && <span>{tr("轮询间隔：")}{oauthFlow.intervalSeconds} {tr("秒")}</span>}
+                    {oauthFlow.expiresInSeconds && (
+                      <span>
+                        {tr("有效期：")}{oauthFlow.expiresInSeconds} {tr("秒")}{oauthRemainingSeconds !== undefined ? tr(" · 剩余 {v0}", { v0: formatOAuthDuration(oauthRemainingSeconds) }) : ""}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {oauthTargets.map((target) => (
+                  <div key={target.url} style={oauthLinkRowStyle}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={oauthLinkLabelStyle}>{target.label}</div>
+                      <div style={oauthUrlStyle}>{target.url}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void openOAuthTarget(target.url)}
+                      style={secondaryActionStyle}
+                      title={tr("在系统浏览器中打开{v0}", { v0: target.label })}
+                    >
+                      <ExternalLink size={14} />{tr("打开")}</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
+
+      <details style={{ borderTop: "1px solid var(--border-subtle)", marginTop: 4 }}>
+        <summary style={{ cursor: "pointer", padding: "10px 0", color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
+          {tr("高级设置")}</summary>
+        <div style={{ display: "grid", gap: 10 }}>
+      {localDictationProvider && effectiveWireApi !== "anthropic" && <Section title={tr("听写模型")} description={tr("使用此服务的音频转录接口，留空以停用。随提供商配置保存。") }>
+        <input aria-label={tr("转录模型")} value={dictationModel} disabled={busy} autoComplete="off"
+          placeholder={tr("填写服务商支持的转录模型")} onChange={(event) => setDictationModel(event.target.value)} style={inputStyle} />
+      </Section>}
+      <Section
+        title={tr("网络连接")}
+        description={proxyMode === "direct"
+          ? tr("该 Provider 将忽略 MiniCode 与系统进程代理，直接连接上方接口地址。")
+          : tr("遵循 MiniCode 的 LLM 代理、系统进程代理与 NO_PROXY 绕过规则。")}
+      >
+        <SelectMenu
+          ariaLabel={tr("网络连接")}
+          className="settings-select settings-select-regular"
+          align="end"
+          value={proxyMode}
+          disabled={busy}
+          onValueChange={(value) => setProxyMode(value as ProviderProxyMode)}
+        >
+          <option value="inherit">{tr("跟随全局代理")}</option>
+          <option value="direct">{tr("直连（忽略代理）")}</option>
+        </SelectMenu>
+      </Section>
+
+      {modelName && !isDraftModelId(modelName) && (
+        <Section title={tr("当前模型行为")} description={tr("选择默认模型；下方行为设置仅应用于 {v0}，随提供商配置保存。", { v0: modelName })}>
+          <SelectMenu ariaLabel={tr("默认模型")} className="settings-select settings-select-regular" align="end" value={modelName} onValueChange={selectModel} disabled={busy}>
+            {configuredModelList.map((id) => <option key={id} value={id}>{id}</option>)}
+          </SelectMenu>
+          <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+            <span>{tr("工具调用模式")}</span>
+            <SelectMenu ariaLabel={tr("工具调用模式")} className="settings-select settings-select-regular" align="end" disabled={busy}
+              value={modelMetadata[modelName]?.tool_mode ?? "default"}
+              onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
+                ...previous[modelName], tool_mode: value === "default" ? undefined : value as ProviderModelMetadata["tool_mode"],
+              } }))}>
+              <option value="default">{tr("跟随 MiniCode 默认")}</option>
+              <option value="direct">{tr("直接工具")}</option>
+              <option value="code_mode">{tr("直接工具与代码编排")}</option>
+              <option value="code_mode_only">{tr("仅代码编排")}</option>
+            </SelectMenu>
+          </label>
+          {(effectiveWireApi === "responses" || effectiveWireApi === "anthropic") && (
+            <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+              <span>{tr("提供商联网搜索")}</span>
+              <SelectMenu ariaLabel={tr("提供商联网搜索")} className="settings-select settings-select-regular" align="end" disabled={busy}
+                value={modelMetadata[modelName]?.supports_hosted_web_search == null ? "auto" : modelMetadata[modelName]?.supports_hosted_web_search ? "supported" : "disabled"}
+                onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
+                  ...previous[modelName], supports_hosted_web_search: value === "auto" ? null : value === "supported",
+                } }))}>
+                <option value="auto">{tr("自动识别官方接口")}</option>
+                <option value="supported">{tr("该接口支持联网搜索")}</option>
+                <option value="disabled">{tr("禁用")}</option>
+              </SelectMenu>
+              <small>{tr("兼容接口需确认支持联网搜索；未启用时可使用已配置的 Tavily 或 MCP 搜索工具。")}</small>
+            </label>
+          )}
+          {effectiveWireApi === "responses" && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={modelMetadata[modelName]?.supports_custom_tools === true}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], supports_custom_tools: enabled } }));
+                }}
+              />
+              <span>{tr("原生补丁输入（需要模型及接口支持 custom tools）")}</span>
+            </label>
+          )}
+          {effectiveWireApi === "responses" && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={modelMetadata[modelName]?.responses_websocket === true}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], responses_websocket: enabled } }));
+                }}
+              />
+              <span>{tr("WebSocket 增量传输（接口支持时启用）")}</span>
+            </label>
+          )}
+          {effectiveWireApi === "responses" && (
+            <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+              <span>{tr("上下文压缩方式")}</span>
+              <SelectMenu ariaLabel={tr("上下文压缩方式")} className="settings-select settings-select-regular" align="end" disabled={busy}
+                value={modelMetadata[modelName]?.native_compaction == null ? "auto" : modelMetadata[modelName]?.native_compaction ? "native" : "local"}
+                onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
+                  ...previous[modelName], native_compaction: value === "auto" ? null : value === "native",
+                } }))}>
+                <option value="auto">{tr("自动选择")}</option>
+                <option value="native">{tr("提供商原生压缩")}</option>
+                <option value="local">{tr("文本摘要")}</option>
+              </SelectMenu>
+              <small>{tr("原生压缩需要接口支持；生成的加密上下文需继续使用同一提供商的 Responses 接口。")}</small>
+            </label>
+          )}
+          <label style={{ display: "grid", gap: 6 }}>
+            <span>{tr("模型附加指令")}</span>
+            <textarea
+              rows={4}
+              disabled={busy}
+              value={modelMetadata[modelName]?.model_instructions ?? ""}
+              onChange={(event) => {
+                const instructions = event.target.value;
+                setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], model_instructions: instructions } }));
+              }}
+              placeholder={tr("留空使用 MiniCode 默认指令；填写该模型需要的补充指导。")}
+              style={{ ...inputStyle, width: "100%", resize: "vertical" }}
+            />
+          </label>
+        </Section>
+      )}
+
+      {responsesCachingEnabled && (
+        <Section title={tr("Responses 提示词缓存")} description={tr("仅 Responses API 使用；Chat Completions 与 Anthropic Messages 不发送这个字段。")}>
+          <SettingSelect
+            label={tr("提示词缓存")}
+            value={promptCacheRetention || "off"}
+            disabled={busy}
+            onChange={(value) => setPromptCacheRetention(value === "off" ? "" : value)}
+            options={[
+              { value: "24h", label: tr("保留 24 小时") },
+              { value: "in_memory", label: tr("仅内存") },
+              { value: "off", label: tr("关闭") },
+            ]}
+          />
+        </Section>
+      )}
+
+      {effectiveWireApi === "responses" && (
+        <Section title={tr("Responses 推理摘要")} description={tr("控制是否请求 Provider 返回可见的推理摘要。")}>
+          <div style={{ display: "grid", gap: 10 }}>
+            <SettingSelect
+              label={tr("推理摘要")}
+              value={responsesReasoningSummary || "off"}
+              disabled={busy}
+              onChange={setResponsesReasoningSummary}
+              options={[
+                { value: "off", label: tr("关闭") },
+                { value: "auto", label: tr("自动") },
+                { value: "detailed", label: tr("详细") },
+              ]}
+            />
+          </div>
+        </Section>
+      )}
+
+      {(backendProvider(provider) === "anthropic" || effectiveWireApi === "anthropic") && (
+        <Section title={tr("扩展思考 Token 预算")} description={tr("仅 Anthropic Messages 使用；0 表示关闭扩展思考，不是上下文窗口。")}>
+          <input
+            type="number"
+            min={0}
+            step={512}
+            aria-label={tr("思考预算")}
+            value={thinkingBudget}
+            disabled={busy}
+            onChange={(e) => setThinkingBudget(Math.max(0, Number(e.target.value) || 0))}
+            placeholder="0"
+            style={inputStyle}
+          />
+        </Section>
+      )}
+
+      <Section title={tr("请求最大输出 Token")} description={tr("0 表示自动/未设置，MiniCode 会从请求中省略该字段；正数才会作为本次输出上限发送。")}>
+        <input
+          type="number"
+          min={0}
+          step={256}
+          aria-label={tr("请求最大输出 Token")}
+          value={maxTokens}
+          disabled={busy}
+          onChange={(event) => setMaxTokens(Math.max(0, Math.trunc(Number(event.target.value) || 0)))}
+          placeholder={tr("0（自动）")}
+          style={inputStyle}
+        />
+      </Section>
+
+      <Section title={tr("辅助模型")}>
+        <input
+          type="text"
+          aria-label={tr("辅助模型")}
+          value={smallFastModel}
+          disabled={busy}
+          onChange={(e) => setSmallFastModel(e.target.value)}
+          placeholder={modelName || tr("默认使用主模型")}
+          style={inputStyle}
+        />
+      </Section>
+        </div>
+      </details>
+
+      <div className="provider-detail-actions" style={actionBarStyle}>
+        <button type="button" onClick={() => void saveProvider()} disabled={!canSaveProvider} title={!hasRequiredBaseUrl ? tr("请先填写接口地址") : !hasRequiredModel ? tr("请先添加模型") : hasIncompleteModelMapping ? tr("请完成或删除空模型行") : tr("保存提供商")} style={primaryActionStyle}><Save size={14} />{saving ? tr("正在保存…") : tr("保存")}</button>
+      </div>
+    </div>
+  );
+
+  return providerView === "bedrock" ? <Suspense fallback={<p role="status">{tr("正在加载…")}</p>}><BedrockSetup onSubmit={configureBedrock} onCheckGovCloud={checkBedrockGovCloud}
+    onBack={() => { bedrockReturnFocus.current = true; setProviderView("detail"); }}
+    onComplete={() => { detailKey.current = ""; clearDetailDraftPin(); setProviderView("list"); }} /></Suspense>
+    : providerView === "list" ? providerList : providerDetails;
+};
+
+const toActiveUiProvider = (payload: LLMSettingsPayload | null): ProviderId | "" => {
+  if (!payload) return "";
+  const active = String(payload.provider || "").trim().toLowerCase();
+  if (active === "anthropic") return "anthropic";
+  if (active === "openai") return "openai";
+  if (active === "custom") return "custom";
+  return "";
+};
+
+const isSafeOAuthUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:")
+      && !parsed.username
+      && !parsed.password;
+  } catch {
+    return false;
+  }
+};
+
+const oauthPhaseLabel = (tr: Translate, phase: string): string => ({
+  auth_url: tr("等待浏览器授权"),
+  device_code: tr("等待设备码验证"),
+  info: tr("授权提示"),
+  progress: tr("正在授权"),
+  error: tr("授权失败"),
+}[phase] || tr("OAuth 授权"));
+
+const formatOAuthDuration = (seconds: number): string => {
+  const remaining = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(remaining / 60);
+  const tail = String(remaining % 60).padStart(2, "0");
+  return `${minutes}:${tail}`;
+};
+
+const MODEL_DISCOVERY_FAILURE_LABELS: Record<string, TranslationKey> = {
+  configuration_error: "配置不完整",
+  authentication_failed: "鉴权失败",
+  models_endpoint_not_found: "模型列表接口不存在",
+  rate_limited: "请求频率受限",
+  provider_unavailable: "Provider 暂时不可用",
+  network_error: "网络连接失败",
+  model_list_empty: "Provider 返回了空模型列表",
+  model_discovery_failed: "模型发现失败",
+};
+
+const modelDiscoveryFailureSummary = (tr: Translate, result: LLMModelsRefreshResult): string => {
+  const kind = String(result.failure_kind || "model_discovery_failed").trim();
+  const label = tr(MODEL_DISCOVERY_FAILURE_LABELS[kind] || "模型发现失败");
+  const details = [
+    result.status_code ? `HTTP ${result.status_code}` : "",
+    String(result.message || result.source_message || "").trim(),
+    String(result.hint || "").trim(),
+    result.retryable ? tr("可以重试") : "",
+    tr("已保留手动输入的模型"),
+  ].filter(Boolean);
+  return [label, ...Array.from(new Set(details))].join(" · ");
+};
+
+const SettingSelect = ({
+  label,
+  value,
+  disabled = false,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+}) => (
+  <div style={settingSelectRowStyle}>
+    <span style={settingSelectLabelStyle}>{label}</span>
+    <SelectMenu ariaLabel={label} className="settings-select settings-select-regular" align="end" value={value} disabled={disabled} onValueChange={onChange}>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>{option.label}</option>
+      ))}
+    </SelectMenu>
+  </div>
+);
+
+const readOnlyFormatStyle = {
+  ...inputStyle,
+  fontFamily: "var(--font-ui)",
+  color: "var(--text-secondary)",
+};
+
+const settingSelectRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "96px minmax(0, 1fr)",
+  alignItems: "center",
+  gap: 10,
+};
+
+const settingSelectLabelStyle: CSSProperties = {
+  color: "var(--text-secondary)",
+  fontSize: "var(--mc-font-body)",
+};
+
+const capabilityValueStyle: CSSProperties = {
+  color: "var(--text-primary)",
+  fontSize: "var(--mc-font-body)",
+  fontWeight: "var(--fw-semibold)",
+};
+
+const oauthFlowPanelStyle: CSSProperties = {
+  display: "grid",
+  gap: 9,
+  padding: 10,
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 8px)",
+  background: "var(--surface-soft)",
+};
+
+const oauthFlowHeaderStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 10,
+  color: "var(--text-primary)",
+  fontSize: "var(--mc-font-body)",
+};
+
+const oauthFlowMessageStyle: CSSProperties = {
+  margin: 0,
+  color: "var(--text-secondary)",
+  fontSize: "var(--mc-font-body)",
+  lineHeight: 1.5,
+  whiteSpace: "pre-wrap",
+};
+
+const oauthDeviceCodeRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  color: "var(--text-secondary)",
+  fontSize: "var(--mc-font-body)",
+};
+
+const oauthDeviceCodeStyle: CSSProperties = {
+  padding: "5px 9px",
+  borderRadius: 6,
+  background: "var(--surface-page)",
+  border: "1px solid var(--border-subtle)",
+  color: "var(--text-primary)",
+  fontSize: "var(--mc-font-body)",
+  fontWeight: "var(--fw-bold)",
+  letterSpacing: "0.08em",
+  userSelect: "all",
+};
+
+const oauthMetaStyle: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: "5px 12px",
+  color: "var(--text-tertiary)",
+  fontSize: "var(--mc-font-caption)",
+};
+
+const oauthLinkRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: 10,
+};
+
+const oauthLinkLabelStyle: CSSProperties = {
+  color: "var(--text-secondary)",
+  fontSize: "var(--mc-font-caption)",
+  fontWeight: "var(--fw-semibold)",
+};
+
+const oauthUrlStyle: CSSProperties = {
+  marginTop: 2,
+  color: "var(--text-tertiary)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--mc-font-caption)",
+  overflowWrap: "anywhere",
+};
+
+const presetGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+  gap: 8,
+};
+
+const presetButtonStyle = (active: boolean): CSSProperties => ({
+  minHeight: 52,
+  display: "grid",
+  gridTemplateColumns: "30px minmax(0, 1fr)",
+  alignItems: "center",
+  gap: 9,
+  padding: "8px 9px",
+  borderRadius: "var(--radius-sm, 8px)",
+  border: active ? "1px solid var(--accent-primary)" : "1px solid var(--border-subtle)",
+  backgroundColor: active ? "var(--surface-active)" : "var(--surface-soft)",
+  color: "var(--text-secondary)",
+  cursor: "pointer",
+  textAlign: "left",
+});
+
+const presetTitleStyle: CSSProperties = {
+  display: "block",
+  color: "var(--text-primary)",
+  fontSize: "var(--mc-font-body)",
+  fontWeight: "var(--fw-bold)",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};

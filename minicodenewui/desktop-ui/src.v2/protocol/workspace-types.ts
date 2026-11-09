@@ -1,0 +1,418 @@
+/**
+ * Workspace, environment, and git event types.
+ *
+ * Domain subset of the WebSocket protocol for events related to workspace
+ * management, file watching, git diff staging, environment variables,
+ * checkpoint management, and command results.
+ *
+ * Keep in lockstep with backend/ws/events.py.
+ */
+
+// ──────────────────────────────────────────────────────────────────
+// Server event type strings (workspace domain)
+// ──────────────────────────────────────────────────────────────────
+
+export type WorkspaceServerEventType =
+  // File watcher
+  | "file.changed"
+  | "workspace.project_index.invalidated"
+  | "pet.published"
+  // Commands / artifacts
+  | "command.result"
+  | "command_output_chunk"
+  | "artifact_content"
+  | "artifact.preview"
+  // Workspace
+  | "workspace.imported"
+  | "workspace.recent.list"
+  // Environment
+  | "env.list"
+  // Git CI
+  | "git.pr_status"
+  // Checkpoints
+  | "checkpoint.created"
+  | "checkpoint.list"
+  | "checkpoint.rewound"
+  | "checkpoint.run.list"
+  | "checkpoint.run.resume"
+  // Guidelines / permissions
+  | "guidelines.updated"
+  | "permission.mode.updated"
+  | "permission.rules.updated"
+  // Git diff
+  | "diff.git_working_tree"
+  | "diff.git_staged"
+  | "diff.git_stage_file"
+  | "diff.git_unstage_file"
+  | "diff.git_stage_all"
+  | "diff.git_unstage_all"
+  | "diff.git_revert_file"
+  | "diff.git_revert_all";
+
+// ──────────────────────────────────────────────────────────────────
+// Client command type strings (workspace domain)
+// ──────────────────────────────────────────────────────────────────
+
+export type WorkspaceClientCommandType =
+  | "diff.git_file_contents"
+  | "diff.git_review_options"
+  | "diff.git_review_patch"
+  | "diff.git_revert_patch"
+  | "workspace.import"
+  | "workspace.switch"
+  | "workspace.recent"
+  | "workspace.recent.remove"
+  | "workspace.recent.clear"
+  | "env.list"
+  | "env.set"
+  | "env.delete"
+  | "git.pr_status"
+  | "git.pr_automation.set"
+  | "checkpoint.list"
+  | "checkpoint.rewind"
+  | "checkpoint.run.list"
+  // Git diff
+  | "diff.git_working_tree"
+  | "diff.git_staged"
+  | "diff.git_stage_file"
+  | "diff.git_unstage_file"
+  | "diff.git_stage_all"
+  | "diff.git_unstage_all"
+  | "diff.git_revert_file"
+  | "diff.git_revert_all";
+
+// ──────────────────────────────────────────────────────────────────
+// Server event payload types
+// ──────────────────────────────────────────────────────────────────
+
+interface WorkspaceOwnedEvent {
+  conversation_id: string;
+  workspace_root: string;
+  request_id?: string;
+}
+
+export interface FileChangedEvent extends WorkspaceOwnedEvent {
+  type: "file.changed";
+  path: string;
+  event: string;
+  timestamp?: string;
+}
+
+export interface WorkspaceProjectIndexInvalidatedEvent extends WorkspaceOwnedEvent {
+  type: "workspace.project_index.invalidated";
+  index_instance_id: string;
+  revision: number;
+}
+
+export interface CommandResultEvent {
+  type: "command.result";
+  conversation_id?: string;
+  workspace_root?: string;
+  command: string;
+  level: string;
+  message: string;
+  title?: string;
+  data?: Record<string, unknown>;
+}
+
+export interface EnvListEvent {
+  type: "env.list";
+  entries?: { name: string; description: string; scope: string; credential_status?: "stored" | "missing" }[];
+}
+
+export interface GitPrStatusEvent extends WorkspaceOwnedEvent {
+  type: "git.pr_status";
+  pr?: { number: number; title: string; state: string; url: string; branch: string } | null;
+  checks?: { name: string; status: string; url: string }[];
+  error?: string;
+  error_code?: string;
+  automation?: { auto_fix?: boolean; auto_merge?: boolean };
+}
+
+export interface GitDiffFilePayload {
+  path: string;
+  old_path?: string | null;
+  status?: "A" | "M" | "D" | "R" | "C" | "T" | "U";
+  old_mode?: string;
+  new_mode?: string;
+  old_oid?: string | null;
+  new_oid?: string | null;
+  revision?: string;
+  patch: string;
+  additions: number;
+  deletions: number;
+  is_binary?: boolean;
+  is_truncated?: boolean;
+}
+
+export interface GitDiffWorkingTreeEvent extends WorkspaceOwnedEvent {
+  type: "diff.git_working_tree";
+  is_git_repo?: boolean;
+  files?: GitDiffFilePayload[];
+  untracked?: string[];
+  untracked_files?: GitDiffFilePayload[];
+  source?: "unstaged" | "uncommitted" | "branch" | "commit";
+  status?: "success" | "expected";
+  reason?: string | null;
+  comparison?: { base_branch?: string; merge_base_sha?: string; commit_sha?: string; parent_sha?: string };
+  hide_whitespace?: boolean;
+  snapshot_generation?: string;
+  environment_id?: string;
+  cwd_uri?: string;
+  preview?: boolean;
+  tool_call_id?: string;
+  progress?: number;
+}
+
+export interface GitDiffStagedEvent extends WorkspaceOwnedEvent {
+  type: "diff.git_staged";
+  is_git_repo?: boolean;
+  files?: GitDiffFilePayload[];
+  source?: "staged";
+  hide_whitespace?: boolean;
+  snapshot_generation?: string;
+  environment_id?: string;
+  cwd_uri?: string;
+}
+
+export interface GitDiffContentRequest {
+  path: string;
+  side: "old" | "new";
+  format: "text" | "binary" | "markdown-preview";
+}
+
+export type GitDiffContentResult = {
+  type: "success";
+  path: string;
+  side: "old" | "new";
+  source_kind: "object" | "disk" | "absent";
+  oid?: string;
+  lines?: string[];
+  data_base64?: string;
+  media_type?: string;
+} | {
+  type: "error";
+  path: string;
+  side: "old" | "new";
+  error: { type: "not-found" | "too-large" | "stale-snapshot" | "unknown"; message?: string; limit_bytes?: number };
+};
+
+export interface GitDiffActionEvent extends WorkspaceOwnedEvent {
+  type:
+    | "diff.git_stage_file"
+    | "diff.git_unstage_file"
+    | "diff.git_stage_all"
+    | "diff.git_unstage_all"
+    | "diff.git_revert_file"
+    | "diff.git_revert_all";
+  ok?: boolean;
+  status?: "success" | "partial-success";
+  source?: "unstaged" | "staged";
+  snapshot_generation?: string;
+  path?: string;
+  message?: string;
+}
+
+export interface WorkspaceRecentProjectPayload {
+  path: string;
+  name: string;
+  project_type: string;
+  last_opened: number;
+  source_folders?: string[];
+  managed_workspace_root?: string;
+  pinned?: boolean;
+  appearance?: import("../lib/project-appearance").ProjectAppearance | null;
+  named?: boolean;
+}
+
+export interface WorkspaceRecentListEvent {
+  type: "workspace.recent.list";
+  projects: WorkspaceRecentProjectPayload[];
+}
+
+export interface WorkspaceProjectPayload {
+  root_path: string;
+  project_type: string;
+  name: string;
+  description: string;
+  file_count: number;
+  total_size: number;
+  has_project_instructions: boolean;
+  index_truncated: boolean;
+}
+
+export interface WorkspaceImportedEvent extends WorkspaceOwnedEvent {
+  type: "workspace.imported";
+  project: WorkspaceProjectPayload;
+  summary: string;
+  file_count: number;
+}
+
+export interface CheckpointRecordPayload {
+  id: string;
+  conversation_id: string;
+  session_id: string;
+  tool_call_id: string;
+  tool_name: string;
+  workspace_root: string;
+  paths: string[];
+  created_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface CheckpointCreatedEvent extends CheckpointRecordPayload {
+  type: "checkpoint.created";
+}
+
+export interface CheckpointListEvent extends WorkspaceOwnedEvent {
+  type: "checkpoint.list";
+  checkpoints: CheckpointRecordPayload[];
+}
+
+export interface CheckpointRewoundEvent extends WorkspaceOwnedEvent {
+  type: "checkpoint.rewound";
+  checkpoint: CheckpointRecordPayload;
+}
+
+export interface RunCheckpointRecord {
+  run_id?: string;
+  session_id?: string;
+  conversation_id?: string;
+  iteration?: number;
+  iterations?: number;
+  stopped_reason?: string | null;
+  created_at?: number;
+  timestamp?: number;
+}
+
+export interface RunCheckpointListEvent {
+  type: "checkpoint.run.list";
+  session_id: string;
+  conversation_id: string;
+  workspace_root: string;
+  checkpoints: RunCheckpointRecord[];
+  runs: Record<string, unknown>[];
+  subagents: Record<string, unknown>[];
+}
+
+export interface RunCheckpointResumeEvent {
+  type: "checkpoint.run.resume";
+  resumed: boolean;
+  session_id?: string;
+  conversation_id: string;
+  workspace_root: string;
+  checkpoint_run_id?: string;
+  iteration?: number;
+  stopped_reason?: string | null;
+  message?: string;
+}
+
+export interface GuidelinesUpdatedEvent extends WorkspaceOwnedEvent {
+  type: "guidelines.updated";
+  message: string;
+  path?: string;
+  cache_cleared?: boolean;
+  effective_from?: "next_turn" | string;
+  source_kind?: "direct" | "import" | string;
+  parent_path?: string;
+}
+
+export interface PermissionModeUpdatedEvent {
+  type: "permission.mode.updated";
+  session_id: string;
+  conversation_id: string;
+  workspace_root: string;
+  mode: string;
+  source: string;
+}
+
+export interface PermissionRulePayload {
+  pattern?: string;
+  source: string;
+  level?: string;
+  tool?: string;
+  rule_content?: string;
+  behavior?: string;
+  destination?: string;
+}
+
+export interface PermissionRulesPayload {
+  mode: string;
+  context_source: string;
+  system_deny: PermissionRulePayload[];
+  session_deny: PermissionRulePayload[];
+  session_overrides: PermissionRulePayload[];
+  session_prompt_rules: PermissionRulePayload[];
+}
+
+export interface PermissionRulesUpdatedEvent {
+  type: "permission.rules.updated";
+  session_id: string;
+  conversation_id: string;
+  source: string;
+  rules: PermissionRulesPayload;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Client command payloads
+// ──────────────────────────────────────────────────────────────────
+
+export interface EnvListCommand {
+  type: "env.list";
+}
+
+export interface EnvSetCommand {
+  type: "env.set";
+  name: string;
+  value: string;
+  description?: string;
+  scope?: string;
+}
+
+export interface EnvDeleteCommand {
+  type: "env.delete";
+  name: string;
+}
+
+export interface ArtifactContentEvent extends WorkspaceOwnedEvent {
+  type: "artifact_content";
+  artifact_id: string;
+  request_id: string;
+  content?: string;
+  preview?: string;
+  media_type?: string;
+  url?: string;
+  purpose?: string;
+  name?: string;
+  is_attachment?: boolean;
+  has_native?: boolean;
+  parse_error?: string;
+  parse_warning?: string;
+}
+
+export interface GitPrAutomationSetCommand {
+  type: "git.pr_automation.set";
+  auto_fix?: boolean;
+  auto_merge?: boolean;
+  expected_pr_number?: number;
+  expected_branch?: string;
+}
+
+interface CheckpointOwnedCommand {
+  conversation_id: string;
+  workspace_root: string;
+}
+
+export interface CheckpointListCommand extends CheckpointOwnedCommand {
+  type: "checkpoint.list";
+  limit?: number;
+}
+
+export interface CheckpointRewindCommand extends CheckpointOwnedCommand {
+  type: "checkpoint.rewind";
+  checkpoint_id: string;
+}
+
+export interface RunCheckpointListCommand extends CheckpointOwnedCommand {
+  type: "checkpoint.run.list";
+}

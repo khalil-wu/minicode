@@ -1,4 +1,22 @@
+import { mockWorkspaceEnvironment } from "./http-fixtures";
 import { expect, Page, test } from "@playwright/test";
+
+// The composer draft on Home owns its model selection and reads it over HTTP;
+// the mock WebSocket alone leaves currentModel empty, so answer those requests here.
+async function mockDraftHttp(page: Page) {
+  await mockWorkspaceEnvironment(page);
+  const model = "deepseek-v4-flash";
+  const selection = {
+    provider: "custom", current_model: model, model, available_models: [model], models_source: "configured",
+    available_model_options: [{ model, reasoning_effort_levels: ["low", "medium", "high"], default_reasoning_effort: "medium" }],
+    effective_reasoning_effort: "medium", model_selection_mode: "default",
+    default_model_selection: { provider: "custom", model, reasoning_effort: "medium", conversation_id: "", working_directory: "" },
+    available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [],
+    config_version: "e2e-config", config_cwd: "",
+  };
+  await page.route("**/api/llm/draft-selection**", route => route.fulfill({ json: selection }));
+  await page.route("**/api/thread-metadata/sections**", route => route.fulfill({ json: { sections: [] } }));
+}
 
 async function mockRuntime(page: Page) {
   await page.addInitScript(() => {
@@ -41,7 +59,37 @@ async function mockRuntime(page: Page) {
         }, 20);
       }
 
-      send() {}
+      send(data: string) {
+        const parsed = JSON.parse(data);
+        if (parsed.type === "session.sync" || parsed.type === "session.restore") {
+          // The renderer only reports itself connected once the session
+          // handshake is answered; this mirrors the canonical empty-session
+          // snapshot (test/initial-session-sync.ts).
+          const restore = parsed.type === "session.restore";
+          const session = { active_conversation_id: null, active_stream_conversation_ids: [], selected_model: "deepseek-v4-flash", workspace_root: "" };
+          setTimeout(() => {
+            this._receive({
+              type: restore ? "session.restored" : "session.synced",
+              session_id: "e2e-session",
+              synced: true,
+              client_command_id: parsed.client_command_id,
+              active_conversation_id: null,
+              ...(restore ? { conversation: null, messages: [] } : {}),
+              current_model: "deepseek-v4-flash",
+              model: "deepseek-v4-flash",
+              current_seq: 0,
+              last_seq: 0,
+              replayed_events: 0,
+              event_log_gap: false,
+              snapshot_required: false,
+              cursor_reset: false,
+              requested_last_seq: 0,
+              session,
+            });
+          }, 0);
+          return;
+        }
+      }
       close() {
         this.readyState = 3;
       }
@@ -82,6 +130,7 @@ async function mockRuntime(page: Page) {
 }
 
 async function openApp(page: Page) {
+  await mockDraftHttp(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => Boolean((window as any).__mockWs));
   await expect(page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first()).toBeVisible();
@@ -100,7 +149,7 @@ test.describe("Model settings diagnostics", () => {
     page.on("request", (request) => { if (request.url().includes("/api/llm/check")) checks.push(request.url()); });
     await page.keyboard.press("Control+,");
     await expect(page.getByRole("heading", { name: "常规" })).toBeVisible();
-    await page.getByRole("button", { name: "模型", exact: true }).click();
+    await page.evaluate(() => (window as any).__zustandStore.getState().setSettingsTab("provider"));
     await page.getByRole("button", { name: "编辑 DeepSeek" }).click();
     await expect(page.getByRole("textbox", { name: "接口地址" })).toHaveValue("https://api.deepseek.com/v1");
     await expect(page.getByPlaceholder("API 密钥")).toBeVisible();

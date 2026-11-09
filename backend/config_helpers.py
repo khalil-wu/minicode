@@ -38,7 +38,12 @@ if TYPE_CHECKING:
     from backend.config_layers import ConfigLayerStack
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STATE_ROOT = Path(os.environ.get("MINICODE_STATE_ROOT") or PROJECT_ROOT).expanduser().resolve()
+# A source checkout keeps its state beside the repository; an installed wheel
+# must not write below site-packages, so it owns state in ~/.minicode like the
+# desktop and minicode-host entries do.
+_SOURCE_CHECKOUT = (PROJECT_ROOT / "pyproject.toml").is_file() and (PROJECT_ROOT / "backend").is_dir()
+_DEFAULT_STATE_ROOT = PROJECT_ROOT if _SOURCE_CHECKOUT else Path.home() / ".minicode"
+STATE_ROOT = Path(os.environ.get("MINICODE_STATE_ROOT") or _DEFAULT_STATE_ROOT).expanduser().resolve()
 DATA_ROOT = STATE_ROOT / "data"
 SETTINGS_FILE = STATE_ROOT / "settings.json"
 _SETTINGS_WRITE_LOCK = threading.RLock()

@@ -1,0 +1,172 @@
+/* @vitest-environment jsdom */
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import * as Monaco from "monaco-editor/editor/editor.api.js";
+import { TokenizationRegistry } from "monaco-editor/editor/common/languages.js";
+import { TokenMetadata } from "monaco-editor/editor/common/encodedTokenAttributes.js";
+import { StandaloneServices } from "monaco-editor/editor/standalone/browser/standaloneServices.js";
+import { IStandaloneThemeService } from "monaco-editor/editor/standalone/common/standaloneTheme.js";
+import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "./monacoTheme";
+import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
+import { loadCodeTheme } from "../lib/code-themes";
+import { defaultThemePreferences } from "../lib/appearance-themes";
+
+vi.hoisted(() => {
+  Object.defineProperty(document, "queryCommandSupported", { configurable: true, value: () => false });
+  vi.stubGlobal("CSS", { escape: (value: string) => value });
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: () => ({ matches: false, media: "", addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),
+  });
+});
+
+await import("monaco-editor/languages/definitions/cpp/register.js");
+await import("monaco-editor/languages/definitions/javascript/register.js");
+const themeTokens = readFileSync("src.v2/styles/tokens.css", "utf8");
+const applyThemeTokens = (theme: "light" | "dark") => {
+  const [darkTokens, lightTokens] = themeTokens.split('\n[data-theme="light"] {');
+  const source = theme === "light" ? darkTokens + lightTokens : darkTokens;
+  for (const [, name, value] of source.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
+    document.documentElement.style.setProperty(name, value.trim());
+  }
+};
+
+afterEach(() => document.documentElement.removeAttribute("style"));
+
+describe("MiniCode native code syntax", () => {
+  it("uses Source line, gutter and word colors on the shared active theme while preserving editor background and dirty models", async () => {
+    applyThemeTokens("dark");
+    const colors = { surface: "#345678", ink: "#abcdef", accent: "#2468ac" };
+    const model = Monaco.editor.createModel("unsaved diff source", "plaintext", Monaco.Uri.parse("inmemory://diff-palette/model.txt"));
+    const version = model.getVersionId();
+    try {
+      applyAppearanceColors("dark", { light: null, dark: colors }, { light: null, dark: { codeThemeId: "github", ...defaultThemePreferences("dark"),
+        semanticColors: { diffAdded: "#40c977", diffRemoved: "#fa423e", skill: "#ad7bf9" } } });
+      await defineMiniCodeMonacoTheme(Monaco, "dark");
+      Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+      const theme = StandaloneServices.get(IStandaloneThemeService).getColorTheme();
+      expect(theme.getColor("diffEditor.insertedLineBackground")!.toString()).toBe("#1c3129");
+      expect(theme.getColor("diffEditorGutter.insertedLineBackground")!.toString()).toBe("#132017");
+      expect(theme.getColor("diffEditor.insertedTextBackground")!.rgba.a).toBeCloseTo(.2, 2);
+      expect(theme.getColor("editor.background")!.toString()).not.toBe(colors.surface);
+      expect(model.getValue()).toBe("unsaved diff source");
+      expect(model.getVersionId()).toBe(version);
+    } finally { model.dispose(); applyAppearanceColors("dark", emptyAppearanceColors()); }
+  });
+  it("switches actual TextMate providers on the existing dirty model, then restores native providers", async () => {
+    applyThemeTokens("dark");
+    const model = Monaco.editor.createModel('// 注释\nconst message = "hello";', "javascript", Monaco.Uri.parse("inmemory://appearance/textmate.js"));
+    model.applyEdits([{ range: new Monaco.Range(2, 1, 2, 1), text: "// unsaved\n" }]);
+    const source = model.getValue();
+    const version = model.getVersionId();
+    try {
+      await TokenizationRegistry.getOrCreate("javascript");
+      document.documentElement.dataset.codeTheme = "github";
+      const obsolete = defineMiniCodeMonacoTheme(Monaco, "dark");
+      delete document.documentElement.dataset.codeTheme;
+      await defineMiniCodeMonacoTheme(Monaco, "dark");
+      await obsolete;
+      expect(Monaco.editor.tokenize("// native after pending selection", "javascript")[0][0].type).toMatch(/^comment/);
+      for (const [id, expected] of [["github", [139, 148, 158]], ["dracula", [98, 114, 164]]] as const) {
+        const { chromeSeed } = await loadCodeTheme(id, "dark");
+        applyAppearanceColors("dark", { light: null, dark: chromeSeed }, { light: null, dark: { codeThemeId: id, ...defaultThemePreferences("dark"), semanticColors: chromeSeed.semanticColors } });
+        await defineMiniCodeMonacoTheme(Monaco, "dark");
+        Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+        const provider = await TokenizationRegistry.getOrCreate("javascript");
+        const result = provider!.tokenizeEncoded("// 注释", true, provider!.getInitialState());
+        const color = TokenizationRegistry.getColorMap()![TokenMetadata.getForeground(result.tokens[1])].rgba;
+        expect([color.r, color.g, color.b]).toEqual(expected);
+        expect(model.getValue()).toBe(source);
+        expect(model.getVersionId()).toBe(version);
+      }
+      applyAppearanceColors("dark", emptyAppearanceColors());
+      applyThemeTokens("dark");
+      await defineMiniCodeMonacoTheme(Monaco, "dark");
+      Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+      const tokens = Monaco.editor.tokenize("// native again", "javascript")[0];
+      expect(tokens[0].type).toMatch(/^comment/);
+      expect(model.getValue()).toBe(source);
+    } finally { model.dispose(); applyAppearanceColors("dark", emptyAppearanceColors()); }
+  });
+  it.each(["dark", "light"] as const)("renders native C++ and JS comments in green with distinct syntax in %s mode", async (theme) => {
+    applyThemeTokens(theme);
+    expect(getComputedStyle(document.documentElement).getPropertyValue("--editor-foreground").trim()).toBe(theme === "light" ? "#30343b" : "#d4d4d4");
+    defineMiniCodeMonacoTheme(Monaco, theme);
+    Monaco.editor.setTheme(miniCodeMonacoThemeName(theme));
+    for (const [language, code] of [
+      ["cpp", '// 中文注释\nconst char* message = "Hello";\n/* 多行\n * 注释\n */'],
+      ["javascript", '// 中文注释\nconst message = "Hello";\n/* 多行\n * 注释\n */'],
+    ]) {
+      const native = await TokenizationRegistry.getOrCreate(language);
+      const tokens = Monaco.editor.tokenize(code, language).flat().map((token) => token.type);
+      expect(tokens.some((token) => token.startsWith("comment"))).toBe(true);
+      expect(tokens.some((token) => token.startsWith("keyword"))).toBe(true);
+      expect(tokens.some((token) => token.startsWith("string"))).toBe(true);
+      const comment = native!.tokenizeEncoded("// 中文注释", true, native!.getInitialState());
+      expect(TokenMetadata.getTokenType(comment.tokens[1])).toBe(1);
+      const color = TokenizationRegistry.getColorMap()![TokenMetadata.getForeground(comment.tokens[1])].rgba;
+      expect([color.r, color.g, color.b]).toEqual(theme === "light" ? [0, 128, 0] : [106, 153, 85]);
+    }
+  });
+
+  it.each(["dark", "light"] as const)("keeps focused completion text, icons and matches readable on the neutral selection in %s mode", (mode) => {
+    applyThemeTokens(mode);
+    defineMiniCodeMonacoTheme(Monaco, mode);
+    Monaco.editor.setTheme(miniCodeMonacoThemeName(mode));
+    const theme = StandaloneServices.get(IStandaloneThemeService).getColorTheme();
+    const selected = theme.getColor("editorSuggestWidget.selectedBackground")!.rgba;
+    const background = theme.getColor("editorSuggestWidget.background")!.rgba;
+    const luminance = (color: { r: number; g: number; b: number }) => {
+      const [r, g, b] = [color.r, color.g, color.b].map(value => {
+        const channel = value / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    for (const [foregroundId, surface] of [
+      ["editorSuggestWidget.selectedForeground", selected],
+      ["editorSuggestWidget.selectedIconForeground", selected],
+      ["editorSuggestWidget.focusHighlightForeground", selected],
+      ["editorSuggestWidget.highlightForeground", background],
+    ] as const) {
+      const foreground = theme.getColor(foregroundId)!.rgba;
+      expect(foreground.a).toBe(1);
+      const foregroundLight = luminance(foreground);
+      const surfaceLight = luminance(surface);
+      expect((Math.max(foregroundLight, surfaceLight) + 0.05) / (Math.min(foregroundLight, surfaceLight) + 0.05)).toBeGreaterThanOrEqual(4.5);
+      expect(Math.max(foreground.r, foreground.g, foreground.b) - Math.min(foreground.r, foreground.g, foreground.b)).toBeLessThan(16);
+    }
+  });
+
+  it("changes a plain text scratch model to C++ without changing its source", async () => {
+    const source = "// 中文注释\nint answer = 42;";
+    const model = Monaco.editor.createModel(source, "plaintext", Monaco.Uri.parse("inmemory://syntax-verification/example.txt"));
+    try {
+      expect(Monaco.editor.tokenize(source, "plaintext")[0].every((token) => !token.type.startsWith("comment"))).toBe(true);
+      Monaco.editor.setModelLanguage(model, "cpp");
+      await TokenizationRegistry.getOrCreate("cpp");
+      expect(model.getLanguageId()).toBe("cpp");
+      expect(Monaco.editor.tokenize(model.getValue(), "cpp")[0][0].type).toMatch(/^comment/);
+      expect(model.getValue()).toBe(source);
+    } finally {
+      model.dispose();
+    }
+  });
+
+  it("redefines the already active Monaco theme from current chrome colors without changing its model", () => {
+    applyThemeTokens("dark");
+    defineMiniCodeMonacoTheme(Monaco, "dark");
+    Monaco.editor.setTheme(miniCodeMonacoThemeName("dark"));
+    const model = Monaco.editor.createModel("unsaved source", "plaintext", Monaco.Uri.parse("inmemory://appearance/model.txt"));
+    try {
+      applyAppearanceColors("dark", { light: null, dark: { surface: "#101010", ink: "#d0d0d0", accent: "#2468ac" } });
+      defineMiniCodeMonacoTheme(Monaco, "dark");
+      const theme = StandaloneServices.get(IStandaloneThemeService).getColorTheme();
+      const background = theme.getColor("editor.background")!.rgba;
+      expect([background.r, background.g, background.b, background.a]).toEqual([29, 29, 29, 1]);
+      expect(theme.getColor("editor.foreground")!.toString()).toBe("#d0d0d0");
+      expect(model.getValue()).toBe("unsaved source");
+      expect(model.getLanguageId()).toBe("plaintext");
+    } finally { model.dispose(); applyAppearanceColors("dark", emptyAppearanceColors()); }
+  });
+});

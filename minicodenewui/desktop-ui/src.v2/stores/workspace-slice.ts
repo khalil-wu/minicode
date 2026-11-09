@@ -1,0 +1,606 @@
+import type { StateCreator } from "zustand";
+import type { AppStore, PanelKind, PanelSlot, UISlice, WorkspaceSlice } from "./types";
+import { clamp } from "../lib/clamp";
+import { rightPanelMaximumWidth, rightPanelWidthRatio } from "../shell/right-panel-width";
+import { isDesktop, openPath } from "../desktop/runtime";
+import {
+  LS,
+  LEFT_SIDEBAR_DEFAULT_WIDTH,
+  LEFT_SIDEBAR_MAX_WIDTH,
+  LEFT_SIDEBAR_MIN_WIDTH,
+  RIGHT_SIDEBAR_DEFAULT_WIDTH,
+  writeLS,
+  readLS,
+  normalizePanelSlots,
+  defaultPanelSlots,
+  persistPanelSlots,
+  loadInitialLayout,
+  normalizeEditorPath,
+  uniqueMessageId,
+  isCompactWorkbenchViewport,
+} from "./shared-helpers";
+import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../lib/workspace-path";
+import { workspaceRequestPath } from "../protocol/workspace-request-path";
+import { safeJsonParse } from "../lib/safe-parse";
+import { reconcileWorkspaceFileReference, reconcileWorkspaceFileTab } from "../protocol/file-workspace";
+import { draftWindowOwnerId } from "./draft-window-owner";
+import type { WorkspaceFileTab } from "./types";
+import { emptyConversationWorkbenchState } from "./ui-slice";
+
+const normalizeEditorOpenPath = (path: string, workingDirectory = ""): string =>
+  normalizeEditorPath(path, workingDirectory);
+
+const DEFAULT_APP_EXTENSIONS = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"]);
+
+const shouldOpenWithDefaultApp = (path: string): boolean => {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return DEFAULT_APP_EXTENSIONS.has(extension);
+};
+
+const resolveLocalOpenPath = (path: string, workingDirectory: string): string => {
+  const normalized = normalizeWorkspacePath(path);
+  const root = normalizeWorkspacePath(workingDirectory);
+  if (
+    /^[a-zA-Z]:\//.test(normalized)
+    || normalized.startsWith("/")
+    || !root
+  ) {
+    return normalized;
+  }
+  const separator = isWindowsLikeWorkspacePath(root) ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/, "")}${separator}${normalized.replace(/^[\\/]+/, "")}`;
+};
+
+export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice> = (set, get) => {
+  const layout = loadInitialLayout();
+  const filesStorageKey = `minicode.workspaceFiles.${draftWindowOwnerId()}`;
+  const saveFiles = (tabs: WorkspaceFileTab[]) => { writeLS(filesStorageKey, JSON.stringify(tabs)); return tabs; };
+  const storedFileTabs = safeJsonParse<unknown>(readLS(filesStorageKey) ?? "[]", []);
+  return {
+    ...layout,
+    initializeWorkspaceView: (conversationId, fullView) => set(state => state.conversationWorkbenchStates[conversationId] ? state : ({
+      conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
+        [conversationId]: { ...emptyConversationWorkbenchState(), rightPanelExpanded: fullView } },
+    })),
+    workspaceFileTabs: Array.isArray(storedFileTabs) ? storedFileTabs as WorkspaceFileTab[] : [],
+    fileBrowserRoots: {},
+    pendingWorkspaceFileTabId: null,
+    reconcileWorkspaceFileTabs: () => set(state => {
+      const tabs = state.workspaceFileTabs.map(tab => reconcileWorkspaceFileTab(tab, state));
+      return tabs.every((tab, index) => tab === state.workspaceFileTabs[index]) ? state : { workspaceFileTabs: saveFiles(tabs) };
+    }),
+    openWorkspaceFileTab: (owner, path, title, line, options) => {
+      get().reconcileWorkspaceFileTabs();
+      const reference = reconcileWorkspaceFileReference(owner, path, get());
+      owner = reference.owner;
+      path = reference.path;
+      const relativePath = workspaceRequestPath(path, owner.browserRoot).replaceAll("\\", "/");
+      const current = get().workspaceFileTabs.find(tab => tab.owner.scopeId === owner.scopeId
+        && tab.owner.conversationId === owner.conversationId && tab.owner.environmentId === owner.environmentId
+        && workspaceRootsEqual(tab.owner.executionCwd, owner.executionCwd)
+        && workspaceRootsEqual(tab.owner.browserRoot, owner.browserRoot) && tab.path === relativePath);
+      // A single click while browsing reuses the scope's open transient tab in
+      // place: the id is kept, so the right stack switches the viewer's file
+      // instead of mounting a new viewer and tree for every file.
+      const transientHost = !current && options?.transient
+        ? get().workspaceFileTabs.find(tab => tab.open && tab.transient && !tab.pinned && tab.pane === "right"
+          && tab.owner.scopeId === owner.scopeId && tab.owner.environmentId === owner.environmentId)
+        : undefined;
+      const id = current?.id ?? transientHost?.id ?? uniqueMessageId("file");
+      const resolvedTitle = title ?? relativePath.split("/").at(-1)!;
+      const location = line !== undefined ? { line, column: options?.column, endLine: options?.endLine,
+        endColumn: options?.endColumn, locationRequestId: uniqueMessageId("file-location") } : {};
+      const previewMode = options?.isPreview === undefined ? {} : { isPreview: current?.isPreview === false || current?.pinned ? false : options.isPreview };
+      const transientMode = options?.transient === undefined ? {} : { transient: current ? current.transient === true && options.transient : options.transient };
+      set(state => ({ workspaceFileTabs: saveFiles(current
+        ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, open: true, ...location, ...previewMode, ...transientMode } : tab)
+        : transientHost
+          ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, owner, path: relativePath, title: resolvedTitle, open: true,
+            line: undefined, column: undefined, endLine: undefined, endColumn: undefined, locationRequestId: undefined, ...location, ...previewMode, transient: true } : tab)
+          : [...state.workspaceFileTabs, { id, owner, path: relativePath, title: resolvedTitle, open: true, pinned: false, pane: "right", ...location, ...previewMode, ...transientMode }]) }));
+      get().activateWorkspaceFileTab(id);
+      return id;
+    },
+    activateWorkspaceFileTab: id => {
+      get().reconcileWorkspaceFileTabs();
+      const tab = get().workspaceFileTabs.find(tab => tab.id === id)!;
+      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(value => value.id === id ? { ...value, open: true } : value)) }));
+      const layoutConversationId = tab.owner.scopeId.startsWith("conversation:") ? tab.owner.scopeId.slice(13) : tab.owner.conversationId;
+      if (layoutConversationId && layoutConversationId !== get().conversationId) {
+        set({ pendingWorkspaceFileTabId: id });
+        get().requestConversationSwitch(layoutConversationId);
+      } else if (tab.pane === "left") {
+        get().addPanel({ id: `workspace-file:${id}`, kind: "file", fileTabId: id, label: tab.title });
+        get().movePanel(`workspace-file:${id}`, -1);
+      }
+      else get().setRightStackTab(`file:${id}`);
+    },
+    closeWorkspaceFileTab: id => {
+      const tab = get().workspaceFileTabs.find(value => value.id === id)!;
+      const next = get().workspaceFileTabs.find(value => value.id !== id && value.open && value.pane === "left" && value.owner.scopeId === tab.owner.scopeId);
+      const wasFocused = get().panelSlots.some(slot => slot.fileTabId === id && slot.focused);
+      get().removePanel(`workspace-file:${id}`);
+      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.flatMap(tab => tab.id !== id ? [tab] : tab.pinned ? [{ ...tab, open: false }] : [])),
+        ...(state.pendingWorkspaceFileTabId === id ? { pendingWorkspaceFileTabId: null } : {}) }));
+      if (wasFocused && next) get().activateWorkspaceFileTab(next.id);
+    },
+    pinWorkspaceFileTab: (id, pinned) => set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, pinned, ...(pinned ? { isPreview: false, ...(tab.transient ? { transient: false } : {}) } : {}) } : tab)) })),
+    moveWorkspaceFileTab: (id, pane) => {
+      const tab = get().workspaceFileTabs.find(tab => tab.id === id)!;
+      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(value => value.id === id ? { ...value, pane, open: true } : value)) }));
+      if (pane === "left") {
+        get().addPanel({ id: `workspace-file:${id}`, kind: "file", fileTabId: id, label: tab.title });
+        get().movePanel(`workspace-file:${id}`, -1);
+      } else {
+        get().removePanel(`workspace-file:${id}`);
+        get().setRightStackTab(`file:${id}`);
+      }
+    },
+    setFileBrowserRoot: (scopeId, path) => set(state => ({ fileBrowserRoots: { ...state.fileBrowserRoots, [scopeId]: path } })),
+    rightPanelExpanded: false,
+    gitReviewRequest: null,
+    sideChatOpen: false,
+    activeSideChatId: null,
+    sideChatPendingContext: null,
+    terminalSessions: [],
+    terminalSnapshots: {},
+    backgroundTasks: [],
+    browserAnnotations: [],
+    activeTerminalSessionId: null,
+    editorOpenRequests: [],
+    activeEditorOpenRequestId: null,
+    activeEditorPath: null,
+    setLeftSidebarWidth: (w, options) => {
+      const v = w <= 0 ? 0 : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, w);
+      const persist = options?.persist !== false;
+      if (persist) {
+        writeLS(LS.layout.leftWidth, String(v));
+        if (v > 0) writeLS(LS.layout.leftExpandedWidth, String(v));
+      }
+      set({ leftSidebarWidth: v, ...(persist && v > 0 ? { leftSidebarExpandedWidth: v } : {}) });
+    },
+    setRightSidebarWidth: (w, options) => {
+      const mainContentWidth = options?.mainContentWidth ?? window.innerWidth - get().leftSidebarWidth;
+      const v = clamp(320, rightPanelMaximumWidth(mainContentWidth), w);
+      const ratio = rightPanelWidthRatio(v, mainContentWidth);
+      if (options?.persist !== false) {
+        writeLS(LS.layout.rightWidth, String(v));
+        writeLS(LS.layout.rightWidthRatio, String(ratio));
+      }
+      set({ rightSidebarWidth: v, rightSidebarWidthRatio: ratio });
+    },
+    toggleRightPanel: () =>
+      set((s) => {
+        const compact = isCompactWorkbenchViewport();
+        const rightPanelOpen = compact && !s.rightPanelExpanded ? s.compactPanel !== "right" : !s.rightPanelOpen;
+        writeLS(LS.layout.rightOpen, rightPanelOpen ? "1" : "0");
+        return { rightPanelOpen, rightPanelExpanded: false,
+          ...(compact ? { compactPanel: rightPanelOpen ? "right" as const : null } : {}),
+          ...(!rightPanelOpen ? { rightStackTabLocked: true } : {}) };
+      }),
+    setRightPanelExpanded: (expanded) => set({ rightPanelExpanded: expanded }),
+    openGitReview: (request) => {
+      if (get().appMode === "chat") get().setAppMode("code");
+      set((state) => {
+        const panelSlots = state.appMode === "code" && state.panelSlots.some((slot) => slot.maximized)
+          ? state.panelSlots.map((slot) => ({ ...slot, maximized: false }))
+          : state.panelSlots;
+        if (panelSlots !== state.panelSlots) persistPanelSlots(panelSlots);
+        return {
+          gitReviewRequest: { ...request, id: uniqueMessageId("git-review") },
+          settingsOpen: false,
+          skillsMarketplaceOpen: false,
+          panelSlots,
+        };
+      });
+      get().setRightStackTab("diff");
+    },
+    setDockHeight: (h) => {
+      const v = clamp(180, 520, h);
+      writeLS(LS.layout.dockHeight, String(v));
+      set({ dockHeight: v });
+    },
+    toggleDock: () =>
+      set((s) => {
+        const next = !s.dockCollapsed;
+        writeLS(LS.layout.dockCollapsed, next ? "1" : "0");
+        return { dockCollapsed: next };
+      }),
+    openBottomTab: (t) => {
+      writeLS(LS.layout.dockTab, t);
+      writeLS(LS.layout.dockCollapsed, "0");
+      set((state) => {
+        const panelSlots = state.panelSlots.some((slot) => slot.maximized)
+          ? state.panelSlots.map((slot) => ({ ...slot, maximized: false }))
+          : state.panelSlots;
+        if (panelSlots !== state.panelSlots) persistPanelSlots(panelSlots);
+        return {
+          activeBottomTab: t, dockCollapsed: false, rightPanelExpanded: false, panelSlots,
+          appMode: t !== "terminal" && state.appMode === "chat" ? "code" : state.appMode,
+        };
+      });
+    },
+    openTerminal: () => {
+      const state = get();
+      if (state.defaultTerminalLocation === "right") {
+        const maximized = state.appMode === "code" ? state.panelSlots.find(slot => slot.maximized) : undefined;
+        if (maximized) {
+          state.togglePanelMaximized(maximized.id);
+          set({ rightPanelExpanded: false });
+        }
+        if (state.activeBottomTab === "terminal") state.closeBottomDock();
+        state.setRightStackTab("terminal");
+      } else {
+        if (state.rightPanelOpen && state.rightStackTab === "terminal") {
+          writeLS(LS.layout.rightOpen, "0");
+          set({ rightPanelOpen: false, compactPanel: null });
+        }
+        state.openBottomTab("terminal");
+      }
+    },
+    toggleTerminal: () => {
+      const state = get();
+      if (state.defaultTerminalLocation === "right" && state.rightPanelOpen && state.rightStackTab === "terminal"
+        && !(state.appMode === "code" && state.panelSlots.some(slot => slot.maximized))) state.toggleRightPanel();
+      else if (state.defaultTerminalLocation === "bottom" && !state.rightPanelExpanded
+        && !(state.appMode === "code" && state.panelSlots.some(slot => slot.maximized)) && !state.dockCollapsed && state.activeBottomTab === "terminal") state.closeBottomDock();
+      else state.openTerminal();
+    },
+    closeBottomDock: () => {
+      writeLS(LS.layout.dockCollapsed, "1");
+      set({ dockCollapsed: true });
+    },
+    setActiveBottomTab: (t) => {
+      writeLS(LS.layout.dockTab, t);
+      set({ activeBottomTab: t });
+    },
+    addPanel: (slot) => {
+        const canonicalSlot: PanelSlot =
+          slot.kind === "subagent"
+            ? { ...slot, kind: "subagents", label: slot.label ?? "协作" }
+            : slot.kind === "plan"
+              ? { ...slot, kind: "tasks", label: slot.label ?? "上下文" }
+              : slot;
+        const rightStackByKind: Partial<Record<PanelKind, UISlice["rightStackTab"]>> = {
+          preview: "preview",
+          diff: "diff",
+          tasks: "tasks",
+          subagents: "subagents",
+          artifacts: "artifacts",
+          inspector: "inspector",
+        };
+        if (canonicalSlot.kind === "terminal") {
+          get().openBottomTab("terminal");
+          return;
+        }
+        const rightTab = rightStackByKind[canonicalSlot.kind];
+        if (rightTab) {
+          get().setRightStackTab(rightTab);
+          return;
+        }
+      set((s) => {
+        if (s.panelSlots.some((p) => (canonicalSlot.kind === "file" ? p.id === canonicalSlot.id : p.kind === canonicalSlot.kind && canonicalSlot.kind !== "chat"))) {
+          const next = normalizePanelSlots(s.panelSlots.map((p) => p.kind === canonicalSlot.kind
+            && (canonicalSlot.kind !== "file" || p.id === canonicalSlot.id) ? { ...p, ...canonicalSlot, focused: true } : { ...p, focused: false }));
+          persistPanelSlots(next);
+          return { panelSlots: next };
+        }
+        let next: PanelSlot[] = [
+          ...s.panelSlots.map((p) => ({ ...p, focused: false, maximized: false })),
+          { ...canonicalSlot, size: canonicalSlot.size ?? 1, focused: true, maximized: false },
+        ];
+        if (canonicalSlot.kind !== "file" && next.filter(p => p.kind !== "file").length > 2) {
+          const firstNonChat = next.findIndex((p) => p.kind !== "chat" && p.kind !== "file");
+          if (firstNonChat >= 0) next.splice(firstNonChat, 1);
+          else next = next.slice(-2);
+        }
+        next = normalizePanelSlots(next);
+        persistPanelSlots(next);
+        return { panelSlots: next };
+      });
+    },
+    removePanel: (id) =>
+      set((s) => {
+        const next = s.panelSlots.filter((p) => p.id !== id);
+        if (next.length === 0)
+          next.push({ id: "main-chat", kind: "chat", label: "Chat", size: 1, focused: true });
+        const normalized = normalizePanelSlots(next);
+        persistPanelSlots(normalized);
+        return { panelSlots: normalized };
+      }),
+    focusPanel: (id, options) =>
+      set((s) => {
+        const maximized = s.panelSlots.some((panel) => panel.maximized);
+        const next = normalizePanelSlots(s.panelSlots.map((p) => ({
+          ...p,
+          focused: p.id === id,
+          ...(maximized ? { maximized: p.id === id } : {}),
+        })));
+        persistPanelSlots(next);
+        return { panelSlots: next, rightPanelExpanded: options?.preserveRightPanelExpanded ? s.rightPanelExpanded : false };
+      }),
+    movePanel: (id, direction) =>
+      set((s) => {
+        const index = s.panelSlots.findIndex((p) => p.id === id);
+        const target = index + direction;
+        if (index < 0 || target < 0 || target >= s.panelSlots.length) return s;
+        const next = s.panelSlots.slice();
+        const [slot] = next.splice(index, 1);
+        next.splice(target, 0, slot);
+        const normalized = normalizePanelSlots(next);
+        persistPanelSlots(normalized);
+        return { panelSlots: normalized };
+      }),
+    reorderPanels: (fromIndex, toIndex) =>
+      set((s) => {
+        if (
+          fromIndex === toIndex ||
+          fromIndex < 0 ||
+          toIndex < 0 ||
+          fromIndex >= s.panelSlots.length ||
+          toIndex >= s.panelSlots.length
+        ) {
+          return s;
+        }
+        const next = s.panelSlots.slice();
+        const [moved] = next.splice(fromIndex, 1);
+        next.splice(toIndex, 0, moved);
+        const normalized = normalizePanelSlots(next);
+        persistPanelSlots(normalized);
+        return { panelSlots: normalized };
+      }),
+    resizePanel: (id, delta, neighborId) =>
+      set((s) => {
+        const index = s.panelSlots.findIndex((p) => p.id === id);
+        // The visible neighbour may not be the next slot: hidden file slots sit
+        // between them in the full list.
+        const neighborIndex = neighborId ? s.panelSlots.findIndex((p) => p.id === neighborId) : index + 1;
+        if (index < 0 || neighborIndex <= index || neighborIndex >= s.panelSlots.length) return s;
+        const next = s.panelSlots.slice();
+        const current = next[index];
+        const neighbor = next[neighborIndex];
+        const step = delta / 360;
+        const currentSize = Math.max(0.45, (current.size ?? 1) + step);
+        const neighborSize = Math.max(0.45, (neighbor.size ?? 1) - step);
+        next[index] = { ...current, size: currentSize };
+        next[neighborIndex] = { ...neighbor, size: neighborSize };
+        const normalized = normalizePanelSlots(next);
+        persistPanelSlots(normalized);
+        return { panelSlots: normalized };
+      }),
+    togglePanelMaximized: (id) =>
+      set((s) => {
+        const target = s.panelSlots.find((p) => p.id === id);
+        const shouldMaximize = !target?.maximized;
+        const next = normalizePanelSlots(s.panelSlots.map((p) => ({
+          ...p,
+          maximized: p.id === id ? shouldMaximize : false,
+          focused: p.id === id,
+        })));
+        persistPanelSlots(next);
+        return { panelSlots: next };
+      }),
+    resetPanelLayout: () => {
+      const next = normalizePanelSlots(defaultPanelSlots());
+      persistPanelSlots(next);
+      set({
+        panelSlots: next,
+        leftSidebarWidth: LEFT_SIDEBAR_DEFAULT_WIDTH,
+        rightSidebarWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
+        rightSidebarWidthRatio: null,
+        rightPanelOpen: false,
+        rightPanelExpanded: false,
+        dockHeight: 240,
+        dockCollapsed: true,
+        activeBottomTab: "terminal",
+      });
+      writeLS(LS.layout.leftWidth, String(LEFT_SIDEBAR_DEFAULT_WIDTH));
+      localStorage.removeItem(LS.layout.rightWidth);
+      localStorage.removeItem(LS.layout.rightWidthRatio);
+      writeLS(LS.layout.rightOpen, "0");
+      writeLS(LS.layout.dockHeight, "240");
+      writeLS(LS.layout.dockCollapsed, "1");
+      writeLS(LS.layout.dockTab, "terminal");
+    },
+    setTerminalSessions: (sessions) =>
+      set((s) => {
+        const currentConversationId = s.conversationId || "";
+        const ownedSessions = currentConversationId
+          ? sessions.filter((session) => session.conversationId === currentConversationId)
+          : [];
+        const savedActiveTerminalSessionId = currentConversationId
+          ? s.conversationWorkbenchStates?.[currentConversationId]?.activeTerminalSessionId ?? null
+          : null;
+        const activeTerminalSessionId = [s.activeTerminalSessionId, savedActiveTerminalSessionId]
+          .find((sessionId) => sessionId && ownedSessions.some((session) => session.id === sessionId))
+          ?? ownedSessions[0]?.id
+          ?? null;
+        return {
+          terminalSessions: ownedSessions,
+          activeTerminalSessionId,
+        };
+      }),
+    upsertTerminalSession: (session) =>
+      set((s) => {
+        if (!s.conversationId || session.conversationId !== s.conversationId) return s;
+        const exists = s.terminalSessions.some((item) => item.id === session.id);
+        const terminalSessions = exists
+          ? s.terminalSessions.map((item) => (item.id === session.id ? { ...item, ...session } : item))
+          : [...s.terminalSessions, session];
+        return {
+          terminalSessions,
+          activeTerminalSessionId: s.activeTerminalSessionId ?? session.id,
+        };
+      }),
+    upsertTerminalSnapshot: (snapshot) =>
+      set((s) => ({
+        terminalSnapshots: {
+          ...s.terminalSnapshots,
+          [snapshot.id]: snapshot,
+        },
+      })),
+    removeTerminalSession: (id) =>
+      set((s) => {
+        const terminalSessions = s.terminalSessions.filter((session) => session.id !== id);
+        const { [id]: _removed, ...terminalSnapshots } = s.terminalSnapshots;
+        return {
+          terminalSessions,
+          terminalSnapshots,
+          activeTerminalSessionId:
+            s.activeTerminalSessionId === id
+              ? terminalSessions[0]?.id ?? null
+              : s.activeTerminalSessionId,
+        };
+      }),
+    setActiveTerminalSession: (id) => set({ activeTerminalSessionId: id }),
+    openEditorFile: (path, label, target) => {
+      const current = get();
+      if (isDesktop() && shouldOpenWithDefaultApp(path)) {
+        void openPath(resolveLocalOpenPath(path, current.workingDirectory));
+        return;
+      }
+      set((s) => {
+        const normalizedPath = normalizeEditorOpenPath(path, s.workingDirectory);
+        const requestId = uniqueMessageId("open");
+        const editorLabel = label ?? normalizedPath.split(/[/\\]/).pop() ?? normalizedPath;
+        const editorSlot = s.panelSlots.find((p) => p.kind === "editor");
+        const baseSlots = s.panelSlots.filter((p) => p.kind === "chat" || p.kind === "editor" || p.kind === "file");
+        const line = Number.isFinite(target?.line) && Number(target?.line) > 0
+          ? Math.floor(Number(target?.line))
+          : undefined;
+        const column = Number.isFinite(target?.column) && Number(target?.column) > 0
+          ? Math.floor(Number(target?.column))
+          : undefined;
+        const nextSlots = editorSlot
+          ? baseSlots.map((p) => p.kind === "editor" ? { ...p, label: editorLabel } : p)
+          : [
+              ...baseSlots,
+              { id: `editor-${Date.now().toString(36)}`, kind: "editor" as const, label: editorLabel, size: 1 },
+            ];
+        const normalizedSlots = normalizePanelSlots(nextSlots.map((p) => ({ ...p, focused: p.kind === "editor", maximized: false })));
+        persistPanelSlots(normalizedSlots);
+        return {
+          panelSlots: normalizedSlots,
+          editorOpenRequests: [
+            ...s.editorOpenRequests,
+            {
+              id: requestId,
+              path: normalizedPath,
+              preview: target?.preview,
+              ...(target?.exact || /[/\\]/.test(path) ? { exact: true } : {}),
+              ...(line ? { line } : {}),
+              ...(column ? { column } : {}),
+              ...(target?.endLine ? { endLine: target.endLine, endColumn: target.endColumn } : {}),
+            },
+          ],
+          activeEditorOpenRequestId: requestId,
+          activeEditorPath: normalizedPath,
+          appMode: "code",
+          rightPanelExpanded: false,
+        };
+      });
+    },
+    consumeEditorOpenRequest: (id) =>
+      set((s) => ({
+        editorOpenRequests: s.editorOpenRequests.filter((request) => request.id !== id),
+        activeEditorPath: s.activeEditorOpenRequestId === id ? s.activeTabPath : s.activeEditorPath,
+        activeEditorOpenRequestId: s.activeEditorOpenRequestId === id ? null : s.activeEditorOpenRequestId,
+      })),
+    toggleSideChat: () => {
+      const state = get();
+      if (state.sideChatOpen && state.rightPanelOpen && state.rightStackTab === "sidechat") {
+        set({ sideChatOpen: false });
+      } else {
+        state.setRightStackTab("sidechat");
+      }
+    },
+    closeSideChat: () => set({ sideChatOpen: false }),
+    openSideChatWithSelection: (text, source, location) => {
+      if (!text.trim()) return;
+      const context = { text, ...(source ? { source } : {}), workspaceRoot: get().workingDirectory, ...location };
+      set((state) => {
+        const activeThreadId = state.sideChatOpen
+          ? Object.values(state.sideChats).find((thread) => workspaceRootsEqual(thread.workspaceRoot ?? "", context.workspaceRoot))?.id
+          : undefined;
+        if (activeThreadId && state.sideChats[activeThreadId]) {
+          return {
+            sideChatOpen: true,
+            sideChats: {
+              ...state.sideChats,
+              [activeThreadId]: { ...state.sideChats[activeThreadId], selectedContext: context },
+            },
+          };
+        }
+        return { sideChatOpen: true, sideChatPendingContext: context };
+      });
+      get().setRightStackTab("sidechat");
+    },
+    addBackgroundTask: (task) =>
+      set((s) => {
+        const sameOwner = (item: typeof task) => (
+          item.id === task.id && item.conversationId === task.conversationId
+        );
+        const isActiveStatus = (status: typeof task.status) => (
+          status === "running" || status === "stalled"
+        );
+        const existing = s.backgroundTasks.find(sameOwner);
+        const settledStatus = existing && !isActiveStatus(existing.status)
+          ? existing.status
+          : undefined;
+        const nextTasks = [
+          {
+            ...existing,
+            ...task,
+            // Background command ids are one-shot. Replayed start events may
+            // enrich the record but cannot reopen a completed command.
+            status: settledStatus && isActiveStatus(task.status)
+              ? settledStatus
+              : existing?.status === "stalled" && task.status === "running"
+                ? "stalled"
+              : task.status,
+            timestamp: existing?.timestamp ?? task.timestamp,
+          },
+          ...s.backgroundTasks.filter((item) => !sameOwner(item)),
+        ];
+        const retainedSettledIds = new Set(
+          nextTasks
+            .filter((item) => !isActiveStatus(item.status) && !item.cleanupPending)
+            .slice(0, 30)
+            .map((item) => `${item.conversationId}\u0000${item.id}`),
+        );
+        return {
+          backgroundTasks: nextTasks.filter(
+            (item) => isActiveStatus(item.status) || item.cleanupPending
+              || retainedSettledIds.has(`${item.conversationId}\u0000${item.id}`),
+          ),
+        };
+      }),
+    addBrowserAnnotation: (annotation) =>
+      set((s) => ({
+        browserAnnotations: [annotation, ...s.browserAnnotations.filter((item) => item.id !== annotation.id)].slice(0, 80),
+      })),
+    removeBrowserAnnotation: (id) =>
+      set((s) => ({
+        browserAnnotations: s.browserAnnotations.filter((item) => item.id !== id),
+      })),
+    clearBrowserAnnotations: (target) =>
+      set((s) => ({
+        browserAnnotations: target
+          ? s.browserAnnotations.filter((item) =>
+              target.targetId && item.targetId === target.targetId
+                ? false
+                : target.url && item.url === target.url
+                  ? false
+                  : true,
+            )
+          : [],
+      })),
+    prStatus: null,
+    ciChecks: [],
+    setPrStatus: (pr, checks) => set({ prStatus: pr, ciChecks: checks }),
+    scheduledTasks: [],
+    setScheduledTasks: (tasks) => set({ scheduledTasks: tasks }),
+    scheduledTaskRuns: [],
+    setScheduledTaskRuns: (runs) => set({ scheduledTaskRuns: runs }),
+  };
+};

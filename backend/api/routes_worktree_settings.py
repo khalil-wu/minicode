@@ -1,5 +1,5 @@
 """Settings and lifecycle actions for host-local managed worktrees."""
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, ConfigDict
 
 from backend.api import _state
@@ -21,7 +21,11 @@ def get_worktree_settings(response: Response) -> dict:
 @router.put("/api/settings/worktrees")
 def put_worktree_settings(request: WorktreePreferences, response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return {**update_worktree_preferences(request).model_dump(), "default_worktree_root": str(default_worktree_root())}
+    try:
+        preferences = update_worktree_preferences(request)
+    except OSError as error:
+        raise HTTPException(500, f"无法保存 Worktree 偏好：{error}") from error
+    return {**preferences.model_dump(), "default_worktree_root": str(default_worktree_root())}
 
 
 @router.get("/api/settings/worktrees/managed")
@@ -37,4 +41,7 @@ class WorktreeRemovalRequest(BaseModel):
 
 @router.post("/api/settings/worktrees/remove")
 def remove_worktree(request: WorktreeRemovalRequest) -> dict:
-    return remove_managed_worktree(request.path, ws_manager=_state.ws_manager)
+    try:
+        return remove_managed_worktree(request.path, ws_manager=_state.ws_manager)
+    except OSError as error:
+        raise HTTPException(500, f"无法移除 Worktree：{error}") from error

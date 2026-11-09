@@ -1,0 +1,414 @@
+import { useMemo } from "react";
+import { useAppStore } from "../../stores";
+import { getPresentedContentBlocks, getToolCallsFromMessage } from "../../lib/content-blocks";
+import type { CSSProperties } from "react";
+import type { AgentProgressEntry, ChatMessage } from "../../stores/types";
+import { readableToolLabel } from "../toolDisplayName";
+import { isProviderRequestProgress, providerProgressLabel } from "../../lib/provider-progress";
+import { isToolCallAwaitingApproval, isToolCallExecuting, type ToolCallRecord } from "../../lib/tool-call-reducer";
+
+export type TimelinePhase = "context" | "model" | "tool" | "approval" | "subagent" | "cache" | "recovery" | "final";
+
+export type TimelineItem = {
+  id: string;
+  phase: TimelinePhase;
+  label: string;
+  summary?: string;
+  status: "pending" | "pending_approval" | "running" | "completed" | "failed" | "blocked" | "partial" | "timeout" | "cancelled" | "info";
+  startedAt: number;
+  finishedAt?: number;
+  toolName?: string;
+};
+
+export type RunReplayEvent = {
+  kind: "minicode_run_replay_event";
+  schema_version: 1;
+  seq: number;
+  event: string;
+  phase: TimelinePhase;
+  status: TimelineItem["status"];
+  label: string;
+  summary: string;
+  tool_name: string;
+  started_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+};
+
+export type RunReplaySummary = {
+  events: number;
+  phases: TimelinePhase[];
+  coveragePercent: number;
+  failedOrBlocked: number;
+  running: number;
+  pending: number;
+  firstStartedAt: number | null;
+  lastFinishedAt: number | null;
+  spanMs: number | null;
+  outcome: "completed" | "needs_attention" | "running" | "pending" | "empty";
+};
+
+const PHASE_LABELS: Record<TimelinePhase, string> = {
+  context: "上下文",
+  model: "模型",
+  tool: "工具",
+  approval: "审批",
+  subagent: "子智能体",
+  cache: "缓存",
+  recovery: "恢复",
+  final: "最终答复",
+};
+
+const PHASE_ORDER: TimelinePhase[] = ["context", "model", "tool", "approval", "subagent", "cache", "recovery", "final"];
+
+// Tool receipts are immutable snapshots. Streaming creates a new assistant
+// message identity for the live receipt, while every settled historical
+// message keeps its identity. Reuse the derived timeline rows for those
+// settled messages so opening the inspector or receiving a new tool event does
+// not rebuild labels, summaries, and status for the whole transcript.
+const toolTimelineItemsCache = new WeakMap<ChatMessage, TimelineItem[]>();
+const presentedTimelineMessageCache = new WeakMap<ChatMessage, ChatMessage>();
+
+const presentedTimelineMessage = (message: ChatMessage): ChatMessage => {
+  const cached = presentedTimelineMessageCache.get(message);
+  if (cached) return cached;
+  const presented = { ...message, blocks: getPresentedContentBlocks(message) };
+  presentedTimelineMessageCache.set(message, presented);
+  return presented;
+};
+
+const toolTimelineItemsForMessage = (message: ChatMessage): TimelineItem[] => {
+  const cached = toolTimelineItemsCache.get(message);
+  if (cached) return cached;
+  const items = getToolCallsFromMessage(message).map((tc) => ({
+    id: `tool:${message.id}:${tc.id}`,
+    phase: phaseForTool(tc.phase),
+    label: readableToolLabel(tc.status === "running" || tc.status === "pending"
+      ? tc.displayHint || tc.name || "工具"
+      : tc.displaySummary || tc.displayHint || tc.name || "工具"),
+    summary: tc.inputSummary || tc.userSummary || tc.sourceUrl || "",
+    status: normalizeToolStatus(tc),
+    startedAt: tc.startedAt || message.timestamp || Date.now(),
+    finishedAt: tc.finishedAt,
+    toolName: tc.name,
+  } satisfies TimelineItem));
+  toolTimelineItemsCache.set(message, items);
+  return items;
+};
+
+export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
+  const messages = useAppStore((s) => s.messages);
+  const agentProgress = useAppStore((s) => s.agentProgress);
+  const isStreaming = useAppStore((s) => s.isStreaming);
+  // The inspector's live view follows ownership too. Replay/export helpers
+  // continue to use the unchanged raw records and their original timestamps.
+  const allItems = useMemo(() => buildRunTimelineItems(
+    messages.map(presentedTimelineMessage),
+    agentProgress.map(entry => !isStreaming && entry.status === "running"
+      ? { ...entry, status: "partial" } : entry),
+  ), [messages, agentProgress, isStreaming]);
+  const items = limit > 0 && allItems.length > limit ? allItems.slice(-limit) : allItems;
+
+  if (items.length === 0) {
+    return (
+      <div style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)", padding: 12 }}>
+        当前会话暂无运行时间线事件。
+      </div>
+    );
+  }
+
+  const startedAt = Math.min(...items.map((item) => item.startedAt));
+  const finishedAt = Math.max(...items.map((item) => item.finishedAt ?? item.startedAt + 500));
+  const span = Math.max(1, finishedAt - startedAt);
+  const grouped = groupTimelineItems(items);
+
+  return (
+    <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div
+        style={{
+          fontSize: "var(--text-xs)",
+          color: "var(--text-muted)",
+          marginBottom: 6,
+        }}
+      >
+        运行轨迹 · {items.length}{allItems.length > items.length ? ` / ${allItems.length}` : ""} 个事件 ·{" "}
+        跨度 {(span / 1000).toFixed(1)}s
+      </div>
+      {PHASE_ORDER.filter((phase) => grouped[phase]?.length).map((phase) => (
+        <section key={phase} style={{ display: "grid", gap: 6 }}>
+          <div style={phaseHeaderStyle}>
+            <span>{PHASE_LABELS[phase]}</span>
+            <span>{grouped[phase].length}</span>
+          </div>
+          {grouped[phase].map((item) => {
+            const status = statusLabel(item.status);
+            const summary = item.summary || "";
+            const duration = item.finishedAt
+              ? `${((item.finishedAt - item.startedAt) / 1000).toFixed(2)}s`
+              : item.status === "running"
+                ? "进行中"
+                : "";
+            return (
+              <div
+                key={item.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "8px minmax(0, 1fr) auto",
+                  alignItems: "center",
+                  gap: 10,
+                  minHeight: 42,
+                  padding: "8px 10px",
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  background: "var(--surface-base)",
+                  fontSize: "var(--text-xs)",
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: 999,
+                    background: statusColor(item.status),
+                    opacity: item.status === "running" ? 1 : 0.72,
+                  }}
+                />
+                <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                  <span
+                    style={{
+                      fontFamily: "var(--font-ui)",
+                      color: "var(--text-primary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={readableToolLabel(item.toolName || item.label)}
+                  >
+                    {item.label}
+                  </span>
+                  {summary && (
+                    <span
+                      style={{
+                        color: "var(--text-muted)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={summary}
+                    >
+                      {summary}
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "grid", gap: 2, justifyItems: "end", color: "var(--text-muted)" }}>
+                  <div
+                    style={{
+                      color: item.status === "failed" ? "var(--state-danger)" : "var(--text-secondary)",
+                      fontWeight: "var(--fw-semibold)",
+                    }}
+                  >
+                    {status}
+                  </div>
+                  {duration && <span>{duration}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      ))}
+    </div>
+  );
+};
+
+export function buildRunTimelineItems(
+  messages: ChatMessage[],
+  progress: AgentProgressEntry[],
+  options: { includeDebugCache?: boolean } = {},
+): TimelineItem[] {
+  const toolItems = messages.flatMap(toolTimelineItemsForMessage);
+
+  const progressItems = progress
+    .filter((entry) => !isProviderRequestProgress(entry))
+    .filter((entry) => entry.visibility !== "debug" || (options.includeDebugCache === true && entry.phase === "cache"))
+    .map((entry) => ({
+      id: `progress:${entry.id}`,
+      phase: phaseForProgress(entry),
+      label: readableToolLabel(
+        providerProgressLabel(entry)
+          || (entry.id.startsWith("provider:")
+            ? entry.message || entry.label || PHASE_LABELS[phaseForProgress(entry)]
+            : entry.label || entry.message || PHASE_LABELS[phaseForProgress(entry)]),
+      ),
+      summary: entry.id.startsWith("provider:")
+        ? entry.detail || entry.summary
+        : entry.summary || entry.detail,
+      status: entry.status === "info" ? "info" : entry.status,
+      startedAt: entry.timestamp || Date.now(),
+      toolName: entry.toolName,
+    } satisfies TimelineItem));
+
+  return [...progressItems, ...toolItems].sort((a, b) => a.startedAt - b.startedAt);
+}
+
+export function runTimelineExportJsonl(messages: ChatMessage[], progress: AgentProgressEntry[]): string {
+  return buildRunTimelineItems(messages, progress, { includeDebugCache: true })
+    .map((item) => JSON.stringify({
+      kind: "minicode_run_timeline_event",
+      phase: item.phase,
+      status: item.status,
+      label: item.label,
+      summary: item.summary || "",
+      tool_name: item.toolName || "",
+      started_at: item.startedAt,
+      finished_at: item.finishedAt ?? null,
+    }))
+    .join("\n");
+}
+
+export function runTimelineReplayJsonl(messages: ChatMessage[], progress: AgentProgressEntry[]): string {
+  return buildRunReplayEvents(messages, progress)
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+}
+
+export function buildRunReplayEvents(messages: ChatMessage[], progress: AgentProgressEntry[]): RunReplayEvent[] {
+  return buildRunTimelineItems(messages, progress, { includeDebugCache: true }).map((item, index) => ({
+    kind: "minicode_run_replay_event",
+    schema_version: 1,
+    seq: index + 1,
+    event: `${item.phase}.${item.status}`,
+    phase: item.phase,
+    status: item.status,
+    label: item.label,
+    summary: item.summary || "",
+    tool_name: item.toolName || "",
+    started_at: item.startedAt,
+    finished_at: item.finishedAt ?? null,
+    duration_ms: item.finishedAt ? Math.max(0, item.finishedAt - item.startedAt) : null,
+  }));
+}
+
+export function buildRunReplaySummary(events: RunReplayEvent[]): RunReplaySummary {
+  if (events.length === 0) {
+    return {
+      events: 0,
+      phases: [],
+      coveragePercent: 0,
+      failedOrBlocked: 0,
+      running: 0,
+      pending: 0,
+      firstStartedAt: null,
+      lastFinishedAt: null,
+      spanMs: null,
+      outcome: "empty",
+    };
+  }
+  const phases = PHASE_ORDER.filter((phase) => events.some((event) => event.phase === phase));
+  const timed = events.filter((event) => Number.isFinite(event.started_at) && (event.finished_at == null || Number.isFinite(event.finished_at))).length;
+  const failedOrBlocked = events.filter((event) => event.status === "failed" || event.status === "blocked" || event.status === "partial" || event.status === "timeout" || event.status === "cancelled").length;
+  const running = events.filter((event) => event.status === "running").length;
+  const pending = events.filter((event) => event.status === "pending" || event.status === "pending_approval").length;
+  const firstStartedAt = Math.min(...events.map((event) => event.started_at));
+  const finishedValues = events.map((event) => event.finished_at ?? event.started_at).filter((value) => Number.isFinite(value));
+  const lastFinishedAt = finishedValues.length > 0 ? Math.max(...finishedValues) : null;
+  return {
+    events: events.length,
+    phases,
+    coveragePercent: Math.round((timed / events.length) * 100),
+    failedOrBlocked,
+    running,
+    pending,
+    firstStartedAt,
+    lastFinishedAt,
+    spanMs: lastFinishedAt != null ? Math.max(0, lastFinishedAt - firstStartedAt) : null,
+    outcome: running > 0 ? "running" : failedOrBlocked > 0 ? "needs_attention" : pending > 0 ? "pending" : "completed",
+  };
+}
+
+function groupTimelineItems(items: TimelineItem[]): Record<TimelinePhase, TimelineItem[]> {
+  return items.reduce((acc, item) => {
+    acc[item.phase].push(item);
+    return acc;
+  }, {
+    context: [],
+    model: [],
+    tool: [],
+    approval: [],
+    subagent: [],
+    cache: [],
+    recovery: [],
+    final: [],
+  } as Record<TimelinePhase, TimelineItem[]>);
+}
+
+function phaseForProgress(entry: AgentProgressEntry): TimelinePhase {
+  if (entry.phase === "approval" || entry.stage === "approval") return "approval";
+  if (entry.phase === "subagent") return "subagent";
+  if (entry.phase === "cache") return "cache";
+  if (entry.phase === "recover") return "recovery";
+  if (entry.phase === "tool" || entry.stage === "tool") return "tool";
+  if (entry.phase === "final" || entry.stage === "final") return "final";
+  if (entry.phase === "model" || entry.phase === "planning" || entry.stage === "planning") return "model";
+  return "context";
+}
+
+function phaseForTool(value?: string): TimelinePhase {
+  return value && PHASE_ORDER.includes(value as TimelinePhase)
+    ? value as TimelinePhase
+    : "tool";
+}
+
+function normalizeToolStatus(record: ToolCallRecord): TimelineItem["status"] {
+  if (isToolCallAwaitingApproval(record)) return "pending_approval";
+  if (record.status === "pending" || record.status === "running") {
+    return isToolCallExecuting(record) ? "running" : "pending";
+  }
+  return record.status === "success" ? "completed" : record.status;
+}
+
+function statusLabel(status: TimelineItem["status"]): string {
+  switch (status) {
+    case "pending":
+      return "准备中";
+    case "pending_approval":
+      return "等待批准";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "timeout":
+      return "超时";
+    case "blocked":
+      return "已阻止";
+    case "partial":
+      return "部分完成";
+    case "cancelled":
+      return "已取消";
+    case "running":
+      return "运行中";
+    default:
+      return "信息";
+  }
+}
+
+function statusColor(status: TimelineItem["status"]): string {
+  if (status === "completed") return "var(--state-success)";
+  if (status === "failed") return "var(--state-danger)";
+  if (status === "cancelled") return "var(--text-muted)";
+  if (status === "blocked" || status === "partial" || status === "timeout" || status === "pending_approval") return "var(--state-warning)";
+  if (status === "pending") return "var(--text-muted)";
+  if (status === "info") return "var(--text-muted)";
+  return "var(--accent-primary)";
+}
+
+const phaseHeaderStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  color: "var(--text-muted)",
+  fontSize: "var(--text-xs)",
+  fontWeight: "var(--fw-bold)",
+  textTransform: "uppercase",
+  letterSpacing: 0,
+};

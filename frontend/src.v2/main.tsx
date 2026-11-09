@@ -6,6 +6,7 @@ import { startUpdateActivityMirror } from "./desktop/updateActivityMirror";
 import { initializeWindowNavigation } from "./desktop/windowNavigation";
 import "./styles/fonts.css";
 import "./styles/tokens.css";
+import "./styles/tokens-anthropic.css";  // 🎨 Anthropic品牌元素与丝滑动效
 import "./reset.css";
 import "./styles/components.css";     // 🎨 Reusable components
 import "./styles/animations.css";

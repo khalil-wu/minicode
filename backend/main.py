@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from backend.api.status_gzip import StatusGzipMiddleware
 from fastapi.responses import FileResponse, Response
 from backend.api.static_files import WebAssetFiles
 from starlette.websockets import WebSocketState
@@ -364,6 +365,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.add_middleware(StatusGzipMiddleware, minimum_size=4096)
 
 
 # ── Existing sub-routers ──

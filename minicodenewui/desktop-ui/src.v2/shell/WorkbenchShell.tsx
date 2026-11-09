@@ -1,0 +1,384 @@
+import { useI18n, type Translate } from "../i18n";
+import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { RefreshCw, X } from "lucide-react";
+import { getWebSocket } from "../hooks/useWebSocket";
+import { HeaderBar } from "./HeaderBar";
+import { SidebarLeft } from "./SidebarLeft";
+import { NavigationRail } from "./NavigationRail";
+import { SidebarRight } from "./SidebarRight";
+import { BottomDock } from "./BottomDock";
+import { MainSlots } from "./MainSlots";
+import { ChatPane } from "../chat/ChatPane";
+import { useAppStore } from "../stores";
+import { selectPreviewSurface } from "../lib/preview-projection";
+import { isCompactWorkbenchViewport } from "../stores/shared-helpers";
+import { SafeBoundary } from "./ChunkErrorBoundary";
+import { ChatErrorFallback } from "../components/ChatErrorFallback";
+import { isDesktop, runtime } from "../desktop/runtime";
+import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
+import { getConnectionPresentation } from "./connectionPresentation";
+import { toggleAutomationsSidebar, useAutomationsPageState } from "../lib/automations-navigation";
+
+const SkillsMarketplace = lazy(() => import("../overlays/SkillsMarketplace").then((m) => ({ default: m.SkillsMarketplace })));
+const ProjectsPage = lazy(() => import("./ProjectsPage").then((m) => ({ default: m.ProjectsPage })));
+const ScheduledTasksPage = lazy(() => import("../overlays/ScheduledTasksPage").then(module => ({ default: module.ScheduledTasksPage })));
+
+const useCompactWorkbench = () => {
+  const [compact, setCompact] = useState(isCompactWorkbenchViewport);
+  useEffect(() => {
+    const onResize = () => setCompact(isCompactWorkbenchViewport());
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return compact;
+};
+
+const currentConnectionPresentation = (state: {
+  isConnected: boolean;
+  connectionPhase: Parameters<typeof getConnectionPresentation>[0]["connectionPhase"];
+  reconnectAttempt: number;
+  reconnectMaxAttempts: number | null;
+  connectionError: string | null;
+}, tr: Translate) => getConnectionPresentation({
+  isConnected: state.isConnected,
+  isDesktop: isDesktop(),
+  hasRuntimeToken: Boolean(runtime()?.runtimeToken?.trim()),
+  connectionPhase: state.connectionPhase,
+  reconnectAttempt: state.reconnectAttempt,
+  reconnectMaxAttempts: state.reconnectMaxAttempts,
+  connectionError: state.connectionError,
+}, tr);
+
+const ConnectionBanner = () => {
+  const { t: tr } = useI18n();
+  const isConnected = useAppStore((s) => s.isConnected);
+  const connectionPhase = useAppStore((s) => s.connectionPhase);
+  const reconnectAttempt = useAppStore((s) => s.reconnectAttempt);
+  const reconnectMaxAttempts = useAppStore((s) => s.reconnectMaxAttempts);
+  const connectionError = useAppStore((s) => s.connectionError);
+  const connectionState = {
+    isConnected,
+    connectionPhase,
+    reconnectAttempt,
+    reconnectMaxAttempts,
+    connectionError,
+  };
+  const presentation = currentConnectionPresentation(connectionState, tr);
+  const previousAnnouncementRef = useRef(presentation.accessibleLabel);
+  const [announcement, setAnnouncement] = useState(
+    presentation.accessibleLabel,
+  );
+  useEffect(() => {
+    if (previousAnnouncementRef.current === presentation.accessibleLabel) return;
+    previousAnnouncementRef.current = presentation.accessibleLabel;
+    setAnnouncement(presentation.accessibleLabel);
+  }, [presentation.accessibleLabel]);
+  return (
+    <>
+      <span role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement}
+      </span>
+      {!connectionState.isConnected && (
+        <div
+          className="mc-connection-banner"
+          data-kind={presentation.kind}
+        >
+          <span className="mc-connection-banner-dot" aria-hidden="true" />
+          <span>{presentation.bannerMessage}</span>
+          {connectionPhase === "failed" && (
+            <button type="button" className="mc-connection-retry" onClick={() => getWebSocket()?.reconnect()}>
+              <RefreshCw size={13} aria-hidden="true" />
+              {tr("重新连接")}</button>
+          )}
+        </div>
+      )}
+    </>
+  );
+};
+
+const ChatModeShell = () => (
+  <div
+    className="mc-main-surface flex-1 min-h-0 flex flex-col overflow-hidden w-full"
+    style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", width: "100%" }}
+  >
+    <SafeBoundary fallback={<ChatErrorFallback />}>
+      <ChatPane />
+    </SafeBoundary>
+  </div>
+);
+
+const WorkbenchModeShell = ({ mode }: { mode: "cowork" | "code" }) => {
+  const ensureCodeLayout = useAppStore((s) => s.ensureCodeLayout);
+  const workbenchLayout = useAppStore((s) => s.workbenchLayout);
+  useEffect(() => {
+    if (mode === "code") ensureCodeLayout();
+  }, [ensureCodeLayout, mode]);
+  return (
+    <>
+      <div
+        className="flex-1 flex overflow-hidden min-h-0"
+        style={{ flex: 1, display: "flex", overflow: "hidden", minWidth: 0, minHeight: 0 }}
+      >
+        <MainSlots mode={mode === "cowork" ? "tabs" : workbenchLayout} forceChat={mode === "cowork"} />
+      </div>
+    </>
+  );
+};
+
+const NarrowSidebarDrawer = ({
+  children,
+  id,
+  label,
+  onClose,
+  side,
+  modal = true,
+  open = true,
+}: {
+  children: ReactNode;
+  id: string;
+  label: string;
+  onClose: () => void;
+  side: "left" | "right";
+  modal?: boolean;
+  open?: boolean;
+}) => {
+  const { t: tr } = useI18n();
+  const dialogRef = useFocusTrap(modal && open);
+  useEscapeKey(onClose, modal && open, dialogRef);
+  return (
+    <div
+      className={modal && open ? "mc-narrow-drawer-backdrop" : undefined}
+      data-side={side}
+      onMouseDown={modal ? onClose : undefined}
+      style={modal ? {
+        position: "fixed",
+        inset: 0,
+        zIndex: "var(--z-drawer)",
+        display: open ? "flex" : "none",
+        justifyContent: side === "left" ? "flex-start" : "flex-end",
+        background: "var(--backdrop-subtle)",
+        padding: 8,
+      } : { display: open ? "contents" : "none" }}
+    >
+      <div
+        className={modal && open ? "mc-narrow-drawer-surface" : undefined}
+        data-side={side}
+        ref={dialogRef}
+        id={id}
+        role={modal ? "dialog" : undefined}
+        aria-modal={modal ? true : undefined}
+        aria-label={modal ? label : undefined}
+        tabIndex={modal ? -1 : undefined}
+        onMouseDown={(event) => event.stopPropagation()}
+        style={modal ? {
+          width: side === "right" ? "min(480px, calc(100vw - 16px))" : "min(380px, calc(100vw - 16px))",
+          minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          background: "var(--surface-base)",
+          border: "1px solid var(--border-subtle)",
+          borderRadius: "var(--radius-md, 8px)",
+          boxShadow: "var(--shadow-strong, var(--shadow-medium))",
+        } : { display: "contents" }}
+      >
+        {modal && <div
+          style={{
+            minHeight: 40,
+            display: "flex",
+            alignItems: "center",
+            padding: "4px 8px 4px 12px",
+            borderBottom: "1px solid var(--border-subtle)",
+          }}
+        >
+          <strong style={{ flex: 1, fontSize: "var(--text-sm)" }}>{label}</strong>
+          <button
+            type="button"
+            className="btn-ghost mc-icon-button"
+            aria-label={tr("关闭{label}", { label })}
+            title={tr("关闭{label}", { label })}
+            onClick={onClose}
+          >
+            <X size={16} />
+          </button>
+        </div>}
+        <div style={modal ? { flex: 1, minHeight: 0, display: "flex", overflow: "hidden" } : { display: "contents" }}>{children}</div>
+      </div>
+    </div>
+  );
+};
+
+export const WorkbenchShell = memo(function WorkbenchShell() {
+  const { t: tr } = useI18n();
+  const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
+  const [marketplaceVisited, setMarketplaceVisited] = useState(skillsMarketplaceOpen);
+  useEffect(() => {
+    if (skillsMarketplaceOpen) setMarketplaceVisited(true);
+  }, [skillsMarketplaceOpen]);
+  const sideChatOpen = useAppStore((s) => s.sideChatOpen);
+  const appMode = useAppStore((s) => s.appMode);
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const { open: automationsOpen, sidebarOpen: automationsSidebarOpen } = useAutomationsPageState();
+  const [automationsVisited, setAutomationsVisited] = useState(automationsOpen);
+  useEffect(() => { if (automationsOpen) setAutomationsVisited(true); }, [automationsOpen]);
+  const projectsOpen = useAppStore((s) => s.projectsOpen);
+  const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
+  const leftSidebarExpandedWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
+  const panelSlots = useAppStore((s) => s.panelSlots);
+  const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
+  const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
+  const setRightPanelExpanded = useAppStore((s) => s.setRightPanelExpanded);
+  const editorOpenRequestId = useAppStore((s) => s.activeEditorOpenRequestId);
+  const rightStackTab = useAppStore((s) => s.rightStackTab);
+  const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
+  const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
+  const compact = useCompactWorkbench();
+  const compactPanel = useAppStore((s) => s.compactPanel);
+  const setCompactPanel = useAppStore((s) => s.setCompactPanel);
+  const previousRightPanelOpenRef = useRef(rightPanelOpen);
+  const previousRightStackTabRef = useRef(rightStackTab);
+  const previousCompactRef = useRef(false);
+  const activeCodeSlot =
+    panelSlots.find((slot) => slot.focused) ??
+    panelSlots.find((slot) => slot.kind !== "chat") ??
+    panelSlots.find((slot) => slot.kind === "chat");
+  const codePanelMaximized = Boolean(
+    appMode === "code" && activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat",
+  );
+  const leftPanelAvailable = skillsMarketplaceOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
+  const rightPanelAvailable = !automationsOpen && !projectsOpen && !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode !== "code" || !codePanelMaximized);
+  const expandedRight = rightPanelExpanded && rightPanelOpen && rightPanelAvailable;
+  const bottomVisible = !automationsOpen && !codePanelMaximized && !settingsOpen && !projectsOpen && !skillsMarketplaceOpen && !expandedRight;
+
+  useEffect(() => {
+    if (!compact) setCompactPanel(null);
+  }, [compact, setCompactPanel]);
+
+  useEffect(() => {
+    const revealComposer = () => {
+      setCompactPanel(null);
+      setRightPanelExpanded(false);
+    };
+    window.addEventListener("composer:focus", revealComposer);
+    return () => window.removeEventListener("composer:focus", revealComposer);
+  }, [setCompactPanel, setRightPanelExpanded]);
+
+  useEffect(() => {
+    if (editorOpenRequestId && compact) setCompactPanel(null);
+  }, [editorOpenRequestId, compact, setCompactPanel]);
+
+  useEffect(() => {
+    if (compactPanel === "left" && !leftPanelAvailable) setCompactPanel(null);
+    if (compactPanel === "right" && !rightPanelAvailable) setCompactPanel(null);
+  }, [compactPanel, leftPanelAvailable, rightPanelAvailable, setCompactPanel]);
+
+  useEffect(() => {
+    const panelWasOpened = !previousRightPanelOpenRef.current && rightPanelOpen;
+    const panelWasClosed = previousRightPanelOpenRef.current && !rightPanelOpen;
+    const requestedTabChanged = previousRightStackTabRef.current !== rightStackTab;
+    previousRightPanelOpenRef.current = rightPanelOpen;
+    previousRightStackTabRef.current = rightStackTab;
+    if (compact && rightPanelAvailable && (panelWasOpened || requestedTabChanged)) setCompactPanel("right");
+    if (compact && panelWasClosed) setCompactPanel(null);
+  }, [compact, rightPanelAvailable, rightPanelOpen, rightStackTab, setCompactPanel]);
+
+  useEffect(() => {
+    const enteringCompact = compact && !previousCompactRef.current;
+    previousCompactRef.current = compact;
+    if (enteringCompact && rightPanelAvailable && rightPanelOpen && rightStackTab === "preview"
+      && selectPreviewSurface(useAppStore.getState()).previewArtifact) setCompactPanel("right");
+  }, [compact, rightPanelAvailable, rightPanelOpen, rightStackTab, setCompactPanel]);
+
+  const toggleLeftPanel = () => {
+    if (automationsOpen) { toggleAutomationsSidebar(); return; }
+    if (compact) {
+      setCompactPanel(compactPanel === "left" ? null : "left");
+      return;
+    }
+    setLeftSidebarWidth(leftSidebarWidth > 0 ? 0 : leftSidebarExpandedWidth);
+  };
+
+  const toggleWorkbenchRightPanel = () => {
+    if (expandedRight) { toggleRightPanel(); return; }
+    if (compact) {
+      if (compactPanel !== "right" && !rightPanelOpen) toggleRightPanel();
+      setCompactPanel(compactPanel === "right" ? null : "right");
+      return;
+    }
+    toggleRightPanel();
+  };
+
+  return (
+    <div
+      className="mc-desktop-shell"
+      data-app-shell-application-menu-header={isDesktop() ? "true" : undefined}
+      style={{
+        position: "fixed",
+        inset: 0,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--native-shell-background, var(--desktop-shell-background))",
+        color: "var(--text-primary)",
+        fontFamily: "var(--font-ui)",
+        fontSize: "var(--text-md)",
+      }}
+    >
+      <HeaderBar
+        leftPanelControls={compact && !automationsOpen ? "left-sidebar-drawer" : undefined}
+        leftPanelAvailable={!settingsOpen && (automationsOpen || leftPanelAvailable && !projectsOpen)}
+        leftPanelOpen={automationsOpen ? automationsSidebarOpen : compact ? compactPanel === "left" : leftSidebarWidth > 0}
+        rightPanelControls={compact && !expandedRight ? "right-panel-drawer" : undefined}
+        rightPanelAvailable={!settingsOpen && rightPanelAvailable}
+        rightPanelOpen={expandedRight || (compact ? compactPanel === "right" : rightPanelOpen)}
+        onToggleLeftPanel={toggleLeftPanel}
+        onToggleRightPanel={toggleWorkbenchRightPanel}
+      />
+      <ConnectionBanner />
+
+      <div className="mc-desktop-body">
+        <NavigationRail />
+        <div className="workbench-mode-body mc-desktop-workspace" hidden={settingsOpen} style={{ flex: 1, minHeight: 0, display: settingsOpen ? "none" : "flex", overflow: "hidden" }}>
+          <div hidden={automationsOpen} style={{ display: automationsOpen ? "none" : "flex", flex: 1, minWidth: 0, minHeight: 0 }}>
+          <div hidden={projectsOpen} style={{ display: projectsOpen ? "none" : "contents" }}>
+            {!compact && leftPanelAvailable && <SidebarLeft withGlobalRail />}
+          </div>
+          <div className="workbench-stage" style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
+            <div className="workbench-primary" data-floating={expandedRight ? "true" : "false"} hidden={skillsMarketplaceOpen || projectsOpen} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen || projectsOpen ? "none" : "flex", flexDirection: "column", overflow: "hidden" }} onFocusCapture={() => { if (compact) setCompactPanel(null); }}>
+              <div className="workbench-content" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
+                {appMode === "chat" ? <ChatModeShell /> : <WorkbenchModeShell mode={appMode === "code" ? "code" : "cowork"} />}
+              </div>
+              <div hidden={!bottomVisible} style={{ display: bottomVisible ? "contents" : "none" }}>
+                <BottomDock visible={bottomVisible} />
+              </div>
+            </div>
+            {projectsOpen && <Suspense fallback={null}><ProjectsPage /></Suspense>}
+            <div hidden={!skillsMarketplaceOpen || projectsOpen} style={{ display: skillsMarketplaceOpen && !projectsOpen ? "flex" : "none", flex: 1, minWidth: 0 }}>
+              <Suspense fallback={<div role="status" className="skills-empty-state">{tr("正在加载插件与技能…")}</div>}>
+                {(marketplaceVisited || skillsMarketplaceOpen) && <SkillsMarketplace />}
+              </Suspense>
+            </div>
+            <NarrowSidebarDrawer
+              id="right-panel-drawer" label={tr("右侧面板")} side="right"
+              modal={compact && !expandedRight} open={!settingsOpen && rightPanelAvailable && (expandedRight || !compact || compactPanel === "right")}
+              onClose={() => setCompactPanel(null)}
+            >
+              <SidebarRight embedded={compact && !expandedRight} visible={!settingsOpen && rightPanelAvailable && (expandedRight || (compact ? compactPanel === "right" : rightPanelOpen))} />
+            </NarrowSidebarDrawer>
+          </div>
+          </div>
+          <div hidden={!automationsOpen} style={{ display: automationsOpen ? "flex" : "none", flex: 1, minWidth: 0, minHeight: 0 }}>
+            <Suspense fallback={null}>{(automationsVisited || automationsOpen) && <ScheduledTasksPage active={automationsOpen && !settingsOpen} />}</Suspense>
+          </div>
+        </div>
+      </div>
+
+      {compact && !automationsOpen && !projectsOpen && leftPanelAvailable && compactPanel === "left" && (
+        <NarrowSidebarDrawer id="left-sidebar-drawer" label={tr("左侧栏")} side="left" open={!settingsOpen} onClose={() => setCompactPanel(null)}>
+          <SidebarLeft embedded withGlobalRail onNavigate={() => setCompactPanel(null)} />
+        </NarrowSidebarDrawer>
+      )}
+    </div>
+  );
+});

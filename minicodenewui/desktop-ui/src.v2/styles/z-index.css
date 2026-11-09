@@ -1,0 +1,3 @@
+/* Layer aliases with actual DOM consumers. Canonical values live in tokens.css. */
+.header-bar { z-index: var(--z-header); }
+.toast-container { z-index: var(--z-toast); }

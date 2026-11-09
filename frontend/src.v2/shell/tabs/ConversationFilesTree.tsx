@@ -117,7 +117,9 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
     return !state.pendingConversationSwitchId && (!owner.conversationId || state.conversationId === owner.conversationId
       && workspaceRootsEqual(conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot, owner.executionCwd));
   };
-  const openFile = (entry: ConversationBrowserEntry) => useAppStore.getState().openWorkspaceFileTab(owner, entry.path, entry.name.split("/").at(-1));
+  // Single click browses in the scope's transient tab; double click keeps the file as its own tab.
+  const openFile = (entry: ConversationBrowserEntry, keep = false) =>
+    useAppStore.getState().openWorkspaceFileTab(owner, entry.path, entry.name.split("/").at(-1), undefined, { transient: !keep });
   const toggle = (entry: ConversationBrowserEntry) => {
     const opening = !expanded.has(entry.path);
     setExpanded((current) => { const next = new Set(current); opening ? next.add(entry.path) : next.delete(entry.path); return next; });
@@ -161,6 +163,7 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
       <div role="treeitem" tabIndex={connected ? 0 : -1} aria-level={depth + 1} aria-expanded={entry.is_dir ? open : undefined}
         aria-selected={selected === entry.path} aria-disabled={!connected} className="tree-node-hover" data-browser-path={entry.path}
         title={absolutePath(entry)} onClick={() => { if (connected) { setSelected(entry.path); entry.is_dir ? toggle(entry) : openFile(entry); } }}
+        onDoubleClick={() => { if (connected && !entry.is_dir) openFile(entry, true); }}
         onKeyDown={(event) => {
           if (!connected) return;
           if (["Enter", " "].includes(event.key)) { event.preventDefault(); setSelected(entry.path); entry.is_dir ? toggle(entry) : openFile(entry); }

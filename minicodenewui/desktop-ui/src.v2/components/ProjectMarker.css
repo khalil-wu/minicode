@@ -1,0 +1,14 @@
+.mc-project-marker-icon { display: inline-flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; }
+.mc-project-marker-picker { position: fixed; z-index: var(--z-context-menu); width: min(304px, calc(100vw - 40px)); padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); font-family: var(--font-ui); }
+.mc-project-marker-picker button { font: inherit; }
+.mc-project-icon { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; }
+.mc-project-icon:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mc-project-marker-tabs, .mc-project-marker-colors { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.mc-project-marker-tabs button, .mc-project-marker-clear { padding: 6px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
+.mc-project-marker-tabs button[aria-pressed="true"] { background: var(--surface-active); color: var(--text-primary); }
+.mc-project-marker-picker input { box-sizing: border-box; width: 100%; padding: 8px 10px; margin-bottom: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-base); color: inherit; font: inherit; }
+.mc-project-marker-colors button { width: 23px; height: 23px; border: 2px solid transparent; border-radius: 50%; cursor: pointer; }
+.mc-project-marker-colors button[aria-pressed="true"] { outline: 1px solid var(--text-secondary); outline-offset: 2px; }
+.mc-project-marker-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; min-height: 32px; max-height: 224px; overflow: auto; }
+.mc-project-marker-grid button { display: grid; place-items: center; height: 32px; border: 0; border-radius: var(--radius-sm); background: transparent; color: inherit; cursor: pointer; font-size: 20px; }
+.mc-project-marker-grid button:hover, .mc-project-marker-grid button[aria-pressed="true"] { background: var(--surface-hover); }

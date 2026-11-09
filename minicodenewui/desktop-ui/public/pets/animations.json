@@ -1,0 +1,17 @@
+{
+  "columns": 8,
+  "cellWidth": 192,
+  "cellHeight": 208,
+  "idleDurations": [280, 110, 110, 140, 140, 320],
+  "idleHoldMultiplier": 6,
+  "states": {
+    "running-right": [1, 8, 120, 220],
+    "running-left": [2, 8, 120, 220],
+    "waving": [3, 4, 140, 280],
+    "jumping": [4, 5, 140, 280],
+    "failed": [5, 8, 140, 240],
+    "waiting": [6, 6, 150, 260],
+    "running": [7, 6, 120, 220],
+    "review": [8, 6, 150, 280]
+  }
+}

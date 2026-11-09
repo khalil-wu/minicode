@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import itertools
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -335,7 +336,9 @@ def test_ripgrep_enumeration_and_batches_share_transport_and_time_budgets(tmp_pa
 
 
 def test_ripgrep_candidate_deadline_applies_when_all_paths_are_denied(tmp_path: Path, monkeypatch):
-    ticks = iter([1.0, 2.0])
+    # The clock is patched on the shared time module, so anything that runs
+    # after the assertion (fixture teardown included) must still get a value.
+    ticks = itertools.chain([1.0, 2.0], itertools.repeat(2.0))
     monkeypatch.setattr(search_support.time, "monotonic", lambda: next(ticks))
     paths = iter([tmp_path / "first.py", tmp_path / "second.py"])
     batches = search_support._ripgrep_path_batches(["rg"], paths, 1.5, tmp_path, lambda path: False)

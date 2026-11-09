@@ -1,0 +1,1729 @@
+import { Children, isValidElement, memo, useState, useCallback, useEffect, useId, useMemo, useRef, createContext, useContext, useDeferredValue } from "react";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { decodeString } from "micromark-util-decode-string";
+import { formatHex } from "culori";
+import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
+import { codeBlockStyle } from "./code-block-presentation";
+import { CodeBlockContent } from "./CodeBlockContent";
+import CodeThemeHighlighter from "./CodeThemeHighlighter";
+import { useMeasuredMarkdownBlock } from "./useMeasuredMarkdownBlock";
+import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
+import { fileIcon, folderIcon } from "../../lib/file-icons";
+import { useAppStore } from "../../stores";
+import type { Citation } from "../../stores/types";
+import { pushToast } from "../../overlays/ToastContainer";
+import { isPreviewableHttpUrl } from "../openWebInBrowser";
+import { openWebInBrowser } from "../openWebInBrowser";
+import { openWebTarget } from "../openWebTarget";
+import { openArtifactPreview, openLocalFilePreview, openWorkspaceFileLink, openWorkspaceFilePreview } from "../openAttachmentPreview";
+import { artifactIdFromReference, artifactResourceUrl } from "../../lib/artifact-resource";
+import { getWebSocket } from "../../hooks/useWebSocket";
+import { removeCitationMarkers } from "./citationText";
+import { BrandIcon } from "../../components/BrandIcon";
+import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
+import { workspaceRequestOwner } from "../../protocol/workspace-owner";
+import { workspaceRequestPath } from "../../protocol/workspace-request-path";
+import { conversationBrowserRawUrl } from "../../protocol/conversation-browser";
+import { workspaceFileAbsolutePath } from "../../protocol/file-workspace";
+import type { WorkspaceFileOwner } from "../../stores/types";
+import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
+import { useContextMenu } from "../../components/useContextMenu";
+import { copyText } from "../../lib/clipboard";
+import { isPreviewableMediaPath } from "../../lib/media-types";
+import { editorPathsEqual } from "../../stores/shared-helpers";
+import { openPreferredFile, openPreferredWebLink } from "../../lib/open-preferred-target";
+import { useI18n } from "../../i18n";
+import { withoutCodeCommentDirectives } from "../../lib/code-comment";
+import {
+  isWindowsLikeWorkspacePath,
+  normalizeWorkspacePath,
+  workspacePathWithin,
+  workspacePathsEqual,
+  workspaceFilePathComparisonKey,
+} from "../../lib/workspace-path";
+import {
+  createMarkdownHeadingIdAssigner,
+  decodeMarkdownFragment,
+  markdownHeadingSlug,
+} from "../../lib/markdown";
+
+interface Props {
+  content: string;
+  isStreaming?: boolean;
+  citations?: Citation[];
+  workspaceRoot?: string;
+  /** Directory of the rendered document; relative links resolve against it. */
+  documentDirectory?: string;
+  fileOwner?: WorkspaceFileOwner;
+  conversationId?: string;
+  knownFilePaths?: string[];
+  openFileLinksInSidePanel?: boolean;
+}
+
+type MarkdownNode = {
+  type?: string;
+  value?: string;
+  url?: string;
+  children?: MarkdownNode[];
+  position?: { start: { offset?: number }; end: { offset?: number } };
+};
+
+type ResolvedTheme = "light" | "dark";
+type MarkdownComponents = NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>;
+type MarkdownRemarkPlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
+type MarkdownRehypePlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
+type MarkdownNodePosition = { position?: { start: { line: number }; end: { line: number } } };
+type MarkdownCodeProps = React.HTMLAttributes<HTMLElement> & {
+  node?: MarkdownNodePosition;
+};
+type MarkdownElementProps<T> = T & { node?: unknown };
+type MarkdownPositionedProps<T> = T & { node?: MarkdownNodePosition };
+type EditorTarget = { path: string; line?: number; column?: number };
+type FileTarget = { path: string };
+type FolderTarget = { path: string };
+
+const fallbackStrongPattern = /\*\*([^*\r\n]+?)\*\*/g;
+
+const splitFallbackStrongText = (value: string, source: string): MarkdownNode[] | null => {
+  fallbackStrongPattern.lastIndex = 0;
+  const parts: MarkdownNode[] = [];
+  let lastIndex = 0;
+  let sourceIndex = 0;
+  let match: RegExpExecArray | null;
+
+  const isEscaped = (offset: number): boolean => {
+    let backslashes = 0;
+    while (offset > 0 && source[--offset] === "\\") backslashes += 1;
+    return backslashes % 2 === 1;
+  };
+  const decodedLength = (text: string): number => decodeString(text).length;
+
+  // Match literal delimiters in the source, then map only their ranges through
+  // the Markdown parser's escape/entity decoder into the accepted text node.
+  while ((match = fallbackStrongPattern.exec(source)) !== null) {
+    const sourceEnd = match.index + match[0].length;
+    if (isEscaped(match.index) || isEscaped(sourceEnd - 2)) continue;
+    const start = lastIndex + decodedLength(source.slice(sourceIndex, match.index));
+    const end = start + decodedLength(match[0]);
+    if (start > lastIndex) {
+      parts.push({ type: "text", value: value.slice(lastIndex, start) });
+    }
+    parts.push({
+      type: "strong",
+      children: [{ type: "text", value: value.slice(start + 2, end - 2) }],
+    });
+    lastIndex = end;
+    sourceIndex = sourceEnd;
+  }
+
+  if (parts.length === 0) return null;
+  if (lastIndex < value.length) {
+    parts.push({ type: "text", value: value.slice(lastIndex) });
+  }
+  return parts;
+};
+
+const normalizeFallbackStrongMarkers = () => (tree: MarkdownNode, file: { toString(): string }) => {
+  const source = file.toString();
+  const visit = (node: MarkdownNode): void => {
+    const children = node.children;
+    if (!children) return;
+
+    const nextChildren: MarkdownNode[] = [];
+    for (const child of children) {
+      if (child.type === "text" && child.value?.includes("**")) {
+        const split = splitFallbackStrongText(child.value,
+          source.slice(child.position!.start.offset!, child.position!.end.offset!));
+        if (split) {
+          nextChildren.push(...split);
+          continue;
+        }
+      }
+      visit(child);
+      nextChildren.push(child);
+    }
+    node.children = nextChildren;
+  };
+
+  visit(tree);
+};
+
+const CODE_FILE_EXTENSIONS = [
+  "astro",
+  "bash",
+  "c",
+  "cc",
+  "cjs",
+  "cpp",
+  "cs",
+  "css",
+  "go",
+  "h",
+  "hpp",
+  "htm",
+  "html",
+  "java",
+  "js",
+  "jsx",
+  "json",
+  "kt",
+  "md",
+  "mdx",
+  "mjs",
+  "php",
+  "ps1",
+  "py",
+  "rb",
+  "rs",
+  "scss",
+  "sh",
+  "sql",
+  "svelte",
+  "toml",
+  "ts",
+  "tsx",
+  "vue",
+  "xml",
+  "yaml",
+  "yml",
+].join("|");
+
+const GENERIC_FILE_EXTENSIONS = [
+  "7z", "avif", "bmp", "csv", "doc", "docx", "gif", "gz", "ico", "jpeg", "jpg",
+  "mov", "mp3", "mp4", "odt", "pdf", "png", "ppt", "pptx", "svg", "tar", "tif", "tiff",
+  "conf", "ini", "jsonl", "log", "ndjson", "rst", "txt", "tsv", "wav", "webm", "webp",
+  "xls", "xlsx", "zip",
+].join("|");
+const anyFilePathPattern = new RegExp(String.raw`\.(?:${CODE_FILE_EXTENSIONS}|${GENERIC_FILE_EXTENSIONS})$`, "i");
+const externalDeliverablePathPattern = /\.(?:7z|aac|avif|bmp|csv|doc|docx|epub|flac|gif|ico|jpe?g|json|m4a|md|mov|mp3|mp4|odp|ods|odt|ogg|pdf|png|ppt|pptx|rtf|tar|tiff?|tsv|txt|wav|webm|webp|xls|xlsx|xml|ya?ml|zip)$/i;
+const fileLocationSuffix = String.raw`(?::\d+(?::\d+|[-–—]\d+)?|#L\d+(?:[-–—]L?\d+)?)`;
+const fileLineFragmentPattern = /^#L\d+(?:[-–—]L?\d+)?$/i;
+const fileLocationLabelPattern = new RegExp(String.raw`^(.+\.[^:\s#]+)(${fileLocationSuffix})$`, "i");
+
+const bareFileRefPattern = new RegExp(
+  String.raw`(^|[\s([{'",;!?，。；：、！？“”‘’（])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+\.(?:${CODE_FILE_EXTENSIONS}|${GENERIC_FILE_EXTENSIONS}))(${fileLocationSuffix})?(?=$|[\s.,，。;；:：、)）\]}!?！？“”‘’])`,
+  "gi",
+);
+
+const editorLinkUrl = (path: string, line: string, column?: string): string => {
+  const params = new URLSearchParams({ path, line });
+  if (column) params.set("column", column);
+  return `minicode-file-ref:${params.toString()}`;
+};
+
+const editorTargetPattern = new RegExp(String.raw`^(.+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+)|[-–—]\d+)?|#L(\d+)(?:[-–—]L?\d+)?)?$`, "i");
+
+const normalizeSlashes = (value: string): string => value.replace(/\\/g, "/").replace(/\/+/g, "/");
+
+const isWorkspaceRelativeEditorPath = (path: string): boolean => {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed.includes("\0")) return false;
+  if (trimmed.includes("://") || trimmed.includes(":")) return false;
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || trimmed.startsWith("~")) return false;
+  if (/^[A-Za-z]:[/\\]/.test(trimmed) || /^file:/i.test(trimmed)) return false;
+  return !trimmed.split(/[\\/]+/).some((part) => part === "..");
+};
+
+// Inside a rendered document, parent segments are legal; the workspace root
+// still bounds the resolved path.
+const isDocumentRelativePath = (path: string): boolean => isWorkspaceRelativeEditorPath(path.split("..").join("parent"));
+
+const stripFileRefDecorations = (value: string, preserveLineTarget = false): string => {
+  const clean = value.trim().replace(/[.,，。;；)）\]}]+$/, "");
+  const path = clean.split(/[?#]/, 1)[0];
+  const fragment = clean.match(/#.*$/)?.[0] ?? "";
+  return preserveLineTarget && fileLineFragmentPattern.test(fragment) ? `${path}${fragment}` : path;
+};
+
+const parseEditorPathTarget = (value: string): { path: string; line?: number; column?: number } | null => {
+  const clean = stripFileRefDecorations(value, true);
+  const match = editorTargetPattern.exec(clean);
+  if (!match) return null;
+  return {
+    path: match[1],
+    line: parsePositiveInt(match[2] ?? match[4]),
+    column: parsePositiveInt(match[3]),
+  };
+};
+
+const isCodeFilePath = (path: string): boolean => parseEditorPathTarget(path) !== null;
+
+const splitBareFileRefs = (value: string, scope: MessageResourceScope): MarkdownNode[] | null => {
+  bareFileRefPattern.lastIndex = 0;
+  const parts: MarkdownNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = bareFileRefPattern.exec(value)) !== null) {
+    const prefix = match[1] ?? "";
+    const path = match[2] ?? "";
+    const fullRef = `${path}${match[3] ?? ""}`;
+    const refStart = match.index + prefix.length;
+    if (!isWorkspaceRelativeEditorPath(path) && !/^[A-Za-z]:[/\\]/.test(path)) continue;
+    const parsedTarget: EditorTarget = parseEditorPathTarget(fullRef) ?? { path };
+    const knownTarget = knownFileTarget(parsedTarget, scope, true);
+    if (!knownTarget) continue;
+    if (refStart > lastIndex) {
+      parts.push({ type: "text", value: value.slice(lastIndex, refStart) });
+    }
+    parts.push({
+      type: "link",
+      url: knownTarget.line ? editorLinkUrl(knownTarget.path, String(knownTarget.line), knownTarget.column?.toString()) : knownTarget.path,
+      children: [{ type: "text", value: fullRef }],
+    });
+    lastIndex = refStart + fullRef.length;
+  }
+
+  if (parts.length === 0) return null;
+  if (lastIndex < value.length) parts.push({ type: "text", value: value.slice(lastIndex) });
+  return parts;
+};
+
+const linkifyBareFileReferences = (scope: MessageResourceScope) => (tree: MarkdownNode) => {
+  const visit = (node: MarkdownNode): void => {
+    const children = node.children;
+    if (!children || node.type === "link" || node.type === "code" || node.type === "inlineCode") return;
+
+    const nextChildren: MarkdownNode[] = [];
+    for (const child of children) {
+      if (child.type === "text" && child.value) {
+        const split = splitBareFileRefs(child.value, scope);
+        if (split) {
+          nextChildren.push(...split);
+          continue;
+        }
+      }
+      visit(child);
+      nextChildren.push(child);
+    }
+    node.children = nextChildren;
+  };
+
+  visit(tree);
+};
+
+const windowsAbsolutePathPattern = /^[A-Za-z]:(?:[\\/]|%5[cC])/;
+
+const isExplicitLocalImageUrl = (url: string): boolean => (
+  url.startsWith("file://")
+  || windowsAbsolutePathPattern.test(url)
+  || url.startsWith("/")
+);
+
+const isLocalImageUrl = (url: string): boolean => (
+  isExplicitLocalImageUrl(url)
+  || isWorkspaceRelativeEditorPath(url)
+);
+
+const isInlineImageDataUrl = (url: string): boolean =>
+  /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[a-z0-9+/=\s]+$/i.test(url.trim());
+
+const isSafeSvgReference = (value: string): boolean => {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith("#")) return true;
+  try {
+    const parsed = new URL(trimmed, window.location.href);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+const isSafeMermaidCss = (css: string): boolean => {
+  if (!css.trim()) return false;
+  if (/@import|@font-face|expression\s*\(|javascript:|behavior\s*:|-moz-binding/i.test(css)) {
+    return false;
+  }
+  const withoutFragmentUrls = css.replace(/url\(\s*(['"]?)#[^)]+\1\s*\)/gi, "");
+  return !/url\s*\(/i.test(withoutFragmentUrls);
+};
+
+const sanitizeMermaidSvg = (rawSvg: string): string => {
+  if (!rawSvg.trim().startsWith("<svg")) return "";
+  try {
+    const doc = new DOMParser().parseFromString(rawSvg, "image/svg+xml");
+    if (doc.querySelector("parsererror")) return "";
+    doc.querySelectorAll("script, foreignObject, iframe, object, embed, link, meta").forEach((node) => {
+      node.remove();
+    });
+    doc.querySelectorAll("style").forEach((node) => {
+      if (!isSafeMermaidCss(node.textContent || "")) node.remove();
+    });
+    doc.querySelectorAll("*").forEach((node) => {
+      for (const attr of Array.from(node.attributes)) {
+        const name = attr.name.toLowerCase();
+        const value = attr.value || "";
+        if (name.startsWith("on") || name === "style") {
+          node.removeAttribute(attr.name);
+          continue;
+        }
+        if ((name === "href" || name === "xlink:href") && !isSafeSvgReference(value)) {
+          node.removeAttribute(attr.name);
+        }
+      }
+    });
+    const viewBox = doc.documentElement.getAttribute("viewBox");
+    if (viewBox) {
+      const [, , width, height] = viewBox.trim().split(/[\s,]+/);
+      doc.documentElement.setAttribute("width", width);
+      doc.documentElement.setAttribute("height", height);
+    }
+    return new XMLSerializer().serializeToString(doc.documentElement);
+  } catch {
+    return "";
+  }
+};
+
+/**
+ * Normalize model-authored math before remark-math sees it.
+ *
+ * Models commonly emit display math as `$$formula$$` on one line, or split a
+ * formula over lines with the closing `$$` after prose. That is valid intent
+ * but not valid micromark block-math syntax: remark-math then treats the first
+ * delimiter as an opener and consumes the rest of the answer as one broken
+ * formula. Pair the delimiters here and put them on their own lines. Unpaired
+ * delimiters are escaped while a stream is incomplete, so the visible answer
+ * remains text until the pair arrives.
+ */
+const normalizeDollarMathSegment = (segment: string): string => {
+  let output = "";
+  let cursor = 0;
+
+  while (cursor < segment.length) {
+    const open = segment.indexOf("$$", cursor);
+    if (open < 0) {
+      output += segment.slice(cursor);
+      break;
+    }
+
+    output += segment.slice(cursor, open);
+    const close = segment.indexOf("$$", open + 2);
+    if (close < 0) {
+      // Keep an incomplete stream parseable. The next delta will replace this
+      // escaped marker with a real paired block once its closing delimiter is
+      // present.
+      output += "\\$\\$";
+      output += segment.slice(open + 2);
+      break;
+    }
+
+    const body = segment.slice(open + 2, close).trim();
+    if (!body) {
+      output += "$$$$";
+    } else {
+      output += `\n\n$$\n${body}\n$$\n\n`;
+    }
+    cursor = close + 2;
+  }
+
+  return output;
+};
+
+const normalizeLatexDelimiters = (value: string): string => {
+  return normalizeDollarMathSegment(value)
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => {
+      const trimmed = body.trim();
+      return trimmed ? `\n\n$$\n${trimmed}\n$$\n\n` : "";
+    })
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
+      const trimmed = body.trim();
+      return trimmed ? `$${trimmed}$` : "";
+    });
+};
+
+const CopyButton = ({ text }: { text: string }) => {
+  const { t } = useI18n();
+  const [copiedSource, setCopiedSource] = useState<{ text: string } | null>(null);
+  const copied = copiedSource?.text === text;
+  useEffect(() => {
+    if (!copiedSource) return;
+    const timer = window.setTimeout(() => setCopiedSource(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copiedSource]);
+  const handleCopy = useCallback(async () => {
+    if (await copyText(text, t("代码"))) setCopiedSource({ text });
+  }, [text, t]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      style={{
+        color: copied ? "var(--state-success)" : "var(--text-muted)",
+        right: 6,
+      }}
+      className="code-action-btn absolute top-1.5 bg-[var(--surface-raised)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] px-2 py-0.5 cursor-pointer text-[var(--text-xs)] opacity-0 transition-[opacity,color] duration-150 z-[1]"
+    >
+      {t(copied ? "已复制" : "复制")}
+    </button>
+  );
+};
+
+const InsertButton = ({ text }: { text: string }) => {
+  const { t } = useI18n();
+  const appMode = useAppStore((s) => s.appMode);
+  const activeTabPath = useAppStore((s) => s.activeTabPath);
+  const editableTab = useAppStore((s) => s.editorTabs.some((tab) => editorPathsEqual(tab.path, s.activeTabPath, s.workingDirectory)
+    && !tab.loading && !tab.error && !tab.largeFile && !tab.readOnly && !isPreviewableMediaPath(tab.path)));
+  const [insertedSource, setInsertedSource] = useState<{ text: string; path: string | null } | null>(null);
+  const inserted = insertedSource?.text === text && insertedSource.path === activeTabPath;
+  const canInsert = appMode === "code" && editableTab;
+  useEffect(() => {
+    if (!insertedSource) return;
+    const timer = window.setTimeout(() => setInsertedSource(null), 1400);
+    return () => window.clearTimeout(timer);
+  }, [insertedSource]);
+
+  const handleInsert = useCallback(() => {
+    if (!canInsert) return;
+    const event = new CustomEvent("editor:insert-text", { detail: { text, handled: false } });
+    window.dispatchEvent(event);
+    if (!event.detail.handled) {
+      pushToast(t("编辑器尚未就绪，请稍后重试。"), "warning", 1800);
+      return;
+    }
+    setInsertedSource({ text, path: activeTabPath });
+    pushToast(t("已插入 {path}", { path: activeTabPath || "" }), "success", 1200);
+  }, [activeTabPath, canInsert, text, t]);
+
+  if (!canInsert) return null;
+  return (
+    <button
+      type="button"
+      onClick={handleInsert}
+      style={{
+        color: inserted ? "var(--state-success)" : "var(--text-muted)",
+        right: 58,
+      }}
+      className="code-action-btn absolute top-1.5 bg-[var(--surface-raised)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] px-2 py-0.5 cursor-pointer text-[var(--text-xs)] opacity-0 transition-[opacity,color] duration-150 z-[1]"
+      title={t("插入到 {path}", { path: activeTabPath || "" })}
+    >
+      {t(inserted ? "已插入" : "插入")}
+    </button>
+  );
+};
+
+const PlainCodeBlock = ({ text }: { text: string }) => {
+  return (
+    <pre
+      style={codeBlockStyle}
+      className="overflow-x-auto"
+      data-markdown-copy="code-block"
+      data-markdown-copy-text={text}
+    >
+      <code><CodeBlockContent text={text} /></code>
+    </pre>
+  );
+};
+
+const MeasuredMarkdownBlock = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => {
+  const ref = useMeasuredMarkdownBlock<HTMLDivElement>();
+  return <div {...props} ref={ref} className={`md-measured-block ${className}`} />;
+};
+
+const CodeBlockFrame = ({ text, language, children }: { text: string; language?: string; children: React.ReactNode }) => (
+  <MeasuredMarkdownBlock className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
+    {language && <div className="code-block-header flex justify-between items-center px-3 py-1 bg-[var(--surface-active)]">
+      <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">{language}</span>
+    </div>}
+    <InsertButton text={text} />
+    <CopyButton text={text} />
+    {children}
+  </MeasuredMarkdownBlock>
+);
+
+const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: ResolvedTheme }) => {
+  const { t } = useI18n();
+  const reactId = useId();
+  const renderId = useMemo(
+    () => `md-mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`,
+    [reactId],
+  );
+  const [svg, setSvg] = useState<string>("");
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setSvg("");
+    setError("");
+
+    import("mermaid")
+      .then(async (module) => {
+        const mermaid = module.default;
+      const rootStyle = getComputedStyle(document.documentElement);
+      // Mermaid's color parser does not accept the OKLCH tokens used by the UI.
+      const tokenColor = (name: string, fallbackLight: string, fallbackDark: string) =>
+        formatHex(rootStyle.getPropertyValue(name).trim()
+          || (resolvedTheme === "light" ? fallbackLight : fallbackDark));
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        htmlLabels: false,
+        fontFamily: getComputedStyle(document.body).fontFamily,
+        theme: resolvedTheme === "light" ? "default" : "dark",
+        flowchart: { htmlLabels: false },
+        themeVariables: {
+          fontFamily: getComputedStyle(document.body).fontFamily,
+          textColor: tokenColor("--text-primary", "#111827", "#f3f4f6"),
+          primaryTextColor: tokenColor("--text-primary", "#111827", "#f3f4f6"),
+          lineColor: tokenColor("--text-secondary", "#4b5563", "#d1d5db"),
+        },
+      });
+        const rendered = await mermaid.render(renderId, chart);
+        const safeSvg = sanitizeMermaidSvg(rendered.svg);
+        if (!cancelled) {
+          if (safeSvg) setSvg(safeSvg);
+          else setError(t("无法安全呈现 Mermaid 图表。"));
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : t("无法呈现 Mermaid 图表。"));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [chart, renderId, resolvedTheme, t]);
+
+  if (error) {
+    return (
+      <div className="space-y-2">
+        <div className="text-[var(--text-xs)] text-[var(--state-warning)] px-3 py-2 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
+          {t("Mermaid 呈现失败，已显示源代码。")}
+        </div>
+        <PlainCodeBlock text={chart} />
+      </div>
+    );
+  }
+
+  if (!svg) {
+    return <PlainCodeBlock text={chart} />;
+  }
+
+  return (
+    <div
+      className="md-mermaid"
+      data-testid="md-mermaid"
+      role="region"
+      aria-label={t("Mermaid 图表，可上下和左右滚动")}
+      tabIndex={0}
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+};
+
+// Hoisted component overrides: stable reference, no re-creation per render.
+const useResolvedTheme = () => {
+  return useAppStore((s) => s.resolvedTheme);
+};
+
+const parsePositiveInt = (value: string | null | undefined): number | undefined => {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+const isLoopbackHttpUrl = (url: URL): boolean =>
+  url.protocol === "http:" || url.protocol === "https:"
+    ? /^(?:127\.0\.0\.1|localhost|\[::1\])$/i.test(url.hostname)
+    : false;
+
+const isLocalFrontendUrl = (url: URL): boolean =>
+  isLoopbackHttpUrl(url)
+  && /^(?:127\.0\.0\.1|localhost|\[::1\])$/i.test(window.location.hostname)
+  && url.protocol === window.location.protocol
+  && url.port === window.location.port;
+
+const textFromReactNode = (children: React.ReactNode): string => {
+  const pieces: string[] = [];
+  const visit = (node: React.ReactNode): void => {
+    Children.forEach(node, (child) => {
+      if (typeof child === "string" || typeof child === "number") {
+        pieces.push(String(child));
+        return;
+      }
+      if (isValidElement<{ children?: React.ReactNode }>(child)) {
+        visit(child.props.children);
+      }
+    });
+  };
+  visit(children);
+  return pieces.join("").trim();
+};
+
+const normalizePathLexically = (value: string): string => {
+  const normalized = normalizeWorkspacePath(value);
+  const driveMatch = /^([A-Za-z]:)(?:\/(.*))?$/.exec(normalized);
+  const prefix = driveMatch
+    ? `${driveMatch[1]}/`
+    : normalized.startsWith("//")
+      ? "//"
+      : normalized.startsWith("/")
+        ? "/"
+        : "";
+  const body = driveMatch
+    ? driveMatch[2] ?? ""
+    : normalized.slice(prefix.length);
+  const segments: string[] = [];
+  for (const segment of body.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length > 0 && segments[segments.length - 1] !== "..") {
+        segments.pop();
+      } else if (!prefix) {
+        segments.push(segment);
+      }
+      continue;
+    }
+    segments.push(segment);
+  }
+  return `${prefix}${segments.join("/")}`.replace(/\/+$/, "") || prefix;
+};
+
+const pathWithinWorkspace = (path: string, workspaceRoot: string): boolean => {
+  const root = normalizePathLexically(workspaceRoot);
+  const target = normalizePathLexically(path);
+  return workspacePathWithin(target, root);
+};
+
+const absoluteWorkspacePath = (path: string, workspaceRoot: string): string | null => {
+  const normalized = normalizeSlashes(path).replace(/^\.\/+/, "");
+  if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith("/")) {
+    const absolute = normalizePathLexically(normalized);
+    return pathWithinWorkspace(absolute, workspaceRoot) ? absolute : null;
+  }
+  if (!isWorkspaceRelativeEditorPath(normalized)) return null;
+  const root = normalizePathLexically(workspaceRoot);
+  return root ? `${root}/${normalized}` : null;
+};
+
+const workspaceRelativePath = (path: string, workspaceRoot: string): string | null => {
+  const root = normalizePathLexically(workspaceRoot);
+  const target = normalizePathLexically(path);
+  if (!root || !pathWithinWorkspace(target, root)) return null;
+  if (workspacePathsEqual(target, root)) return ".";
+  return target.slice(root.length).replace(/^\/+/, "");
+};
+
+const isWorkspaceRawResourceUrl = (url: string): boolean => {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return parsed.origin === new URL(apiBase()).origin
+      && parsed.pathname === "/api/workspace/raw"
+      && parsed.searchParams.has("path");
+  } catch {
+    return false;
+  }
+};
+
+const workspacePathFromHref = (
+  href: string,
+  options: { allowLineTarget?: boolean; allowExternalDeliverable?: boolean; workspaceRoot?: string; documentDirectory?: string } = {},
+): string | null => {
+  const trimmed = href.trim();
+  if (!trimmed) return null;
+  const workingDirectory = options.workspaceRoot ?? String(useAppStore.getState().workingDirectory || "");
+  let candidate = "";
+  let fromLocalFrontend = false;
+  if (isWorkspaceRawResourceUrl(trimmed)) {
+    candidate = new URL(trimmed, window.location.href).searchParams.get("path") || "";
+  } else if (trimmed.startsWith("minicode-local-file:")) {
+    try {
+      candidate = decodeURIComponent(trimmed.slice("minicode-local-file:".length));
+    } catch {
+      return null;
+    }
+  } else if (windowsAbsolutePathPattern.test(trimmed)) {
+    candidate = trimmed;
+  } else if (trimmed.startsWith("file://")) {
+    try {
+      const parsed = new URL(trimmed);
+      candidate = decodeURIComponent(parsed.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
+    } catch {
+      return null;
+    }
+  } else if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (!isLocalFrontendUrl(parsed)) return null;
+      const decodedPath = decodeURIComponent(parsed.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
+      candidate = decodedPath;
+      fromLocalFrontend = true;
+    } catch {
+      return null;
+    }
+  } else if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    candidate = trimmed.replace(/^\/([A-Za-z]:[\/\\])/, "$1");
+    fromLocalFrontend = true;
+  } else {
+    try {
+      candidate = decodeURI(trimmed);
+    } catch {
+      return null;
+    }
+  }
+
+  candidate = normalizeSlashes(stripFileRefDecorations(candidate, options.allowLineTarget).replace(/%5[cC]/g, "/")).replace(/^\.\/+/, "");
+  if (
+    fromLocalFrontend
+    && candidate.startsWith("/")
+    && !/^\/[A-Za-z]:\//.test(candidate)
+    && isWindowsLikeWorkspacePath(workingDirectory)
+  ) {
+    candidate = candidate.replace(/^\/+/, "");
+  }
+  const safetyPath = options.allowLineTarget
+    ? parseEditorPathTarget(candidate)?.path ?? candidate
+    : candidate;
+  if (/^[A-Za-z]:\//.test(safetyPath) || safetyPath.startsWith("/")) {
+    return pathWithinWorkspace(safetyPath, workingDirectory)
+      || (options.allowExternalDeliverable && externalDeliverablePathPattern.test(safetyPath))
+      ? candidate
+      : null;
+  }
+  // A document rendered from inside the workspace resolves relative links,
+  // parent segments included, against its own directory rather than the
+  // browsing root; the workspace root still bounds the result.
+  const documentDirectory = options.documentDirectory ? absoluteWorkspacePath(options.documentDirectory, workingDirectory) : null;
+  if (documentDirectory && isDocumentRelativePath(safetyPath)) {
+    const resolved = normalizePathLexically(`${documentDirectory}/${candidate}`);
+    return pathWithinWorkspace(resolved, workingDirectory) ? resolved : null;
+  }
+  if (!isWorkspaceRelativeEditorPath(safetyPath)) return null;
+  return candidate;
+};
+
+const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversationId?: string, fileOwner?: WorkspaceFileOwner, documentDirectory?: string): { path: string; src: string } | null => {
+  if (isWorkspaceRawResourceUrl(url)) {
+    try {
+      const parsed = new URL(url, window.location.href);
+      const path = workspacePathFromHref(parsed.searchParams.get("path") || "", { workspaceRoot, documentDirectory });
+      return path ? { path, src: url } : null;
+    } catch {
+      return null;
+    }
+  }
+  if (!isLocalImageUrl(url) && !(documentDirectory && isDocumentRelativePath(url))) return null;
+  const workingDirectory = workspaceRoot ?? String(useAppStore.getState().workingDirectory || "");
+  const candidate = workspacePathFromHref(url, { workspaceRoot, documentDirectory });
+  if (!candidate) return null;
+  const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
+  if (!absolutePath) return null;
+  const relativePath = workspaceRelativePath(absolutePath, workingDirectory);
+  if (relativePath && fileOwner) {
+    const absolute = workspaceFileAbsolutePath({ ...fileOwner, browserRoot: workingDirectory }, relativePath);
+    const path = workspaceRequestPath(absolute, fileOwner.browserRoot);
+    if (fileOwner.conversationId) {
+      return { path: relativePath, src: getWebSocket()?.sessionId ? conversationBrowserRawUrl({
+        conversationId: fileOwner.conversationId, executionCwd: fileOwner.executionCwd, environmentId: fileOwner.environmentId,
+      }, path) : "" };
+    }
+    return { path: relativePath, src: workspaceRawResourceUrlWithToken(path, fileOwner.browserRoot, undefined, null) };
+  }
+  const owner = workspaceRequestOwner();
+  return relativePath
+    ? { path: relativePath, src: workspaceRawResourceUrlWithToken(relativePath, workingDirectory, undefined,
+        owner ? { ...owner, conversation_id: conversationId || owner.conversation_id } : undefined) }
+    : null;
+};
+
+const workspaceFileTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): { path: string; line?: number; column?: number } | null => {
+  const candidate = workspacePathFromHref(href, { allowLineTarget: true, workspaceRoot, documentDirectory });
+  if (!candidate) return null;
+  return parseEditorPathTarget(candidate);
+};
+
+const workspaceGenericFileTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): FileTarget | null => {
+  const candidate = workspacePathFromHref(href, { allowExternalDeliverable: true, workspaceRoot, documentDirectory });
+  if (!candidate || isCodeFilePath(candidate) || !anyFilePathPattern.test(candidate)) return null;
+  return { path: candidate };
+};
+
+const actionFilePathFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): string | null => {
+  const candidate = workspacePathFromHref(href, { workspaceRoot, documentDirectory });
+  const match = candidate && /^(?:下载[\\/])?打开《([^《》]+)》$/u.exec(candidate);
+  return match && anyFilePathPattern.test(match[1]) ? match[1] : null;
+};
+
+const workspaceFolderTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): FolderTarget | null => {
+  const candidate = workspacePathFromHref(href, { workspaceRoot, documentDirectory });
+  if (!candidate || anyFilePathPattern.test(candidate) || /\.[A-Za-z0-9]+》$/.test(candidate)) return null;
+  return { path: candidate.replace(/[\\/]+$/, "") };
+};
+
+const editorTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): { path: string; line?: number; column?: number } | null => {
+  if (href.startsWith("minicode-file-ref:")) {
+    const params = new URLSearchParams(href.slice("minicode-file-ref:".length));
+    const path = params.get("path")?.trim();
+    if (!path) return null;
+    const target = workspaceFileTargetFromHref(path, workspaceRoot, documentDirectory);
+    if (!target) return null;
+    return {
+      path: target.path,
+      line: parsePositiveInt(params.get("line")),
+      column: parsePositiveInt(params.get("column")),
+    };
+  }
+  const workspaceTarget = workspaceFileTargetFromHref(href, workspaceRoot, documentDirectory);
+  if (workspaceTarget) return workspaceTarget;
+  if (href.startsWith("file://")) {
+    return null;
+  }
+  if (/^[A-Za-z]:[/\\]|^\/[^/]/.test(href)) {
+    return null;
+  }
+  return null;
+};
+
+const proseOptionListPattern = /^\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*(?:\s*\/\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*){1,}\s*$/u;
+const proseInlinePattern = /^[\p{L}\p{N}\s·,，.。:：;；!?！？'"“”‘’\-–—\/+&%℃°]+$/u;
+const codeLikeInlinePattern = /(?:[`\\{}[\]()<>=]|[_$]|&&|\|\||::|=>|->|[A-Za-z]:[\\/]|\.{1,2}[\\/]|(?:^|\s)[\\/][\w.-]+|[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|json|md|css|scss|html|tsx?|ya?ml|toml|rs|go|java|kt|swift|php|rb|sh|ps1)\b|(?:^|\s)-{1,2}[\w-]+|^\s*(?:npm|pnpm|yarn|bun|node|npx|python|py|pip|uv|pytest|git|curl|docker|kubectl|powershell|cmd|rg)\b|\b(?:const|let|var|function|return|import|export|class|async|await|def|lambda|SELECT|UPDATE|INSERT|DELETE)\b|[a-z]+[A-Z][A-Za-z]*|\w+\.\w+\()/;
+
+const isProseOptionList = (value: string): boolean => {
+  const text = value.trim();
+  if (!text || !text.includes("/")) return false;
+  if (text.length > 80 || codeLikeInlinePattern.test(text)) return false;
+  return proseOptionListPattern.test(text);
+};
+
+const shouldRenderInlineCodeAsProse = (value: string): boolean => {
+  const text = value.trim();
+  if (!text || text.length > 96) return false;
+  if (codeLikeInlinePattern.test(text)) return false;
+  return proseInlinePattern.test(text);
+};
+
+const InlineOptionList = ({ text }: { text: string }) => {
+  const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return <>{text}</>;
+  return (
+    <span className="md-inline-option-list">
+      {parts.map((part, index) => (
+        <span key={`${part}-${index}`} className="md-inline-option-fragment">
+          {index > 0 && <span className="md-inline-option-separator" aria-hidden="true">/</span>}
+          <span className="md-inline-option">{part}</span>
+        </span>
+      ))}
+    </span>
+  );
+};
+
+const fileChipClassName = "md-file-chip";
+
+const fileExtensionFromPath = (value: string): string => {
+  const clean = stripFileRefDecorations(value).replace(/[\\/]+$/, "");
+  const base = clean.split(/[\\/]/).pop() ?? "";
+  const match = /\.([^.:\s]+)(?::\d+(?::\d+|[-–—]\d+)?)?$/i.exec(base);
+  return match?.[1]?.toLowerCase() ?? "";
+};
+
+const displayPathParts = (value: string): { directory: string; name: string } => {
+  const normalized = normalizeSlashes(value).replace(/^\.\/+/g, "");
+  const index = normalized.lastIndexOf("/");
+  if (index < 0) return { directory: "", name: normalized };
+  return {
+    directory: normalized.slice(0, index + 1),
+    name: normalized.slice(index + 1),
+  };
+};
+
+const splitFileLabelMeta = (value: string): { fileName: string; meta: string } => {
+  const trimmed = value.trim();
+  const lineLabel = /^(.+\.[^\s()]+)\s+(\(lines?\s+\d+(?::\d+|[-–—]\d+)?\))$/i.exec(trimmed);
+  if (lineLabel) return { fileName: lineLabel[1], meta: lineLabel[2] };
+  const locationLabel = fileLocationLabelPattern.exec(trimmed);
+  if (locationLabel) return { fileName: locationLabel[1], meta: locationLabel[2] };
+  return { fileName: value, meta: "" };
+};
+
+const absoluteEditorTitlePath = (path: string, workingDirectory: string): string => {
+  const normalizedPath = normalizeSlashes(path).replace(/^\.\/+/g, "");
+  if (/^[A-Za-z]:\//.test(normalizedPath)) return normalizedPath;
+  const root = normalizeSlashes(workingDirectory).replace(/\/+$/, "");
+  return root ? `${root}/${normalizedPath.replace(/^\/+/, "")}` : normalizedPath;
+};
+
+type MessageResourceScope = { workspaceRoot?: string; documentDirectory?: string; conversationId?: string; knownFilePaths?: string[]; fileOwner?: WorkspaceFileOwner; openFileLinksInSidePanel?: boolean };
+
+const filePreviewScope = (workspaceRoot: string, conversationId: string | undefined, fileOwner: WorkspaceFileOwner | undefined) =>
+  fileOwner ? { fileOwner, pathRoot: workspaceRoot } : { workspaceRoot, conversationId };
+
+// Implicit file references need successful tool evidence. Explicit Markdown
+// targets retain their exact meaning; ambiguous short names remain ordinary text.
+function knownFileTarget<T extends FileTarget>(target: T | null, scope: MessageResourceScope, requireKnown = false): T | null {
+  if (!target) return null;
+  if (!scope.knownFilePaths?.length) return requireKnown ? null : target;
+  const root = scope.workspaceRoot ?? useAppStore.getState().workingDirectory;
+  const referenceKey = workspaceFilePathComparisonKey(target.path, root);
+  const suffix = normalizeWorkspacePath(target.path);
+  const suffixKey = isWindowsLikeWorkspacePath(root) ? suffix.toLowerCase() : suffix;
+  const canMatchSuffix = isWorkspaceRelativeEditorPath(target.path);
+  const matches = new Map<string, string>();
+  for (const path of scope.knownFilePaths) {
+    const candidate = workspacePathFromHref(path, { workspaceRoot: root, allowExternalDeliverable: true });
+    if (!candidate) continue;
+    const key = workspaceFilePathComparisonKey(candidate, root);
+    if (key === referenceKey) return { ...target, path: candidate };
+    if (canMatchSuffix && key.endsWith(`/${suffixKey}`)) matches.set(key, candidate);
+  }
+  if (matches.size > 1) return null;
+  return matches.size === 1 ? { ...target, path: [...matches.values()][0] } : requireKnown ? null : target;
+}
+
+const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel, presentation = "link" }: { target: EditorTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
+  const { t } = useI18n();
+  const activeWorkspace = useAppStore((s) => s.workingDirectory);
+  const workingDirectory = workspaceRoot ?? activeWorkspace;
+  const opensInPreview = openFileLinksInSidePanel || Boolean(fileOwner) || workspaceRoot !== undefined && !workspacePathsEqual(workspaceRoot, activeWorkspace);
+  const label = textFromReactNode(children) || target.path;
+  const { directory, name } = displayPathParts(label);
+  const { fileName, meta } = splitFileLabelMeta(name);
+  const titlePath = fileOwner ? workspaceFileAbsolutePath({ ...fileOwner, browserRoot: workingDirectory }, target.path)
+    : absoluteEditorTitlePath(target.path, workingDirectory || "");
+  const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
+  const openInEditor = () => {
+    if (openFileLinksInSidePanel || fileOwner || workingDirectory && !workspacePathsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
+      openWorkspaceFilePreview({ path: target.path, name: fileName, ...filePreviewScope(workingDirectory, conversationId, fileOwner),
+        line: target.line, column: target.column });
+    } else {
+      useAppStore.getState().openEditorFile(target.path, undefined, { line: target.line, column: target.column });
+    }
+  };
+  const openFile = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (openFileLinksInSidePanel) {
+      openWorkspaceFileLink({ path: target.path, name: fileName, ...filePreviewScope(workingDirectory, conversationId, fileOwner),
+        line: target.line, column: target.column }, event,
+      () => { void openPreferredFile(fileOwner ? titlePath : target.path, fileOwner?.executionCwd ?? workingDirectory, target.line, openInEditor); });
+      return;
+    }
+    if (isDesktop()) void openPreferredFile(fileOwner ? titlePath : target.path, fileOwner?.executionCwd ?? workingDirectory, target.line, openInEditor);
+    else openInEditor();
+  };
+  const { onContextMenu, menu } = useContextMenu(() => [
+    {
+      label: t(opensInPreview ? "预览文件" : "在编辑器中打开"),
+      onClick: openInEditor,
+      disabled: workspaceRoot === "",
+    },
+    // OS shell actions have no meaning in browser mode; offering them there
+    // produced a menu entry that did nothing at all.
+    ...(isDesktop() && workspaceRoot !== "" ? [
+      { label: t("使用默认应用打开"), onClick: () => { void openPath(titlePath); } },
+      { label: t("在资源管理器中显示"), onClick: () => { void revealPath(titlePath); } },
+    ] : []),
+    { label: "", separator: true },
+    { label: t("复制路径"), onClick: () => { void copyText(titlePath, t("路径")); } },
+  ]);
+
+  return (
+    <span className="md-file-reference-wrap relative inline" onContextMenu={onContextMenu}>
+      <button
+        type="button"
+        onClick={openFile}
+        onAuxClick={event => { if (event.button === 1) openFile(event); }}
+        disabled={workspaceRoot === ""}
+        title={`${t(opensInPreview ? "预览" : "在编辑器中打开")} ${titlePath}`}
+        aria-label={label}
+        className={`${fileChipClassName}${presentation === "code" ? " md-file-code-reference" : ""}`}
+        data-presentation={presentation}
+        data-ext={extension || "file"}
+        data-file-reference=""
+        data-markdown-copy-text={label}
+      >
+        {fileIcon(target.path, { size: 14, className: "md-file-link-icon" })}
+        <span className="md-file-chip-label">
+          {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
+          <span className="md-file-chip-name">{fileName}</span>
+          {meta ? <span className="md-file-chip-meta">{meta}</span> : null}
+        </span>
+      </button>
+      {menu}
+    </span>
+  );
+};
+
+const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel, presentation = "link" }: { target: FileTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
+  const { t } = useI18n();
+  const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
+  const label = textFromReactNode(children) || target.path;
+  const { directory, name } = displayPathParts(label);
+  const titlePath = fileOwner ? workspaceFileAbsolutePath({ ...fileOwner, browserRoot: workingDirectory }, target.path)
+    : absoluteEditorTitlePath(target.path, workingDirectory || "");
+  const previewInsideWorkspace = pathWithinWorkspace(titlePath, workingDirectory || "");
+  const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
+  const openFile = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const openInApp = () => {
+      if (previewInsideWorkspace) openWorkspaceFilePreview({ path: target.path, name, ...filePreviewScope(workingDirectory, conversationId, fileOwner) });
+      else void openPath(titlePath);
+    };
+    const openPreferred = () => { void openPreferredFile(titlePath, fileOwner?.executionCwd ?? workingDirectory, undefined, openInApp); };
+    if (openFileLinksInSidePanel && previewInsideWorkspace) openWorkspaceFileLink({ path: target.path, name,
+      ...filePreviewScope(workingDirectory, conversationId, fileOwner) }, event, openPreferred);
+    else if (isDesktop()) openPreferred();
+    else openInApp();
+  };
+  const { onContextMenu, menu } = useContextMenu(() => [
+    {
+      label: t("在编辑器中打开（仅文本文件）"),
+      disabled: true,
+    },
+    // OS shell actions have no meaning in browser mode; offering them there
+    // produced a menu entry that did nothing at all.
+    ...(isDesktop() && workspaceRoot !== "" ? [
+      { label: t("使用默认应用打开"), onClick: () => { void openPath(titlePath); } },
+      { label: t("在资源管理器中显示"), onClick: () => { void revealPath(titlePath); } },
+    ] : []),
+    { label: "", separator: true },
+    { label: t("复制路径"), onClick: () => { void copyText(titlePath, t("路径")); } },
+  ]);
+
+  return (
+    <span className="md-file-reference-wrap relative inline" onContextMenu={onContextMenu}>
+      <button
+        type="button"
+        disabled={workspaceRoot === ""}
+        onClick={openFile}
+        onAuxClick={event => { if (event.button === 1) openFile(event); }}
+        title={t("打开 {path}", { path: titlePath })}
+        aria-label={label}
+        className={`${fileChipClassName}${presentation === "code" ? " md-file-code-reference" : ""}`}
+        data-presentation={presentation}
+        data-ext={extension || "file"}
+      >
+        {fileIcon(target.path, { size: 14, className: "md-file-link-icon" })}
+        <span className="md-file-chip-label">
+          {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
+          <span className="md-file-chip-name">{name}</span>
+        </span>
+      </button>
+      {menu}
+    </span>
+  );
+};
+
+const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: FolderTarget; children: React.ReactNode } & MessageResourceScope) => {
+  const { t } = useI18n();
+  const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
+  const label = textFromReactNode(children) || target.path;
+  const { name } = displayPathParts(label.replace(/[\\/]+$/, ""));
+  const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
+
+  return (
+    <button
+      type="button"
+      onClick={() => useAppStore.getState().requestFileTreeReveal(workspaceRoot === undefined ? target.path : titlePath, "folder")}
+      title={t("在文件树中显示 {path}", { path: titlePath })}
+      aria-label={label}
+      className={`${fileChipClassName} md-folder-chip`}
+      data-kind="folder"
+    >
+      <span className="md-folder-chip-icon" aria-hidden="true">{folderIcon(false, 16, target.path)}</span>
+      <span className="md-file-chip-label">
+        <span className="md-file-chip-name">{name}</span>
+      </span>
+    </button>
+  );
+};
+
+const MarkdownImage = ({ workspaceRoot, documentDirectory, conversationId, fileOwner, knownFilePaths: _knownFilePaths, openFileLinksInSidePanel: _openFileLinksInSidePanel, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & MessageResourceScope) => {
+  const { t } = useI18n();
+  const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
+  const rawSrc = typeof props.src === "string" ? props.src : "";
+  const alt = typeof props.alt === "string" ? props.alt : "image";
+  const artifactId = artifactIdFromReference(rawSrc);
+  const isConnected = useAppStore((s) => s.isConnected);
+  const sessionId = getWebSocket()?.sessionId;
+  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot, conversationId, fileOwner, documentDirectory);
+  const blockedLocalImage = !artifactId && Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
+  const src = artifactId ? artifactResourceUrl({ artifactId, conversationId, sessionId, source: "artifact", isConnected })
+    : workspaceLocalImage?.src ?? rawSrc;
+  const remoteSrc = !artifactId && !workspaceLocalImage && isPreviewableHttpUrl(src) ? src : "";
+  const remoteImagePolicy = useAppStore((s) => s.remoteImagePolicy);
+  const allowedRemoteImageDomains = useAppStore((s) => s.allowedRemoteImageDomains);
+  const allowRemoteImageDomain = useAppStore((s) => s.allowRemoteImageDomain);
+  let remoteHostname = "";
+  if (remoteSrc) {
+    try {
+      remoteHostname = new URL(remoteSrc).hostname.toLowerCase();
+    } catch {
+      remoteHostname = "";
+    }
+  }
+  const remoteDomainAllowed = Boolean(remoteHostname) && allowedRemoteImageDomains.includes(remoteHostname);
+  const remoteImageAllowed = remoteImagePolicy === "allow" || remoteDomainAllowed || loadedRemoteUrl === remoteSrc;
+  const previewable = Boolean(src) && (isPreviewableHttpUrl(src) || isInlineImageDataUrl(src) || Boolean(workspaceLocalImage));
+
+  if (blockedLocalImage || !src) {
+    return (
+      <span
+        role="img"
+        aria-label={alt}
+        className="my-2 inline-flex max-w-full items-center rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
+        title={artifactId ? undefined : t("本地图片位于当前工作区之外")}
+      >
+        {t(artifactId ? (conversationId ? "连接恢复后可预览图片。" : "图片未关联到会话，暂时无法预览。") : "本地图片不可用")}
+      </span>
+    );
+  }
+
+  if (remoteSrc && (remoteImagePolicy === "block" || !remoteImageAllowed)) {
+    const hostname = remoteHostname || t("远程主机");
+    return (
+      <span
+        className="my-2 inline-flex max-w-full flex-col items-start gap-2 rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
+        data-remote-image-placeholder={remoteSrc}
+      >
+        <span>{t("{alt} · 图片来自 {host}", { alt, host: hostname })}</span>
+        {remoteImagePolicy === "block" ? (
+          <span>{t("设置中已禁止加载远程图片。")}</span>
+        ) : (
+          <span className="inline-flex flex-wrap gap-2">
+            <button type="button" className="btn-secondary" onClick={() => setLoadedRemoteUrl(remoteSrc)}>
+              {t("加载图片")}
+            </button>
+            <button type="button" className="btn-ghost" onClick={() => allowRemoteImageDomain(hostname)}>
+              {t("本任务允许 {host}", { host: hostname })}
+            </button>
+          </span>
+        )}
+      </span>
+    );
+  }
+
+  const openPreview = () => {
+    if (artifactId) {
+      openArtifactPreview({ artifactId, conversationId, name: alt, kind: "image" });
+      return;
+    }
+    if (workspaceLocalImage) {
+      openWorkspaceFilePreview({
+        path: workspaceLocalImage.path,
+        name: alt,
+        ...filePreviewScope(workspaceRoot ?? useAppStore.getState().workingDirectory, conversationId, fileOwner),
+      });
+      return;
+    }
+    if (isPreviewableHttpUrl(src)) {
+      openWebInBrowser(src);
+      return;
+    }
+    const mediaType = /^data:([^;,]+)/i.exec(src)?.[1] || "image/png";
+    let hash = 0;
+    for (let index = 0; index < src.length; index += 1) {
+      hash = ((hash << 5) - hash + src.charCodeAt(index)) | 0;
+    }
+    openLocalFilePreview({
+      id: `markdown-image-${Math.abs(hash)}`,
+      name: alt,
+      mediaType,
+      url: src,
+      conversationId,
+    });
+  };
+
+  // Remote http(s) images open in the right preview panel; local/inline images
+  // open in a lightbox. Distinguish the affordance so users don't expect a zoom
+  // lightbox when clicking a remote image.
+  const opensInPreviewPanel = isPreviewableHttpUrl(src);
+  const previewTitle = t("在预览面板中打开");
+
+  const image = (
+    <img
+      {...props}
+      src={src}
+      className={`md-content-image max-w-full max-h-[480px] rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] my-2 block object-contain bg-[var(--surface-soft)]${previewable ? (opensInPreviewPanel ? " cursor-pointer" : " cursor-zoom-in") : ""}`}
+      loading="lazy"
+      title={previewable ? previewTitle : props.title}
+      onClick={props.onClick}
+    />
+  );
+
+  return previewable ? (
+    <button
+      type="button"
+      aria-label={t("在预览中打开 {name}", { name: alt })}
+      className="block max-w-full border-0 bg-transparent p-0 text-left"
+      onClick={(event) => {
+        if (!event.defaultPrevented) openPreview();
+      }}
+    >
+      {image}
+    </button>
+  ) : image;
+};
+
+const MarkdownResourceContext = createContext<MessageResourceScope>({});
+
+const mdComponents = (
+  resolvedTheme: ResolvedTheme,
+  scopeId: string,
+  headingId: ReturnType<typeof createMarkdownHeadingIdAssigner>,
+  streamingTail = false,
+): MarkdownComponents => {
+  const heading = (level: 1 | 2 | 3 | 4 | 5 | 6) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
+    const base = markdownHeadingSlug(textFromReactNode(props.children));
+    const id = headingId(base, node?.position?.start?.line);
+    const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+    const className = level === 1
+      ? "text-[length:var(--text-2xl)] font-bold"
+      : level === 2
+        ? "text-[length:var(--text-xl)] font-semibold"
+        : level === 3
+          ? "text-[length:var(--text-lg)] font-semibold"
+          : "text-[length:var(--text-base)] font-semibold";
+    return <Tag {...props} id={id} data-markdown-heading={base} tabIndex={-1} className={className} style={{ scrollMarginTop: 16, ...props.style }} />;
+  };
+  return ({
+  pre: ({ children }) => <>{children}</>,
+  input: ({ node: _node, checked, ...props }) => <input {...props} checked={checked} role="checkbox" aria-checked={Boolean(checked)} />,
+  code({ className, children, node }: MarkdownCodeProps) {
+    const resourceScope = useContext(MarkdownResourceContext);
+    const text = String(children).replace(/\n$/, "");
+    const match = /language-(\w+)/.exec(className ?? "");
+    const language = match?.[1]?.toLowerCase() ?? "";
+    const nodePos = node?.position;
+    const isBlock = nodePos && nodePos.end.line > nodePos.start.line;
+    if (language === "mermaid") {
+      return (
+        <div className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
+          <div className="code-block-header flex justify-between items-center px-3 py-1 bg-[var(--surface-active)]">
+            <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">
+              mermaid
+            </span>
+          </div>
+          <CopyButton text={text} />
+          {streamingTail ? <PlainCodeBlock text={text} /> : <MermaidBlock chart={text} resolvedTheme={resolvedTheme} />}
+        </div>
+      );
+    }
+    if (match || isBlock) {
+      return (
+        <CodeBlockFrame text={text} language={match?.[1]}>
+          <CodeThemeHighlighter
+            language={match?.[1] ?? "text"}
+            resolvedTheme={resolvedTheme}
+            isStreaming={streamingTail}
+          >
+            {text}
+          </CodeThemeHighlighter>
+        </CodeBlockFrame>
+      );
+    }
+    const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot, resourceScope.documentDirectory), resourceScope, true);
+    if (inlineEditorTarget) {
+      return <FileReferenceChip target={inlineEditorTarget} presentation="code" {...resourceScope}>{children}</FileReferenceChip>;
+    }
+    const inlineFileTarget = knownFileTarget(workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot, resourceScope.documentDirectory), resourceScope, true);
+    if (inlineFileTarget) {
+      return <GenericFileReferenceChip target={inlineFileTarget} presentation="code" {...resourceScope}>{children}</GenericFileReferenceChip>;
+    }
+    if (isProseOptionList(text)) {
+      return <InlineOptionList text={text} />;
+    }
+    if (shouldRenderInlineCodeAsProse(text)) {
+      return <span className="md-inline-code-prose">{children}</span>;
+    }
+    return (
+      <code className={`${className ?? ""} bg-[var(--surface-soft)] rounded-[5px] px-[5px] py-[1.5px] font-[var(--font-mono)] text-[0.86em] text-[var(--text-primary)]`}>
+        {children}
+      </code>
+    );
+  },
+  a: ({ node: _node, ...props }: MarkdownElementProps<React.AnchorHTMLAttributes<HTMLAnchorElement>>) => {
+    const resourceScope = useContext(MarkdownResourceContext);
+    const href = typeof props.href === "string" ? props.href : "";
+    const childrenText = textFromReactNode(props.children);
+    if (href.startsWith("#")) {
+      const targetId = `${scopeId}-${markdownHeadingSlug(decodeMarkdownFragment(href.slice(1)))}`;
+      return (
+        <a
+          {...props}
+          href={`#${targetId}`}
+          className="md-text-link"
+          onClick={(event) => {
+            event.preventDefault();
+            const slug = markdownHeadingSlug(decodeMarkdownFragment(href.slice(1)));
+            const headings = [...(document.getElementById(scopeId)?.querySelectorAll<HTMLElement>("[data-markdown-heading]") ?? [])];
+            const numbered = /^(.*)-(\d+)$/.exec(slug);
+            const element = document.getElementById(targetId)
+              ?? headings.find((heading) => heading.dataset.markdownHeading === slug)
+              ?? (numbered ? headings.filter((heading) => heading.dataset.markdownHeading === numbered[1])[Number(numbered[2]) - 1] : undefined);
+            element?.scrollIntoView({ behavior: "smooth", block: "start" });
+            element?.focus({ preventScroll: true });
+          }}
+        >
+          {props.children}
+        </a>
+      );
+    }
+    const actionFilePath = actionFilePathFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
+    const parsedEditorTarget = actionFilePath
+      ? workspaceFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot, resourceScope.documentDirectory)
+      : editorTargetFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
+    const editorTarget = href.startsWith("minicode-file-ref:") || actionFilePath
+      ? knownFileTarget(parsedEditorTarget, resourceScope)
+      : parsedEditorTarget;
+    const fileTarget = editorTarget
+      ? null
+      : actionFilePath
+        ? knownFileTarget(workspaceGenericFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot, resourceScope.documentDirectory), resourceScope)
+        : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
+    const folderTarget = editorTarget || fileTarget
+      ? null
+      : workspaceFolderTargetFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
+    const opensInApp = isPreviewableHttpUrl(href);
+    if (href.startsWith("minicode-file-ref:") && !editorTarget) {
+      return <span className="font-[var(--font-mono)] text-[0.9em]">{props.children}</span>;
+    }
+    if (editorTarget) {
+      return <FileReferenceChip target={editorTarget} {...resourceScope}>{props.children}</FileReferenceChip>;
+    }
+    if (fileTarget) {
+      return <GenericFileReferenceChip target={fileTarget} {...resourceScope}>{props.children}</GenericFileReferenceChip>;
+    }
+    if (folderTarget) {
+      return <FolderReferenceChip target={folderTarget} {...resourceScope}>{props.children}</FolderReferenceChip>;
+    }
+    return (
+      <a
+        {...props}
+        target={opensInApp ? undefined : "_blank"}
+        rel="noreferrer"
+        className={opensInApp ? "md-web-link" : "md-text-link"}
+        onClick={(event) => {
+          props.onClick?.(event);
+          if (event.defaultPrevented) return;
+          if (isDesktop() && isPreviewableHttpUrl(href)) {
+            event.preventDefault();
+            void openPreferredWebLink(href, resourceScope.conversationId, { ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey });
+          } else if (openWebTarget(href)) event.preventDefault();
+        }}
+      >
+        {opensInApp && (
+          <BrandIcon
+            value={`${childrenText} ${href}`}
+            websiteUrl={href}
+            fallback="web"
+            size={14}
+            className="md-web-link-icon"
+          />
+        )}
+        {props.children}
+      </a>
+    );
+  },
+  p: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLParagraphElement>>) => (
+    <p {...props} className="md-paragraph" />
+  ),
+  ul: ({ className, node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLUListElement>>) => (
+    <ul {...props} className={`my-2 pl-5 list-disc marker:text-[var(--text-muted)]${className ? ` ${className}` : ""}`} />
+  ),
+  ol: ({ className, node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLOListElement>>) => (
+    <ol {...props} className={`my-2 pl-5 list-decimal marker:text-[var(--text-muted)]${className ? ` ${className}` : ""}`} />
+  ),
+  li: ({ className, node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLLIElement>>) => (
+    <li {...props} className={`mb-1 leading-[var(--leading-normal)]${className ? ` ${className}` : ""}`} />
+  ),
+  table: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLTableElement>>) => (
+    <MeasuredMarkdownBlock className="md-table-wrap">
+      <table {...props} className="border-collapse text-[var(--text-sm)] w-full" />
+    </MeasuredMarkdownBlock>
+  ),
+  th: ({ node: _node, ...props }: MarkdownElementProps<React.ThHTMLAttributes<HTMLTableCellElement>>) => (
+    <th {...props} className="border border-[var(--border-subtle)] px-2.5 py-1.5 bg-[var(--surface-soft)] text-left font-semibold" />
+  ),
+  td: ({ node: _node, ...props }: MarkdownElementProps<React.TdHTMLAttributes<HTMLTableCellElement>>) => (
+    <td {...props} className="border border-[var(--border-subtle)] px-2.5 py-1.5" />
+  ),
+  blockquote: ({ node: _node, ...props }: MarkdownElementProps<React.BlockquoteHTMLAttributes<HTMLQuoteElement>>) => (
+    <blockquote {...props} className="border border-[var(--border-subtle)] rounded-[10px] bg-[var(--surface-soft)] px-3.5 py-2.5 my-2 text-[var(--text-secondary)]" />
+  ),
+  h1: heading(1),
+  h2: heading(2),
+  h3: heading(3),
+  h4: heading(4),
+  h5: heading(5),
+  h6: heading(6),
+  hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
+  img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
+    const resourceScope = useContext(MarkdownResourceContext);
+    return <MarkdownImage {...props} workspaceRoot={resourceScope.workspaceRoot} documentDirectory={resourceScope.documentDirectory} conversationId={resourceScope.conversationId} fileOwner={resourceScope.fileOwner} />;
+  },
+  });
+};
+
+const remarkPlugins: MarkdownRemarkPlugins = [
+  [remarkGfm, { singleTilde: false }],
+  remarkMath,
+  normalizeFallbackStrongMarkers,
+];
+
+const rehypePlugins: MarkdownRehypePlugins = [
+  [rehypeKatex, { strict: false, throwOnError: false }],
+];
+
+const markdownUrlTransform = (url: string, key: string) => {
+  if (key === "src" && artifactIdFromReference(url)) return url;
+  if (url.startsWith("minicode-file-ref:") || url.startsWith("minicode-local-file:") || isInlineImageDataUrl(url) || isExplicitLocalImageUrl(url)) return url;
+  const fileTarget = workspaceFileTargetFromHref(url);
+  // A basename followed by :line is a file location, not a URL protocol.
+  return fileTarget ? url : defaultUrlTransform(url);
+};
+
+const preserveWindowsMarkdownFileLinks = (content: string, codeRanges: { start: number; end: number }[]): string => content.replace(
+  /(?<!!)\[([^\]\n]+)\]\(\s*([A-Za-z]:\\[^)\n]+)\s*\)/g,
+  (match, label: string, path: string, offset: number) => {
+    const destinationStart = offset + match.lastIndexOf(path);
+    if (codeRanges.some((range) => destinationStart >= range.start && destinationStart < range.end)) return match;
+    return `[${label}](minicode-local-file:${encodeURIComponent(path.trim())})`;
+  },
+);
+
+// Use the Markdown parser's source ranges so every code fence/span keeps its
+// literal contents, including tildes, nested backticks, and quoted code blocks.
+const markdownCodeRanges = (value: string): { start: number; end: number }[] => {
+  const tree = fromMarkdown(value);
+  const ranges: { start: number; end: number }[] = [];
+  const visit = (node: typeof tree | typeof tree.children[number]): void => {
+    if (node.type === "code" || node.type === "inlineCode") {
+      ranges.push({ start: node.position!.start.offset!, end: node.position!.end.offset! });
+    } else if ("children" in node) {
+      node.children.forEach(visit);
+    }
+  };
+  visit(tree);
+  return ranges;
+};
+
+// Code nodes come only from backtick or tilde fences and spans, or from lines
+// indented by four spaces or a tab. Text without those markers has no code
+// ranges to protect, so the streaming tail can skip the parser pre-pass.
+const mayContainMarkdownCode = (value: string): boolean => /[`~]|(?:^|\n)[ \t]*(?: {4}|\t)/.test(value);
+
+const normalizeMarkdownSource = (value: string): string => {
+  if (!/[\\$]/.test(value)) return value;
+  let codeRanges = mayContainMarkdownCode(value) ? markdownCodeRanges(value) : [];
+  // Rewrite the destination as a whole so code-formatted link labels remain
+  // valid, while Windows links shown inside literal code stay untouched.
+  const linked = preserveWindowsMarkdownFileLinks(value, codeRanges);
+  if (linked !== value) codeRanges = mayContainMarkdownCode(linked) ? markdownCodeRanges(linked) : [];
+  let output = "";
+  let cursor = 0;
+  for (const { start, end } of codeRanges) {
+    output += normalizeLatexDelimiters(linked.slice(cursor, start)) + linked.slice(start, end);
+    cursor = end;
+  }
+  return output + normalizeLatexDelimiters(linked.slice(cursor));
+};
+
+/**
+ * Find the split point for incremental rendering during streaming.
+ * Returns the index after the last complete block boundary.
+ * Content before this point is "stable" and can be memoized.
+ *
+ * Find the last closed block boundary so everything before it is final and
+ * only the tail re-parses per delta. We check multiple boundary types:
+ * - Closed backtick or tilde code fences
+ * - Double-newline paragraph breaks
+ * - Completed list items (line starting with dash, bullet, or 1. followed by \n)
+ * - Heading boundaries (# ...\n)
+ */
+interface FenceScanResult {
+  unclosedStart: number;
+  lastClosedEnd: number;
+}
+
+/** Scan block fences without treating inline backticks or tildes as fences. */
+function scanFences(content: string): FenceScanResult {
+  let open: { marker: "`" | "~"; length: number; start: number } | null = null;
+  let lastClosedEnd = -1;
+  let lineStart = 0;
+
+  while (lineStart <= content.length) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline >= 0 ? newline : content.length;
+    const rawLine = content.slice(lineStart, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const completeLineEnd = newline >= 0 ? newline + 1 : content.length;
+
+    if (open) {
+      const close = /^ {0,3}(`+|~+)[\t ]*$/.exec(line);
+      if (
+        close
+        && close[1][0] === open.marker
+        && close[1].length >= open.length
+      ) {
+        open = null;
+        lastClosedEnd = completeLineEnd;
+      }
+    } else {
+      const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (opening) {
+        open = {
+          marker: opening[1][0] as "`" | "~",
+          length: opening[1].length,
+          start: lineStart,
+        };
+      }
+    }
+
+    if (newline < 0) break;
+    lineStart = newline + 1;
+  }
+
+  return {
+    unclosedStart: open?.start ?? -1,
+    lastClosedEnd,
+  };
+}
+
+export function findStableSplitPoint(content: string): number {
+  const fenceScan = scanFences(content);
+  const openFenceStart = fenceScan.unclosedStart;
+  // Paragraph/list boundaries inside a still-open code fence are not stable
+  // Markdown boundaries.  Restrict every candidate below to the content that
+  // precedes the opening fence; the entire growing code block then stays in
+  // the cheap PlainCodeBlock tail until its closing fence arrives.
+  const stableCandidate = openFenceStart >= 0
+    ? content.slice(0, openFenceStart)
+    : content;
+  let bestSplit = -1;
+
+  // A validated closing fence is stable with or without a final newline. If
+  // another fence remains open, only retain closes before that opening.
+  if (
+    fenceScan.lastClosedEnd >= 0
+    && fenceScan.lastClosedEnd <= stableCandidate.length
+  ) {
+    bestSplit = Math.max(bestSplit, fenceScan.lastClosedEnd);
+  }
+
+  // Double-newline paragraph break
+  const paraBreak = stableCandidate.lastIndexOf("\n\n");
+  if (paraBreak >= 0) bestSplit = Math.max(bestSplit, paraBreak + 2);
+
+  // Heading boundary: line starting with # followed by newline
+  const headingEnd = stableCandidate.lastIndexOf("\n# ");
+  if (headingEnd >= 0) {
+    const headingNewline = stableCandidate.indexOf("\n", headingEnd + 3);
+    if (headingNewline >= 0) bestSplit = Math.max(bestSplit, headingNewline + 1);
+  }
+
+  // Completed list item: - text\n or * text\n or 1. text\n
+  const listPattern = /(?:^|\n)(?:[-*]|\d+\.)\s+.+\n/g;
+  let lastListMatch: RegExpExecArray | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = listPattern.exec(stableCandidate)) !== null) {
+    lastListMatch = match;
+  }
+  if (lastListMatch) {
+    bestSplit = Math.max(bestSplit, lastListMatch.index + lastListMatch[0].length);
+  }
+
+  // Don't split if the stable part is too small (< 100 chars)
+  return bestSplit > 100 ? bestSplit : 0;
+}
+
+// ── Plain-text fast path ────────────────────────────────────────────
+// If content has no markdown syntax markers, skip the full react-markdown
+// pipeline and render as a simple <p>. This covers the majority of short
+// assistant replies ("Sure, let me help with that.") and saves ~2-3ms of
+// parse + render per message.
+const MD_SYNTAX_RE = /[#*`|[><\\&_$~\-]|[\n\t]|^ {4}|^ {0,3}(?:\d+[.)]|\+)\s|https?:\/\/|www\.|@/i;
+const FILE_REF_HINT_RE = new RegExp(bareFileRefPattern.source, "i");
+function hasMarkdownSyntax(s: string): boolean {
+  return MD_SYNTAX_RE.test(s) || FILE_REF_HINT_RE.test(s);
+}
+
+const PlainText = memo(({ content }: { content: string }) => (
+  <p className="md-paragraph">{content}</p>
+));
+PlainText.displayName = "PlainText";
+
+/** Memoized renderer for the stable (completed) portion of streaming content. */
+const StableMarkdown = memo(({ content, components, plugins }: { content: string; components: MarkdownComponents; plugins: MarkdownRemarkPlugins }) => {
+  // Check if this is plain text — skip react-markdown entirely
+  if (!hasMarkdownSyntax(content)) {
+    return <PlainText content={content} />;
+  }
+  return (
+    <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+      {content}
+    </ReactMarkdown>
+  );
+});
+StableMarkdown.displayName = "StableMarkdown";
+
+export const MarkdownRenderer = memo(StreamingMarkdownView);
+
+const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openFence = -1, streamingTail = false }: {
+  part: MarkdownPart; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins; openFence?: number; streamingTail?: boolean;
+}) => {
+  const headingId = useMemo(() => createMarkdownHeadingIdAssigner(`${scopeId}-p${part.start}`), [scopeId, part.start]);
+  const components = useMemo(() => mdComponents(resolved, scopeId, headingId, streamingTail), [resolved, scopeId, headingId, streamingTail]);
+  const fence = useMemo(() => {
+    if (!part.fence) return undefined;
+    if (openFence !== 0) {
+      const tree = fromMarkdown(part.content);
+      const node = tree.children[0];
+      if (tree.children.length !== 1 || node?.type !== "code" || node.lang?.toLowerCase() === "mermaid") return undefined;
+      return { text: node.value, language: node.lang?.match(/^\w+/)?.[0] };
+    }
+    const newline = part.content.indexOf("\n");
+    const openingLine = newline < 0 ? part.content : part.content.slice(0, newline);
+    const language = /^ {0,3}(?:`{3,}|~{3,})(.*)/.exec(openingLine)?.[1].trim();
+    const text = newline < 0 ? "" : part.content.slice(newline + 1).replace(/\n$/, "");
+    return { text, language };
+  }, [part, openFence]);
+  const content = useMemo(() => fence ? part.content : normalizeMarkdownSource(part.content), [part.content, fence]);
+  headingId.reset();
+  if (fence) {
+    return <CodeBlockFrame text={fence.text} language={fence.language}>
+      <CodeThemeHighlighter language={fence.language ?? "text"}
+        resolvedTheme={resolved} isStreaming={streamingTail || openFence === 0}>{fence.text}</CodeThemeHighlighter>
+    </CodeBlockFrame>;
+  }
+  return <StableMarkdown content={content} components={components} plugins={plugins} />;
+});
+
+function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, documentDirectory, conversationId, knownFilePaths, fileOwner, openFileLinksInSidePanel }: Props) {
+  content = withoutCodeCommentDirectives(content);
+  const resolved = useResolvedTheme();
+  const rawId = useId();
+  const scopeId = useMemo(() => `md-${rawId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawId]);
+  const partition = useRef(new StreamingMarkdownPartition());
+  const initiallySettled = useRef(!isStreaming);
+  const view = useMemo(() => initiallySettled.current
+    ? { parts: [], tail: { start: 0, content }, openFence: -1, wholeDocument: true }
+    : partition.current.push(content), [content]);
+  // Large semantic blocks remain whole; defer their parsing so input and
+  // process updates can paint first. Settlement always consumes exact text.
+  const deferredTail = useDeferredValue(view.tail);
+  const tail = isStreaming && view.tail.content.length > 8192 ? deferredTail : view.tail;
+  const pathsKey = JSON.stringify(knownFilePaths);
+  const resources = useMemo(() => ({ workspaceRoot, documentDirectory, conversationId, fileOwner, openFileLinksInSidePanel,
+    knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, documentDirectory, conversationId, fileOwner, openFileLinksInSidePanel, pathsKey]);
+  const boundCitationIndexes = useMemo(() => new Set(
+    (citations ?? []).flatMap((citation, index) => citation.source || citation.url ? [index + 1] : []),
+  ), [citations]);
+  const plugins = useMemo<MarkdownRemarkPlugins>(() => {
+    const fileRefs: MarkdownRemarkPlugins[number] = [linkifyBareFileReferences, resources];
+    return boundCitationIndexes.size
+      ? [...remarkPlugins, fileRefs, [removeCitationMarkers, boundCitationIndexes]]
+      : [...remarkPlugins, fileRefs];
+  }, [boundCitationIndexes, resources]);
+  // Completed blocks and the mutable tail share one keyed child list. Moving
+  // a finished block under another component remounted its measured DOM.
+  const committed = useMemo(() => view.wholeDocument ? [] : view.parts.map(part =>
+    <MarkdownPiece key={part.start} part={part} scopeId={scopeId} resources={resources} resolved={resolved} plugins={plugins} />),
+  [view.wholeDocument, view.parts, view.parts.length, scopeId, resources, resolved, plugins]);
+  return <MarkdownResourceContext.Provider value={resources}><div id={scopeId} className="md-body">
+    {[...committed, tail.content.trim() && <MarkdownPiece key={tail.start} part={tail} openFence={isStreaming ? view.openFence : -1}
+      streamingTail={Boolean(isStreaming)} scopeId={scopeId} resources={resources} resolved={resolved} plugins={plugins} />]}
+  </div></MarkdownResourceContext.Provider>;
+}
+
+MarkdownRenderer.displayName = "MarkdownRenderer";

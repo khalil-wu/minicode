@@ -1,0 +1,318 @@
+/*
+ * tokens-anthropic.css — Anthropic 品牌元素与丝滑动效增强
+ *
+ * 在现有 tokens.css 基础上补充：
+ * 1. Anthropic 橙色品牌色
+ * 2. 温暖灰色调（轻微调整，ΔE < 3）
+ * 3. 精确的动效参数（基于 StyleKit 提取值）
+ *
+ * 使用方式：在主入口 import tokens.css 后 import 本文件
+ */
+
+:root {
+  /* ═══════════════════════════════════════════════════════
+     Anthropic 品牌橙色系统
+     ═══════════════════════════════════════════════════════ */
+
+  /* 主橙色 - Anthropic 标志性颜色 */
+  --anthropic-orange: #E67635;
+  --anthropic-orange-hover: #D66525;
+  --anthropic-orange-light: #FFF4ED;
+  --anthropic-orange-dark: #4A2615;
+  --anthropic-orange-soft: oklch(0.78 0.11 45 / 0.12);
+
+  /* 品牌橙色的渐变（用于特殊强调） */
+  --anthropic-gradient: linear-gradient(135deg, #E67635 0%, #F59250 100%);
+
+  /* ═══════════════════════════════════════════════════════
+     温暖灰调整（深色主题）
+     在现有纯中性灰基础上加入极轻微暖调（色温约5500K）
+     ═══════════════════════════════════════════════════════ */
+
+  /* 深色主题温暖调整 */
+  --surface-base-warm:    oklch(0.205 0.004 45);  /* 原0.002 -> 0.004, 加入45度暖色相 */
+  --surface-sidebar-warm: oklch(0.225 0.004 45);
+  --surface-page-warm:    oklch(0.245 0.005 45);
+  --text-primary-warm:    oklch(0.930 0.004 45);
+
+  /* ═══════════════════════════════════════════════════════
+     丝滑动效系统 - 基于 StyleKit 精确参数
+     ═══════════════════════════════════════════════════════ */
+
+  /* ── 时长（Duration）─────────────────────────────────── */
+  --anim-proximity-reveal: 180ms;   /* Proximity Reveal - 辅助操作显现 */
+  --anim-scale-in:         200ms;   /* Scale In - 菜单/弹窗入场（调整为200ms更从容） */
+  --anim-scale-out:        150ms;   /* Scale Out - 退场（比入场快） */
+  --anim-collapse:         350ms;   /* Collapse - 折叠/展开 */
+  --anim-crossfade:        300ms;   /* Crossfade - 内容切换（从500ms调快到300ms） */
+  --anim-shimmer:          2000ms;  /* Shimmer - 加载占位 */
+  --anim-message-fade:     250ms;   /* 消息淡入 - 比普通元素慢，更从容 */
+  --anim-drawer:           280ms;   /* 侧栏/抽屉 - 比Linear略慢，更有"重量感" */
+
+  /* ── 缓动函数（Easing）──────────────────────────────── */
+  --ease-proximity:    ease-out;                      /* Proximity Reveal */
+  --ease-scale-in:     cubic-bezier(0.16, 1, 0.3, 1); /* Scale In - 弹性入场 */
+  --ease-scale-out:    cubic-bezier(0.4, 0, 1, 1);    /* Scale Out - 快速退场 */
+  --ease-collapse:     cubic-bezier(0.4, 0, 0.2, 1);  /* Collapse - 平滑展开 */
+  --ease-crossfade:    ease-in-out;                   /* Crossfade - 对称过渡 */
+  --ease-shimmer:      linear;                        /* Shimmer - 匀速扫过 */
+  --ease-message:      cubic-bezier(0.19, 1, 0.22, 1); /* 消息入场 - 柔和 */
+  --ease-drawer:       cubic-bezier(0.23, 1, 0.32, 1); /* 抽屉 - 快速但不突兀 */
+
+  /* ── 变换属性（Transform）───────────────────────────── */
+  --transform-scale-in-start:  scale(0.96);  /* Scale In 起始（0.96比0.99更明显但不夸张） */
+  --transform-scale-out-end:   scale(0.98);  /* Scale Out 结束 */
+  --transform-proximity-y:     translateY(2px); /* Proximity 轻微位移 */
+
+  /* ── 复合动效 Tokens ─────────────────────────────────── */
+
+  /* Proximity Reveal - 辅助操作hover显现 */
+  --transition-proximity: opacity var(--anim-proximity-reveal) var(--ease-proximity),
+                          transform var(--anim-proximity-reveal) var(--ease-proximity);
+
+  /* Scale In/Out - 菜单弹窗 */
+  --transition-scale-in:  opacity var(--anim-scale-in) var(--ease-scale-in),
+                          transform var(--anim-scale-in) var(--ease-scale-in);
+  --transition-scale-out: opacity var(--anim-scale-out) var(--ease-scale-out),
+                          transform var(--anim-scale-out) var(--ease-scale-out);
+
+  /* Collapse - 折叠展开 */
+  --transition-collapse:  max-height var(--anim-collapse) var(--ease-collapse),
+                          opacity var(--anim-collapse) var(--ease-collapse),
+                          padding var(--anim-collapse) var(--ease-collapse);
+
+  /* Crossfade - 内容切换 */
+  --transition-crossfade: opacity var(--anim-crossfade) var(--ease-crossfade);
+
+  /* Message Fade In - 消息淡入 */
+  --transition-message-fade: opacity var(--anim-message-fade) var(--ease-message),
+                             transform var(--anim-message-fade) var(--ease-message);
+
+  /* Drawer - 侧栏抽屉 */
+  --transition-drawer: transform var(--anim-drawer) var(--ease-drawer);
+
+  /* ═══════════════════════════════════════════════════════
+     Anthropic 思考指示器（三点呼吸）
+     ═══════════════════════════════════════════════════════ */
+  --thinking-dot-size: 8px;
+  --thinking-animation-duration: 1800ms;
+  --thinking-dot-delay-1: 0ms;
+  --thinking-dot-delay-2: 150ms;
+  --thinking-dot-delay-3: 300ms;
+
+  /* ═══════════════════════════════════════════════════════
+     圆角优化（统一向Anthropic柔和风格靠拢）
+     ═══════════════════════════════════════════════════════ */
+  --radius-btn-sm:    10px;  /* 小按钮：8px -> 10px */
+  --radius-session:   12px;  /* 会话行：10px -> 12px */
+  --radius-input:     12px;  /* 普通输入框 */
+  --radius-composer:  20px;  /* 主输入框：22px -> 20px（更专业，不过圆） */
+  --radius-menu:      16px;  /* 菜单/弹窗 */
+  --radius-card:      16px;  /* 卡片 */
+
+  /* ═══════════════════════════════════════════════════════
+     阴影优化（更轻盈细腻）
+     ═══════════════════════════════════════════════════════ */
+  --shadow-menu: 0 2px 8px oklch(0 0 0 / 0.08),
+                 0 8px 24px oklch(0 0 0 / 0.12);
+  --shadow-composer: 0 1px 3px oklch(0 0 0 / 0.04),
+                     0 4px 12px oklch(0 0 0 / 0.06);
+
+  /* ═══════════════════════════════════════════════════════
+     对话区间距（更透气）
+     ═══════════════════════════════════════════════════════ */
+  --space-message-gap: 24px;      /* 用户/assistant消息间距：16px -> 24px */
+  --space-paragraph-gap: 16px;    /* 段落间距：12px -> 16px */
+  --leading-conversation: 1.85;   /* 对话行高：1.64 -> 1.85 */
+}
+
+/* ═══════════════════════════════════════════════════════
+   浅色主题的 Anthropic 调整
+   ═══════════════════════════════════════════════════════ */
+[data-theme="light"] {
+  /* Anthropic 橙色在浅色下保持一致 */
+  --anthropic-orange: #E67635;
+  --anthropic-orange-hover: #D66525;
+  --anthropic-orange-light: #FFF8F2;
+  --anthropic-orange-dark: #8B3D1E;
+  --anthropic-orange-soft: oklch(0.78 0.11 45 / 0.10);
+
+  /* 温暖灰调整（浅色） */
+  --surface-base-warm:    oklch(1 0.002 45);
+  --surface-sidebar-warm: oklch(0.965 0.003 45);
+  --text-primary-warm:    oklch(0.25 0.005 45);
+
+  /* 阴影在浅色下更明显 */
+  --shadow-menu: 0 2px 8px oklch(0 0 0 / 0.10),
+                 0 8px 24px oklch(0 0 0 / 0.15);
+  --shadow-composer: 0 1px 3px oklch(0 0 0 / 0.06),
+                     0 4px 12px oklch(0 0 0 / 0.08);
+}
+
+/* ═══════════════════════════════════════════════════════
+   Keyframes 动画定义
+   ═══════════════════════════════════════════════════════ */
+
+/* Anthropic 三点思考动画 */
+@keyframes thinking-pulse {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.95);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Shimmer 微光扫过 */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* Scale In 弹窗入场 */
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: var(--transform-scale-in-start);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Scale Out 弹窗退场 */
+@keyframes scale-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: var(--transform-scale-out-end);
+  }
+}
+
+/* Message Fade In 消息淡入 */
+@keyframes message-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   工具类（Utility Classes）
+   ═══════════════════════════════════════════════════════ */
+
+/* Proximity Reveal - 辅助操作默认隐藏 */
+.proximity-reveal {
+  opacity: 0;
+  transform: var(--transform-proximity-y);
+  transition: var(--transition-proximity);
+}
+
+.proximity-reveal-trigger:hover .proximity-reveal,
+.proximity-reveal-trigger:focus-within .proximity-reveal {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Anthropic 思考指示器 */
+.thinking-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.thinking-dot {
+  width: var(--thinking-dot-size);
+  height: var(--thinking-dot-size);
+  background: var(--anthropic-orange);
+  border-radius: 50%;
+  animation: thinking-pulse var(--thinking-animation-duration) ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(1) {
+  animation-delay: var(--thinking-dot-delay-1);
+}
+
+.thinking-dot:nth-child(2) {
+  animation-delay: var(--thinking-dot-delay-2);
+}
+
+.thinking-dot:nth-child(3) {
+  animation-delay: var(--thinking-dot-delay-3);
+}
+
+/* Shimmer 加载占位 */
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--surface-panel) 0%,
+    var(--surface-hover) 50%,
+    var(--surface-panel) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer var(--anim-shimmer) var(--ease-shimmer) infinite;
+}
+
+/* Scale 动画工具类 */
+.animate-scale-in {
+  animation: scale-in var(--anim-scale-in) var(--ease-scale-in);
+}
+
+.animate-scale-out {
+  animation: scale-out var(--anim-scale-out) var(--ease-scale-out);
+}
+
+/* Message 淡入工具类 */
+.animate-message-fade-in {
+  animation: message-fade-in var(--anim-message-fade) var(--ease-message);
+}
+
+/* Anthropic 橙色品牌强调工具类 */
+.anthropic-accent {
+  color: var(--anthropic-orange);
+}
+
+.anthropic-accent-bg {
+  background-color: var(--anthropic-orange-soft);
+}
+
+.anthropic-accent-border {
+  border-color: var(--anthropic-orange);
+}
+
+/* ═══════════════════════════════════════════════════════
+   Reduced Motion 支持
+   ═══════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .thinking-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+
+  .shimmer {
+    animation: none;
+    background: var(--surface-panel);
+  }
+}

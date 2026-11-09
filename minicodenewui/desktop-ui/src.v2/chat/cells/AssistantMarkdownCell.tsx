@@ -1,0 +1,903 @@
+import { useI18n } from "../../i18n";
+import { AlertTriangle, ChevronDown, ChevronUp, Copy, Download, Image as ImageIcon, LoaderCircle, Maximize2, Quote, RotateCw, X } from "lucide-react";
+import { fileIcon } from "../../lib/file-icons";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
+import { createPortal } from "react-dom";
+import type { AssistantMarkdownCellState, AssistantReplyAttachment } from "./cellTypes";
+import type { ArtifactPreview, ProgressContentBlock } from "../../stores/types";
+import { MarkdownRenderer } from "../messages/MarkdownRenderer";
+import { citationUrl } from "../citationProjection";
+import { BrandIcon } from "../../components/BrandIcon";
+import { ReplyActionIcon } from "../../components/ReplyActionIcon";
+import { useAppStore } from "../../stores";
+import { openWebTarget } from "../openWebTarget";
+import { commandResultSucceeded, sendClientCommandAwaitResult } from "../../protocol/ws-outbox";
+import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
+import { useContextMenu } from "../../components/useContextMenu";
+import { copyContent, copyText } from "../../lib/clipboard";
+import { readMarkdownClipboard, writeMarkdownSelection } from "../../lib/markdown-clipboard";
+import { saveBlobFile } from "../../lib/save-blob";
+import { openArtifactPreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
+import { sendChatMessage } from "../sendChatMessage";
+import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../../lib/workspace-path";
+import { mediaTypeForPath } from "../../lib/media-types";
+import { pushToast } from "../../overlays/ToastContainer";
+import { getWebSocket } from "../../hooks/useWebSocket";
+import { useEscapeKey, useFocusTrap } from "../../hooks/useFocusTrap";
+import {
+  artifactMediaTypeForProjection,
+  canonicalArtifactKind,
+  normalizeArtifactPreview,
+} from "../../lib/artifact-projection";
+import {
+  artifactResourceUrl,
+  inlineImageResourceUrl,
+  isDisplayableImageMediaType,
+  withPreviewCacheBust,
+} from "../../lib/artifact-resource";
+import { markdownArtifactImageIds } from "../../lib/markdown-artifact-images";
+import { extractInlineCitationIndexes } from "../../lib/markdown";
+import "./cells.css";
+import { ProposedPlanAnswer } from "./ProposedPlanAnswer";
+
+export function AssistantMarkdownCell({
+  cell,
+  isTranscriptMode = false,
+  conversationId: ownerConversationId,
+  workspaceRoot: ownerWorkspaceRoot,
+  knownFilePaths,
+  afterContent,
+}: {
+  cell: AssistantMarkdownCellState;
+  isTranscriptMode?: boolean;
+  /** Owner of this transcript; child/history views may differ from active chat. */
+  conversationId?: string;
+  /** Workspace that owns paths emitted in this transcript. */
+  workspaceRoot?: string;
+  knownFilePaths?: string[];
+  afterContent?: React.ReactNode;
+}) {
+  const { t: tr } = useI18n();
+  const [copiedSource, setCopiedSource] = useState<{ text: string } | null>(null);
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
+  const [forking, setForking] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const copyingRef = useRef(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const isChatMode = useAppStore((s) => s.appMode === "chat");
+  const setQuotedMessage = useAppStore((s) => s.setQuotedMessage);
+  const conversationId = String(ownerConversationId || "").trim();
+  const workspaceRoot = String(ownerWorkspaceRoot || "").trim();
+  const canEditConversation = useAppStore((s) => Boolean(conversationId && s.conversationId === conversationId
+    && workspaceRootsEqual(s.workingDirectory, workspaceRoot)));
+  const rawMarkdown = cell.markdownSource;
+  const displayMarkdown = rawMarkdown;
+  const copied = copiedSource?.text === displayMarkdown;
+  useEffect(() => {
+    if (!copiedSource) return;
+    const timer = window.setTimeout(() => setCopiedSource(null), isChatMode ? 1200 : 2000);
+    return () => window.clearTimeout(timer);
+  }, [copiedSource, isChatMode]);
+  const sources = uniqueCitationSources(rawMarkdown, cell.citations);
+  const visibleSources = sourcesExpanded ? sources : sources.slice(0, 3);
+  const hiddenSourceCount = Math.max(0, sources.length - visibleSources.length);
+  // Attribute the reply's origin without diverging visually in this phase.
+  // "reply" marks an explicit BriefTool reply; "stream" (default) is
+  // final-answer text streamed after the tool work.
+  const replySource = cell.source === "reply" ? "reply" : "stream";
+  const visibleGeneratedFiles = useMemo(() => {
+    const normalizedMarkdown = rawMarkdown.replace(/\\/g, "/");
+    return (cell.attachments ?? []).filter((attachment) => {
+      const normalizedPath = normalizeWorkspacePath(attachment.path);
+      const caseInsensitive = isWindowsLikeWorkspacePath(workspaceRoot)
+        || isWindowsLikeWorkspacePath(attachment.path);
+      const markdownKey = caseInsensitive ? normalizedMarkdown.toLowerCase() : normalizedMarkdown;
+      const pathKey = caseInsensitive
+        ? normalizedPath.toLowerCase()
+        : normalizedPath;
+      return !pathKey || !markdownKey.includes(pathKey);
+    });
+  }, [cell.attachments, rawMarkdown, workspaceRoot]);
+  const normalizedArtifacts = useMemo(
+    () => (cell.artifacts ?? []).map(normalizeArtifactPreview),
+    [cell.artifacts],
+  );
+  const embeddedImageIds = useMemo(() => {
+    if (!normalizedArtifacts.some((artifact) => artifact.kind === "image")) return new Set<string>();
+    return new Set([
+      ...markdownArtifactImageIds(cell.markdownBeforeArtifacts ?? rawMarkdown),
+      ...markdownArtifactImageIds(cell.markdownAfterArtifacts ?? ""),
+    ]);
+  }, [cell.markdownBeforeArtifacts, cell.markdownAfterArtifacts, rawMarkdown, normalizedArtifacts]);
+  const allImageArtifacts = useMemo(
+    () => normalizedArtifacts.filter((artifact) => artifact.kind === "image"),
+    [normalizedArtifacts],
+  );
+  const imageArtifacts = useMemo(
+    () => allImageArtifacts.filter((artifact) => !embeddedImageIds.has(artifact.artifactId)),
+    [allImageArtifacts, embeddedImageIds],
+  );
+  const otherArtifacts = useMemo(
+    () => normalizedArtifacts.filter((artifact) => artifact.kind !== "image"),
+    [normalizedArtifacts],
+  );
+  const visibleImageProgress = useMemo(() => {
+    const progress = cell.imageProgress ?? [];
+    const selectedCalls = new Set(allImageArtifacts.flatMap((artifact) => artifact.toolCallId ? [artifact.toolCallId] : []));
+    return progress.filter((item) => {
+      // Tool failures remain in their original process disclosure. Only a
+      // provider-native lifecycle needs a separate answer-position failure.
+      if (item.status === "failed" || item.status === "partial") return !item.toolCallId;
+      if (item.toolCallId) {
+        if (selectedCalls.has(item.toolCallId)) return false;
+        // Code-mode tools may generate images for inspection and select no
+        // display output. A finished turn cannot still be loading that output.
+        return !(item.status === "completed" && cell.terminalStatus === "completed");
+      }
+      // Provider-native image events have no tool call. Their artifact remains
+      // in the same provider lifecycle; another tool's image cannot settle it.
+      return !allImageArtifacts.some((artifact) => !artifact.toolCallId);
+    });
+  }, [cell.imageProgress, cell.terminalStatus, allImageArtifacts]);
+  const imageRows = useMemo(() => {
+    const rows: ({ type: "progress"; progress: ProgressContentBlock } | { type: "artifact"; artifact: ArtifactPreview })[] = [];
+    const artifactsByCall = new Map<string, ArtifactPreview[]>();
+    for (const artifact of imageArtifacts) {
+      if (!artifact.toolCallId) continue;
+      const owned = artifactsByCall.get(artifact.toolCallId) ?? [];
+      owned.push(artifact);
+      artifactsByCall.set(artifact.toolCallId, owned);
+    }
+    const placed = new Set<string>();
+    const visible = new Set(visibleImageProgress.map((progress) => progress.id));
+    for (const progress of cell.imageProgress ?? []) {
+      for (const artifact of progress.toolCallId ? artifactsByCall.get(progress.toolCallId) ?? [] : []) {
+        if (placed.has(artifact.artifactId)) continue;
+        rows.push({ type: "artifact", artifact });
+        placed.add(artifact.artifactId);
+      }
+      if (visible.has(progress.id)) rows.push({ type: "progress", progress });
+    }
+    for (const artifact of imageArtifacts) {
+      if (!placed.has(artifact.artifactId)) rows.push({ type: "artifact", artifact });
+    }
+    return rows;
+  }, [cell.imageProgress, imageArtifacts, visibleImageProgress]);
+  const hasPendingImage = visibleImageProgress.some((progress) => progress.status !== "failed" && progress.status !== "partial"
+    && !(progress.status === "completed" && progress.toolCallId && cell.terminalStatus));
+  const isSettled = !cell.isStreaming && !hasPendingImage;
+
+  const copy = useCallback(async () => {
+    if (copyingRef.current || copied) return;
+    const content = isChatMode ? displayMarkdown : readMarkdownClipboard(contentRef.current!) ?? "";
+    copyingRef.current = true;
+    setCopying(true);
+    const succeeded = await copyContent(content, tr("回复"));
+    copyingRef.current = false;
+    setCopying(false);
+    if (succeeded) setCopiedSource({ text: displayMarkdown });
+  }, [copied, displayMarkdown, isChatMode, tr]);
+
+  const quoteReply = useCallback(() => {
+    const state = useAppStore.getState();
+    if (!displayMarkdown || !conversationId || state.conversationId !== conversationId
+      || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
+    setQuotedMessage({
+      id: cell.messageId || cell.id,
+      role: "assistant",
+      content: displayMarkdown,
+    });
+    requestAnimationFrame(() => {
+      const current = useAppStore.getState();
+      if (current.conversationId !== conversationId
+        || !workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return;
+      const composerTextarea = document.querySelector<HTMLElement>("[data-composer-input]");
+      if (composerTextarea) {
+        composerTextarea.focus();
+      }
+    });
+  }, [cell.id, cell.messageId, conversationId, displayMarkdown, setQuotedMessage, workspaceRoot]);
+
+  const regenerate = useCallback(async () => {
+    if (!cell.messageId) return;
+    const state = useAppStore.getState();
+    if (!conversationId || state.conversationId !== conversationId
+      || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
+
+    const index = state.messages.findIndex((item) => item.id === cell.messageId);
+    if (index < 0) return;
+
+    let userIndex = -1;
+    for (let i = index - 1; i >= 0; i--) {
+      if (state.messages[i]?.role === "user") {
+        userIndex = i;
+        break;
+      }
+    }
+
+    if (userIndex < 0) return;
+
+    const { showConfirm } = await import("../../overlays/DialogService");
+    // Regeneration truncates from this reply to the end of the conversation —
+    // tell the user how many trailing messages are also removed, not just the
+    // current reply, so the data loss is clear.
+    const trailingCount = Math.max(0, state.messages.length - index - 1);
+    const ok = await showConfirm({
+      title: tr("重新生成"),
+      message:
+        trailingCount > 0
+          ? tr("将删除当前回复及其后的 {v0} 条消息，并基于上一条提问重新生成。继续吗？", { v0: trailingCount })
+          : tr("将删除当前回复并重新生成。继续吗？"),
+      confirmLabel: tr("重新生成"),
+      danger: false,
+    });
+    if (!ok) return;
+
+    // Re-read the store after the await: the user may have switched
+    // conversations while the confirm dialog was open, and sending the
+    // retry against the pre-dialog conversation id would truncate and
+    // re-run the wrong conversation.
+    const current = useAppStore.getState();
+    if (current.conversationId !== conversationId
+      || !workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return;
+    const stillPresent = current.messages.findIndex((item) => item.id === cell.messageId);
+    if (stillPresent < 0) return;
+
+    const userMessage = state.messages[userIndex];
+    if (userMessage && userMessage.role === "user") {
+      const attachmentRefs = userMessage.attachmentRefs ?? [];
+      sendChatMessage({
+        displayContent: userMessage.content,
+        backendContent: userMessage.backendContent ?? userMessage.content,
+        quotedMessage: userMessage.quotedMessage ?? null,
+        conversationId: current.conversationId || undefined,
+        contextRefs: userMessage.contextRefs ?? [],
+        attachmentRefs,
+        attachments: attachmentRefs.map((attachment) => ({
+          id: attachment.id,
+          kind: attachment.kind,
+          file_name: attachment.name,
+          media_type: attachment.mediaType,
+          artifact_id: attachment.artifactId,
+          doc_id: attachment.docId,
+          size_bytes: attachment.sizeBytes,
+          input_source: attachment.inputSource,
+          source_char_count: attachment.sourceCharCount,
+        })),
+        retryFromMessageId: userMessage.id,
+      });
+    }
+  }, [cell.messageId, conversationId, workspaceRoot, tr, tr]);
+
+  const forkConversation = useCallback(async () => {
+    if (!cell.messageId || forking) return;
+    const state = useAppStore.getState();
+    if (!conversationId || state.conversationId !== conversationId
+      || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
+    setForking(true);
+    // The fork owner is the conversation's own execution root. A projectless or
+    // root-workspace conversation has none, and the browsing directory is not a
+    // substitute: the backend compares it against the source conversation.
+    const conversation = state.conversations.find(item => item.id === conversationId);
+    const forkWorkspaceRoot = conversation?.worktreePath || conversation?.workspaceRoot || "";
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "context.fork",
+        conversation_id: conversationId,
+        ...(forkWorkspaceRoot ? { workspace_root: forkWorkspaceRoot } : {}),
+        message_id: cell.messageId,
+        create_branch: true,
+        activate: true,
+      }, "context.fork");
+      if (!commandResultSucceeded(result)) pushToast(result.message, "error");
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setForking(false);
+    }
+  }, [cell.messageId, conversationId, workspaceRoot, forking]);
+
+  if (!cell.isStreaming && !(cell.markdownBeforeArtifacts ?? rawMarkdown).trim()
+    && !cell.markdownAfterArtifacts?.trim() && imageRows.length === 0 && otherArtifacts.length === 0
+    && visibleGeneratedFiles.length === 0 && sources.length === 0 && !afterContent) return null;
+
+  return (
+    <div
+      className="assistant-cell-wrap"
+      data-message-id={cell.messageId || cell.id}
+      data-streaming={cell.isStreaming ? "true" : "false"}
+      data-source={replySource}
+    >
+      <div className="assistant-cell-content md-prose" ref={contentRef} onCopy={(event) => {
+        if (!isChatMode && !event.defaultPrevented && writeMarkdownSelection(event.currentTarget, event.clipboardData)) event.preventDefault();
+      }}>
+        {(cell.markdownBeforeArtifacts ?? rawMarkdown) && (
+          <ProposedPlanAnswer
+          failed={cell.source === "partial" || Boolean(cell.failureMessage)}
+          content={cell.markdownBeforeArtifacts ?? rawMarkdown}
+          isStreaming={cell.isStreaming || false}
+          citations={cell.citations}
+          knownFilePaths={knownFilePaths}
+          workspaceRoot={workspaceRoot}
+          conversationId={conversationId}
+          openFileLinksInSidePanel
+          />
+        )}
+        {(visibleImageProgress.length > 0 || imageArtifacts.length > 0 || otherArtifacts.length > 0) && (
+          <div className="assistant-cell-generated" aria-label={tr("生成结果")} data-markdown-copy="exclude">
+            {imageRows.map((row) => row.type === "progress" ? (
+              <ImageGenerationProgress
+                key={`progress:${row.progress.id}`}
+                progress={row.progress}
+                fallbackFailureMessage={cell.failureMessage}
+                recoverable={cell.failureRecoverable}
+                settledWithoutOutput={Boolean(row.progress.toolCallId && cell.terminalStatus && row.progress.status === "completed")}
+              />
+            ) : (
+              <GeneratedArtifactCard
+                key={row.artifact.artifactId}
+                artifact={row.artifact}
+                conversationId={conversationId || undefined}
+              />
+            ))}
+            {otherArtifacts.map((artifact) => (
+              <GeneratedArtifactCard
+                key={artifact.artifactId}
+                artifact={artifact}
+                conversationId={conversationId || undefined}
+              />
+            ))}
+          </div>
+        )}
+        {cell.markdownAfterArtifacts && (
+          <MarkdownRenderer
+          content={cell.markdownAfterArtifacts}
+          isStreaming={cell.isStreaming || false}
+          citations={cell.citations}
+          knownFilePaths={knownFilePaths}
+          workspaceRoot={workspaceRoot}
+          conversationId={conversationId}
+          openFileLinksInSidePanel
+          />
+        )}
+        {visibleGeneratedFiles.length > 0 && (
+          <div className="assistant-cell-output-files" aria-label={tr("生成文件")} data-markdown-copy="exclude">
+            {visibleGeneratedFiles.map((attachment) => (
+                <GeneratedFileLink
+                  key={attachment.path}
+                  attachment={attachment}
+                  conversationId={conversationId || undefined}
+                  workspaceRoot={workspaceRoot}
+                />
+              ))}
+          </div>
+        )}
+      </div>
+      {afterContent}
+      {(sources.length > 0 || (!isTranscriptMode && isSettled)) && (
+      <div className="assistant-cell-actions" data-has-sources={sources.length > 0 ? "true" : "false"}>
+        {sources.length > 0 && (
+          <div className="assistant-cell-source-strip" aria-label={tr("引用来源")}>
+            {visibleSources.map((source) => source.url ? (
+                <a
+                  key={source.key}
+                  href={source.url}
+                  rel="noreferrer"
+                  title={source.title || source.url}
+                  className="assistant-cell-source-chip"
+                  onClick={(event) => {
+                    if (openWebTarget(source.url!)) event.preventDefault();
+                  }}
+                >
+                  <span className="assistant-cell-source-favicon" aria-hidden="true">
+                    <BrandIcon
+                      value={`${source.label} ${source.title || ""} ${source.url}`}
+                      websiteUrl={source.url}
+                      fallback="web"
+                      size={14}
+                    />
+                  </span>
+                  <span className="assistant-cell-source-label">{source.label}</span>
+                </a>
+              ) : (
+                <span
+                  key={source.key}
+                  title={source.title || source.label}
+                  className="assistant-cell-source-chip"
+                  role="note"
+                >
+                  <span className="assistant-cell-source-favicon" aria-hidden="true">
+                    {fileIcon(source.title || source.label, { size: 14, className: "assistant-cell-source-file-icon" })}
+                  </span>
+                  <span className="assistant-cell-source-label">{source.label}</span>
+                </span>
+            ))}
+            {hiddenSourceCount > 0 && (
+              <button
+                type="button"
+                className="assistant-cell-source-more"
+                onClick={() => setSourcesExpanded(true)}
+                aria-label={tr("再显示 {v0} 个来源", { v0: hiddenSourceCount })}
+              >
+                <ChevronDown size={14} aria-hidden="true" />
+                {tr("再显示")}{hiddenSourceCount} {tr("个")}</button>
+            )}
+            {sourcesExpanded && sources.length > 3 && (
+              <button
+                type="button"
+                className="assistant-cell-source-more"
+                onClick={() => setSourcesExpanded(false)}
+                aria-label={tr("收起来源")}
+              >
+                <ChevronUp size={14} aria-hidden="true" />
+                {tr("收起")}</button>
+            )}
+          </div>
+        )}
+        {!isTranscriptMode && isSettled && <div className="assistant-cell-action-buttons">
+          {cell.copyable && (
+            <button
+              type="button"
+              onClick={copied ? undefined : (event) => { event.stopPropagation(); void copy(); }}
+              aria-busy={copying || undefined}
+              aria-disabled={copying || undefined}
+              title={copied ? tr("已复制") : tr("复制回复")}
+              aria-label={copied ? tr("已复制") : tr("复制回复")}
+              className="cell-action-btn"
+            >
+              <ReplyActionIcon name={copied ? "copied" : "copy"} />
+            </button>
+          )}
+          {cell.messageId && canEditConversation && (
+            <>
+            {isChatMode && <button
+              type="button"
+              onClick={quoteReply}
+              title={tr("引用回复")}
+              aria-label={tr("引用回复")}
+              className="cell-action-btn"
+            >
+              <Quote size={14} />
+            </button>}
+            {isChatMode && <button
+              type="button"
+              onClick={regenerate}
+              title={tr("重新生成")}
+              aria-label={tr("重新生成")}
+              className="cell-action-btn"
+            >
+              <RotateCw size={14} />
+            </button>}
+            <button
+              type="button"
+              onClick={forkConversation}
+              title={tr("从此处分支")}
+              aria-label={tr("从此处分支")}
+              aria-busy={forking || undefined}
+              disabled={forking}
+              className="cell-action-btn"
+            >
+              {forking ? <LoaderCircle size={14} className="animate-spin" /> : <ReplyActionIcon name="fork" />}
+            </button>
+            </>
+          )}
+        </div>}
+      </div>
+      )}
+    </div>
+  );
+}
+
+function safeInlineImageUrl(artifact: ArtifactPreview): string {
+  return inlineImageResourceUrl(artifact.url);
+}
+
+function ImageGenerationProgress({
+  progress,
+  fallbackFailureMessage,
+  recoverable,
+  settledWithoutOutput,
+}: {
+  progress: ProgressContentBlock;
+  fallbackFailureMessage?: string;
+  recoverable?: boolean;
+  settledWithoutOutput?: boolean;
+}) {
+  const { t: tr } = useI18n();
+  const failed = progress.status === "failed";
+  const incomplete = progress.status === "partial";
+  const completed = progress.status === "completed";
+  const awaitingImage = !failed && !incomplete && !settledWithoutOutput;
+  const detail = String(
+    progress.detail
+      || (failed || incomplete ? fallbackFailureMessage : "")
+      || progress.summary
+      || progress.message,
+  ).trim();
+  return (
+    <div
+      className={failed
+        ? "assistant-cell-image-placeholder assistant-cell-image-error"
+        : "assistant-cell-image-placeholder"}
+      data-running={awaitingImage ? "true" : "false"}
+      data-status={progress.status}
+      role={failed ? "alert" : "status"}
+      aria-live="polite"
+    >
+      <span className="assistant-cell-image-placeholder-visual" aria-hidden="true">
+        {failed
+          ? <AlertTriangle size={22} />
+          : <ImageIcon size={24} />}
+      </span>
+      <span className="assistant-cell-image-placeholder-copy">
+        <strong>
+          {failed
+            ? tr("图像生成失败")
+            : incomplete
+              ? tr("图像生成未完整结束")
+              : completed
+                ? settledWithoutOutput ? tr("图像生成完成") : tr("正在载入生成结果")
+                : progress.message || tr("正在生成图像")}
+        </strong>
+        {detail && detail !== progress.message && <small>{detail}</small>}
+        {failed && recoverable && <small>{tr("服务暂时不可用，可以重试。")}</small>}
+      </span>
+    </div>
+  );
+}
+
+function GeneratedArtifactCard({
+  artifact,
+  conversationId,
+}: {
+  artifact: ArtifactPreview;
+  conversationId?: string;
+}) {
+  const { t: tr } = useI18n();
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [loadedImageUrl, setLoadedImageUrl] = useState("");
+  const [failedImageUrl, setFailedImageUrl] = useState("");
+  const [imageReloadNonce, setImageReloadNonce] = useState(0);
+  const isConnected = useAppStore((state) => state.isConnected);
+  const kind = canonicalArtifactKind(artifact.kind, artifact.mediaType);
+  const mediaType = artifactMediaTypeForProjection(artifact.mediaType, kind) || "";
+  const inlineUrl = kind === "image" ? safeInlineImageUrl(artifact) : "";
+  const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
+  const persistedImageUrl = useMemo(() => {
+    if (kind !== "image" || !isDisplayableImageMediaType(mediaType)) return "";
+    return withPreviewCacheBust(artifactResourceUrl({
+      artifactId: artifact.artifactId,
+      conversationId,
+      sessionId,
+      source: "artifact",
+      originalUrl: inlineUrl,
+      isConnected,
+    }), imageReloadNonce);
+  }, [artifact.artifactId, conversationId, imageReloadNonce, inlineUrl, isConnected, kind, mediaType, sessionId]);
+  const imageUrl = persistedImageUrl;
+  const lightboxUrl = lightboxOpen ? imageUrl : "";
+  const lightboxRef = useFocusTrap(Boolean(lightboxUrl));
+  useEscapeKey(() => setLightboxOpen(false), Boolean(lightboxUrl), lightboxRef);
+  const imageLoaded = Boolean(imageUrl && loadedImageUrl === imageUrl);
+  const imageFailed = Boolean(imageUrl && failedImageUrl === imageUrl);
+
+  const freshImageUrl = () => {
+    return withPreviewCacheBust(artifactResourceUrl({
+      artifactId: artifact.artifactId,
+      conversationId,
+      sessionId,
+      source: "artifact",
+      originalUrl: inlineUrl,
+      isConnected,
+    }), imageReloadNonce) || imageUrl;
+  };
+
+  const openImageLightbox = () => {
+    const nextUrl = freshImageUrl();
+    if (!nextUrl) {
+      pushToast(tr("图片内容尚未载入。"), "warning", 2400);
+      return;
+    }
+    setLightboxOpen(true);
+  };
+
+  const openPreview = () => {
+    if (!conversationId) return;
+    openArtifactPreview({
+      artifactId: artifact.artifactId,
+      name: artifact.summary || (kind === "image" ? tr("生成图片") : tr("生成文件")),
+      summary: artifact.summary,
+      mediaType,
+      kind,
+      conversationId,
+    });
+  };
+
+  const copyImage = async () => {
+    const sourceUrl = freshImageUrl();
+    if (!sourceUrl) {
+      pushToast(tr("图片内容尚未载入，暂时无法复制。"), "warning", 3200);
+      return;
+    }
+    try {
+      const ClipboardItemCtor = globalThis.ClipboardItem;
+      if (!ClipboardItemCtor || typeof navigator.clipboard?.write !== "function") {
+        throw new Error("Image clipboard is unavailable.");
+      }
+      const response = await fetch(sourceUrl);
+      if (!response.ok) throw new Error(`Image request failed (${response.status}).`);
+      const blob = await response.blob();
+      await navigator.clipboard.write([new ClipboardItemCtor({ [blob.type || mediaType || "image/png"]: blob })]);
+      pushToast(tr("图片已复制"), "success", 1800);
+    } catch {
+      pushToast(tr("当前系统无法直接复制图片，请使用保存图片。"), "warning", 3600);
+    }
+  };
+
+  const saveImage = async () => {
+    const sourceUrl = freshImageUrl();
+    if (!sourceUrl) {
+      pushToast(tr("图片内容尚未载入，暂时无法保存。"), "warning", 3200);
+      return;
+    }
+    try {
+      const response = await fetch(sourceUrl);
+      if (!response.ok) throw new Error(`Image request failed (${response.status}).`);
+      const blob = await response.blob();
+      await saveBlobFile(blob, generatedImageFilename(artifact));
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error), "error", 3200);
+    }
+  };
+
+  if (kind === "image") {
+    return (
+      <div
+        className="assistant-cell-image-card"
+        data-artifact-id={artifact.artifactId}
+        data-artifact-conversation-id={conversationId || undefined}
+      >
+        {imageUrl && !imageFailed ? (
+          <button
+            type="button"
+            className="assistant-cell-image-open"
+            data-loaded={imageLoaded ? "true" : "false"}
+            onClick={() => {
+              if (imageLoaded) openImageLightbox();
+            }}
+            aria-label={tr("查看图片大图")}
+          >
+            <img
+              className="assistant-cell-generated-image"
+              src={imageUrl}
+              alt={tr("图片")}
+              loading="lazy"
+              decoding="async"
+              onLoad={() => {
+                setLoadedImageUrl(imageUrl);
+                if (failedImageUrl === imageUrl) setFailedImageUrl("");
+              }}
+              onError={() => setFailedImageUrl(imageUrl)}
+            />
+            {!imageLoaded && (
+              <span className="assistant-cell-image-load-mask" role="status" aria-label={tr("正在载入图片")}>
+                <span aria-hidden="true"><ImageIcon size={24} /></span>
+                <strong>{tr("正在载入图片")}</strong>
+              </span>
+            )}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="assistant-cell-image-unavailable"
+            onClick={() => {
+              if (isConnected && conversationId) setImageReloadNonce((value) => value + 1);
+            }}
+            disabled={!isConnected || !conversationId}
+          >
+            <ImageIcon size={24} aria-hidden="true" />
+            <span>
+              {!conversationId
+                ? tr("图片未关联到会话")
+                : isConnected
+                ? imageFailed
+                  ? tr("图片载入失败，点击重试")
+                  : tr("正在准备图片")
+                : tr("连接恢复后将自动载入图片")}
+            </span>
+          </button>
+        )}
+        {imageLoaded && (
+          <span className="assistant-cell-image-actions" aria-label={tr("图片操作")}>
+            <button type="button" onClick={openImageLightbox} title={tr("查看大图")} aria-label={tr("查看大图")}>
+              <Maximize2 size={15} />
+            </button>
+            <button type="button" onClick={() => void copyImage()} title={tr("复制图片")} aria-label={tr("复制图片")}>
+              <Copy size={15} />
+            </button>
+            <button type="button" onClick={() => void saveImage()} title={tr("保存图片")} aria-label={tr("保存图片")}>
+              <Download size={15} />
+            </button>
+          </span>
+        )}
+        {lightboxOpen && lightboxUrl && createPortal(
+          <div
+              ref={lightboxRef}
+              tabIndex={-1}
+              className="assistant-cell-image-lightbox"
+              role="dialog"
+              aria-modal="true"
+              aria-label={tr("图片大图")}
+              onClick={() => setLightboxOpen(false)}
+            >
+              <div className="assistant-cell-image-lightbox-content" onClick={(event) => event.stopPropagation()}>
+                <img src={lightboxUrl} alt={tr("图片")} />
+                <button
+                  type="button"
+                  className="assistant-cell-image-lightbox-close"
+                  onClick={() => setLightboxOpen(false)}
+                  title={tr("关闭")}
+                  aria-label={tr("关闭大图")}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>,
+          document.body,
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="assistant-cell-artifact-card"
+      onClick={openPreview}
+      aria-label={tr("打开{v0}", { v0: artifact.summary || tr("生成文件") })}
+    >
+      {fileIcon(artifact.summary || "file", { size: 18, className: "assistant-cell-artifact-file-icon" })}
+      <span>
+        <strong>{artifact.summary || tr("生成文件")}</strong>
+        <small>{[mediaType, artifact.bytes != null ? formatFileSize(artifact.bytes) : ""].filter(Boolean).join(" · ")}</small>
+      </span>
+    </button>
+  );
+}
+
+function generatedImageFilename(artifact: ArtifactPreview): string {
+  const extension = artifact.mediaType === "image/jpeg"
+    ? "jpg"
+    : artifact.mediaType === "image/webp"
+      ? "webp"
+      : artifact.mediaType === "image/gif"
+        ? "gif"
+        : "png";
+  const base = String(artifact.summary || "generated-image")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "generated-image";
+  return `${base}.${extension}`;
+}
+
+function GeneratedFileLink({
+  attachment,
+  conversationId,
+  workspaceRoot,
+}: {
+  attachment: AssistantReplyAttachment;
+  conversationId?: string;
+  workspaceRoot: string;
+}) {
+  const { t: tr } = useI18n();
+  const fileName = attachment.path.split(/[/\\]/).filter(Boolean).pop() || attachment.path;
+  const mediaType = mediaTypeForPath(attachment.path);
+  const openAttachment = () => {
+    openWorkspaceFilePreview({
+      path: attachment.path,
+      name: fileName,
+      mediaType,
+      kind: attachment.isImage ? "image" : "file",
+      workspaceRoot,
+      conversationId,
+    });
+  };
+
+  const sizeLabel = formatFileSize(attachment.size);
+  const { onContextMenu, menu } = useContextMenu(() => [
+    // OS shell actions have no meaning in browser mode; offering them there
+    // produced a menu entry that did nothing at all.
+    ...(isDesktop() ? [
+      { label: tr("使用默认应用打开"), onClick: () => { void openPath(attachment.path); } },
+      { label: tr("在资源管理器中显示"), onClick: () => { void revealPath(attachment.path); } },
+    ] : []),
+    { label: "", separator: true },
+    { label: tr("复制路径"), onClick: () => { void copyText(attachment.path, tr("路径")); } },
+  ]);
+
+  return (
+      <span onContextMenu={onContextMenu}>
+        <button
+          type="button"
+          className="assistant-cell-output-file"
+          title={attachment.path}
+          onClick={openAttachment}
+        >
+          <span className="assistant-cell-output-file-icon" aria-hidden="true">
+            {fileIcon(attachment.path, { size: 16, className: "assistant-cell-output-file-icon-svg" })}
+          </span>
+          <span className="assistant-cell-output-file-name">{fileName}</span>
+          <span className="assistant-cell-output-file-size">{sizeLabel}</span>
+        </button>
+        {menu}
+      </span>
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "?";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function sourceLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./i, "");
+  } catch {
+    return url;
+  }
+}
+
+function displaySourceLabel(label: string | undefined, url: string): string {
+  const fallback = sourceLabel(url);
+  const trimmed = String(label || "").trim();
+  if (!trimmed) return fallback;
+  const compact = trimmed.replace(/\s+/g, "");
+  if (/^[\w.-]+\.[a-z]{2,}(?:\/\S*)?$/i.test(compact)) {
+    return compact.replace(/^www\./i, "");
+  }
+  if (/\.[a-z]\s+[a-z](?:\b|\/)/i.test(trimmed)) {
+    return fallback;
+  }
+  return trimmed;
+}
+
+function sourceKey(url: string): string {
+  if (!/^https?:\/\//i.test(url)) return url;
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return url;
+  }
+}
+
+function uniqueCitationSources(content: string, citations: AssistantMarkdownCellState["citations"] = []): Array<{ key: string; url?: string; label: string; title?: string }> {
+  const citedIndexes = extractInlineCitationIndexes(content);
+  const seen = new Set<string>();
+  const sources: Array<{ key: string; url?: string; label: string; title?: string }> = [];
+  for (const [index, citation] of citations.entries()) {
+    if (citedIndexes.size > 0) {
+      if (!citedIndexes.has(index + 1)) continue;
+    } else if (!citation.providerNative) {
+      continue;
+    }
+    const url = citationUrl(citation);
+    const source = String(citation.source || citation.url || "").trim();
+    const key = sourceKey(source);
+    if (!source || seen.has(key)) continue;
+    seen.add(key);
+    sources.push({
+      key,
+      ...(url ? { url } : {}),
+      label: url
+        ? displaySourceLabel(citation.label, url)
+        : citation.label || citation.title || "Provider location",
+      title: citation.title,
+    });
+  }
+  return sources;
+}

@@ -1,0 +1,46 @@
+/*
+ * Tooltips live in a body portal so pane overflow cannot clip them. Pointer
+ * hints use a CSS delay; keyboard focus is immediate. The trigger retains
+ * its accessible label and the bubble is a visual supplement.
+ */
+
+.mc-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.mc-tip-bubble {
+  position: fixed;
+  z-index: var(--z-tooltip);
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-snug);
+  width: max-content;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  box-shadow: var(--shadow-refined);
+  pointer-events: none;
+  animation: mc-tip-enter var(--duration-fast) var(--easing-enter) both;
+  animation-delay: calc(var(--duration-fast) + var(--duration-base));
+}
+
+.mc-tip-bubble[data-focused="true"] {
+  animation-delay: 0ms;
+}
+
+@keyframes mc-tip-enter {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-reduced-motion="false"]) .mc-tip-bubble {
+    animation: none;
+  }
+}

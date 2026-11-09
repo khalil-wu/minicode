@@ -112,3 +112,38 @@ describe("independent file tabs and persistent references", () => {
       owner: { executionCwd: cwd, browserRoot: "C:/tasks" } });
   });
 });
+
+describe("single-click browsing reuses the scope's transient tab in place", () => {
+  it("replaces the transient tab on the next single click and keeps its id so the viewer does not remount", () => {
+    const first = useAppStore.getState().openWorkspaceFileTab(home, "a.ts", undefined, undefined, { transient: true });
+    const second = useAppStore.getState().openWorkspaceFileTab(home, "sub/b.ts", undefined, undefined, { transient: true });
+    const state = useAppStore.getState();
+    expect(second).toBe(first);
+    expect(state.workspaceFileTabs).toHaveLength(1);
+    expect(state.workspaceFileTabs[0]).toMatchObject({ id: first, path: "sub/b.ts", title: "b.ts", transient: true, open: true });
+    expect(state.rightStackTab).toBe(`file:${first}`);
+  });
+
+  it("keeps a double-clicked or pinned tab and opens the next single click beside it", () => {
+    const kept = useAppStore.getState().openWorkspaceFileTab(home, "a.ts", undefined, undefined, { transient: true });
+    useAppStore.getState().openWorkspaceFileTab(home, "a.ts", undefined, undefined, { transient: false });
+    const next = useAppStore.getState().openWorkspaceFileTab(home, "b.ts", undefined, undefined, { transient: true });
+    expect(next).not.toBe(kept);
+    expect(useAppStore.getState().workspaceFileTabs.map(tab => [tab.path, tab.transient])).toEqual([["a.ts", false], ["b.ts", true]]);
+    useAppStore.getState().pinWorkspaceFileTab(next, true);
+    const afterPin = useAppStore.getState().openWorkspaceFileTab(home, "c.ts", undefined, undefined, { transient: true });
+    expect(afterPin).not.toBe(next);
+    expect(useAppStore.getState().workspaceFileTabs.map(tab => tab.path)).toEqual(["a.ts", "b.ts", "c.ts"]);
+  });
+
+  it("never turns an existing permanent tab transient and keeps a different-scope transient tab", () => {
+    const permanent = useAppStore.getState().openWorkspaceFileTab(home, "a.ts");
+    expect(useAppStore.getState().openWorkspaceFileTab(home, "a.ts", undefined, undefined, { transient: true })).toBe(permanent);
+    expect(useAppStore.getState().workspaceFileTabs[0].transient).toBeFalsy();
+    const other: WorkspaceFileOwner = { scopeId: "home:C:/other", conversationId: null, executionCwd: "C:/other", browserRoot: "C:/other" };
+    const otherTransient = useAppStore.getState().openWorkspaceFileTab(other, "x.ts", undefined, undefined, { transient: true });
+    const homeTransient = useAppStore.getState().openWorkspaceFileTab(home, "b.ts", undefined, undefined, { transient: true });
+    expect(homeTransient).not.toBe(otherTransient);
+    expect(useAppStore.getState().workspaceFileTabs.map(tab => tab.path)).toEqual(["a.ts", "x.ts", "b.ts"]);
+  });
+});

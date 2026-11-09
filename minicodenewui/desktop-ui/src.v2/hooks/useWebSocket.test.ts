@@ -1,0 +1,840 @@
+/* @vitest-environment jsdom */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ClientCommand, ServerEvent } from "../protocol/events";
+import { pushToast } from "../overlays/ToastContainer";
+import {
+  commandWithClientCommandId,
+  coalescingKeyForClientCommand,
+  conversationIdForSessionRestore,
+  eventsFromSessionReplay,
+  getLastReceivedServerSeqForTests,
+  getPendingClientCommandAckIdsForTests,
+  isQueueableWhenOffline,
+  isTimeSensitiveCommand,
+  isUndeliverableReplayEvent,
+  rendererSessionId,
+  markInboundEventFailed,
+  acknowledgeClientCommand,
+  assertInboundReplayCursorContinuity,
+  resetPendingClientCommandAcksForTests,
+  resetRecentInboundEventIdsForTests,
+  shouldAdvanceReplayCursor,
+  commitProcessedInboundEvent,
+  shouldTrackClientCommandAck,
+  shouldProcessInboundEvent,
+  shouldReplayQueuedCommand,
+  shouldDeferCommandUntilSessionRestore,
+  trackPendingClientCommandAck,
+  workspaceRootForConversationRestore,
+  CLIENT_RESYNC_CLOSE_CODE,
+  closeWebSocketForResync,
+} from "./useWebSocket";
+import { LS } from "../stores/shared-helpers";
+import { useAppStore } from "../stores";
+import type { ChatMessage, ConversationAgentState } from "../stores/types";
+import {
+  createClientCommandId,
+  registerWebSocketSender,
+  resetPendingCommandResultsForTests,
+  sendClientCommandAwaitResult,
+} from "../protocol/ws-outbox";
+
+vi.mock("../overlays/ToastContainer", () => ({
+  pushToast: vi.fn(),
+}));
+
+const storage = new Map<string, string>();
+
+vi.stubGlobal("localStorage", {
+  getItem: vi.fn((key: string) => storage.get(key) ?? null),
+  setItem: vi.fn((key: string, value: string) => {
+    storage.set(key, value);
+  }),
+  removeItem: vi.fn((key: string) => {
+    storage.delete(key);
+  }),
+  clear: vi.fn(() => {
+    storage.clear();
+  }),
+});
+
+describe("useWebSocket queue policy", () => {
+  const now = 1_000_000;
+
+  it("uses a browser-valid private close code for client-side resync", () => {
+    const close = vi.fn();
+    closeWebSocketForResync({ close } as unknown as WebSocket, "event replay required");
+
+    expect(CLIENT_RESYNC_CLOSE_CODE).toBeGreaterThanOrEqual(3000);
+    expect(CLIENT_RESYNC_CLOSE_CODE).toBeLessThanOrEqual(4999);
+    expect(close).toHaveBeenCalledWith(CLIENT_RESYNC_CLOSE_CODE, "event replay required");
+  });
+
+  it("queues short-lived prompt responses while the socket reconnects", () => {
+    const commands: ClientCommand[] = [
+      {
+        type: "control_response",
+        request_id: "tool-1",
+        response: { subtype: "success", response: { action: "approve" } },
+      },
+      {
+        type: "control_response",
+        request_id: "ask-1",
+        response: { subtype: "success", response: { answer: "yes" } },
+      },
+      {
+        type: "control_cancel_request",
+        request_id: "ctrl-1",
+      },
+      { type: "user_message", content: "continue" },
+      { type: "commands.list" },
+      { type: "skills.list" },
+      { type: "conversation.switch", conversation_id: "conv-2" },
+      { type: "interrupt", conversation_id: "conv-1", turn_id: "turn-1" },
+    ];
+
+    for (const command of commands) {
+      expect(isQueueableWhenOffline(command)).toBe(true);
+    }
+  });
+
+  it("does not queue incidental commands that can be retried by the UI", () => {
+    expect(isQueueableWhenOffline({ type: "workspace.set", path: "C:/work" } as ClientCommand)).toBe(false);
+    expect(isQueueableWhenOffline({ type: "terminal.input", session_id: "term-1", data: "x" })).toBe(false);
+  });
+
+  it("classifies interruption and prompt responses as time-sensitive commands", () => {
+    expect(isTimeSensitiveCommand({ type: "interrupt" })).toBe(true);
+    expect(isTimeSensitiveCommand({
+      type: "control_response",
+      request_id: "tool-1",
+      response: { subtype: "success", response: { action: "approve" } },
+    })).toBe(true);
+    expect(isTimeSensitiveCommand({ type: "control_cancel_request", request_id: "tool-1" })).toBe(true);
+    expect(isTimeSensitiveCommand({ type: "commands.list" })).toBe(false);
+  });
+
+  it("coalesces replaceable refresh commands without merging critical actions", () => {
+    expect(coalescingKeyForClientCommand({ type: "commands.list" })).toBe("commands.list");
+    expect(coalescingKeyForClientCommand({ type: "skills.list" })).toBe("skills.list");
+    expect(coalescingKeyForClientCommand({ type: "runtime.capabilities.inspect", source: "settings" })).toBe("runtime.capabilities.inspect:settings");
+    expect(coalescingKeyForClientCommand({ type: "terminal.resize", session_id: "term-1", cols: 80, rows: 24 })).toBe("terminal.resize:term-1");
+    expect(coalescingKeyForClientCommand({ type: "approval", tool_call_id: "tool-1", action: "approve" })).toBe("");
+    expect(coalescingKeyForClientCommand({ type: "user_message", content: "hello" })).toBe("");
+  });
+
+  it("drops stale prompt responses but never silently drops an explicit user message", () => {
+    const approval = { type: "approval", tool_call_id: "tool-1", action: "approve" } as ClientCommand;
+    const userMessage = { type: "user_message", content: "continue" } as ClientCommand;
+
+    expect(shouldReplayQueuedCommand({ cmd: approval, queuedAt: now - 9_000 }, now)).toBe(true);
+    expect(shouldReplayQueuedCommand({ cmd: approval, queuedAt: now - 11_000 }, now)).toBe(true);
+    expect(shouldReplayQueuedCommand({ cmd: userMessage, queuedAt: now - 11_000 }, now)).toBe(true);
+    expect(shouldReplayQueuedCommand({ cmd: userMessage, queuedAt: now - 61_000 }, now)).toBe(true);
+  });
+});
+
+describe("useWebSocket session restore workspace", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("does not restore a workspace for blank global chat", () => {
+    expect(workspaceRootForConversationRestore({
+      conversationId: null,
+      conversations: [],
+    })).toBe("");
+  });
+
+  it("restores only the active conversation-bound workspace", () => {
+    expect(workspaceRootForConversationRestore({
+      conversationId: "conv-project",
+      conversations: [
+        { id: "conv-global" },
+        { id: "conv-project", workspaceRoot: "C:/repo" },
+      ],
+    })).toBe("C:/repo");
+  });
+
+  it("prefers protected worktree paths over the base workspace", () => {
+    expect(workspaceRootForConversationRestore({
+      conversationId: "conv-worktree",
+      conversations: [
+        { id: "conv-worktree", workspaceRoot: "C:/repo", worktreePath: "C:/repo/.minicode/worktrees/conv-worktree" },
+      ],
+    })).toBe("C:/repo/.minicode/worktrees/conv-worktree");
+  });
+
+  it("restores the current active conversation id first", () => {
+    localStorage.setItem(LS.conversation.activeId, "conv-persisted");
+
+    expect(conversationIdForSessionRestore({
+      conversationId: "conv-current",
+      conversations: [{ id: "conv-current" }],
+    })).toBe("conv-current");
+  });
+
+  it("falls back to the persisted active conversation id on cold start", () => {
+    localStorage.setItem(LS.conversation.activeId, "conv-persisted");
+
+    expect(conversationIdForSessionRestore({
+      conversationId: null,
+      conversations: [{ id: "conv-persisted" }],
+    })).toBe("conv-persisted");
+  });
+
+  it("does not restore a persisted archived conversation id", () => {
+    localStorage.setItem(LS.conversation.activeId, "conv-archived");
+
+    expect(conversationIdForSessionRestore({
+      conversationId: null,
+      conversations: [{ id: "conv-archived", archived: true }],
+    })).toBe("");
+  });
+});
+
+describe("browser identity fallbacks", () => {
+  it("does not read an absent global crypto object", () => {
+    const originalCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", undefined);
+    try {
+      expect(rendererSessionId({})).toMatch(/^session_[A-Za-z0-9_-]+$/);
+      expect(createClientCommandId()).toMatch(/^cmd_[A-Za-z0-9_-]+$/);
+    } finally {
+      vi.stubGlobal("crypto", originalCrypto);
+    }
+  });
+});
+
+describe("useWebSocket renderer identity", () => {
+  it("keeps one id across reloads in the same browser session", () => {
+    const values = new Map<string, string>();
+    const sessionStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+    };
+    const firstRenderer = { sessionStorage };
+    const reloadedRenderer = { sessionStorage };
+
+    const firstId = rendererSessionId(firstRenderer);
+
+    expect(rendererSessionId(reloadedRenderer)).toBe(firstId);
+    expect(firstId).toMatch(/^session_[A-Za-z0-9_-]+$/);
+  });
+
+  it("does not persist an unfenced interrupt that could cancel a later turn", () => {
+    expect(isQueueableWhenOffline({ type: "interrupt", conversation_id: "conv-1" })).toBe(false);
+    expect(isQueueableWhenOffline({
+      type: "interrupt",
+      conversation_id: "conv-1",
+      message_id: "assistant-1",
+    })).toBe(true);
+  });
+
+  it("defers every durable session action until restore completes", () => {
+    expect(shouldDeferCommandUntilSessionRestore({
+      type: "control_response",
+      request_id: "tool-1",
+      response: { subtype: "success", response: { action: "approve" } },
+    })).toBe(true);
+    expect(shouldDeferCommandUntilSessionRestore({
+      type: "control_response",
+      request_id: "ask-1",
+      response: { subtype: "success", response: { answer: "yes" } },
+    })).toBe(true);
+    expect(shouldDeferCommandUntilSessionRestore({ type: "interrupt", conversation_id: "conv-1" })).toBe(true);
+    expect(shouldDeferCommandUntilSessionRestore({ type: "conversation.switch", conversation_id: "conv-2" })).toBe(true);
+    expect(shouldDeferCommandUntilSessionRestore({ type: "workspace.set", path: "C:/work" } as ClientCommand)).toBe(false);
+  });
+});
+
+describe("useWebSocket client command ids", () => {
+  it.each(["conv-target", "conv-newer"])("settles only the rejected switch while preserving navigation to %s", (pendingOwner) => {
+    const messages = [{ id: "source-user", role: "user" as const, content: "Keep this history", timestamp: 1 }];
+    useAppStore.setState({ conversationId: "conv-source", pendingConversationSwitchId: pendingOwner,
+      messages, draft: "Unsent prompt" });
+    trackPendingClientCommandAck({ type: "conversation.switch", conversation_id: "conv-target", client_command_id: "rejected-switch" });
+    acknowledgeClientCommand({ type: "client.command.ack", client_command_id: "rejected-switch",
+      command_type: "conversation.switch", accepted: false, reason: "command.persistence" } as ServerEvent);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "conv-source",
+      pendingConversationSwitchId: pendingOwner === "conv-target" ? null : "conv-newer", messages, draft: "Unsent prompt" });
+    if (pendingOwner === "conv-target") expect(pushToast).toHaveBeenCalledWith("打开会话失败：command.persistence", "error", 6000);
+    else expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it.each(["active", "background", "side"])("seals only the rejected %s optimistic turn and preserves drafts and other live work", (owner) => {
+    const assistant = (id: string) => ({ id, role: "assistant" as const, content: "", timestamp: 1, isStreaming: true, blocks: [] });
+    useAppStore.setState({ conversationId: "active", draft: "new draft", messages: [assistant("active-reply")], isStreaming: true,
+      conversationMessages: { background: [assistant("background-reply")] }, conversationStreaming: { active: true, background: true, side: true },
+      sideChats: { side: { id: "side", messages: [assistant("side-reply")], isStreaming: true, draft: "side draft" } } });
+    trackPendingClientCommandAck({ type: "user_message", client_command_id: "rejected-send", content: "input", conversation_id: owner,
+      user_message_id: `${owner}-input`, assistant_message_id: `${owner}-reply` });
+    acknowledgeClientCommand({ type: "client.command.ack", client_command_id: "rejected-send", accepted: false, reason: "command.persistence" } as ServerEvent);
+    const state = useAppStore.getState();
+    const message = owner === "active" ? state.messages[0] : owner === "side" ? state.sideChats.side.messages[0] : state.conversationMessages.background[0];
+    expect(message).toMatchObject({ isStreaming: false, terminalStatus: "failed", failureRecoverable: true });
+    expect(owner === "active" ? state.isStreaming : owner === "side" ? state.sideChats.side.isStreaming : state.conversationStreaming.background).toBe(false);
+    expect(state.draft).toBe("new draft");
+    expect(state.sideChats.side.draft).toBe("side draft");
+    if (owner !== "active") expect(state.messages[0].isStreaming).toBe(true);
+    if (owner !== "side") expect(state.sideChats.side.messages[0].isStreaming).toBe(true);
+  });
+
+  it.each(["active", "background", "side"])("does not stop the running %s turn when admission rejects a queued follow-up", (owner) => {
+    const messages = (scope: string): ChatMessage[] => [
+      { id: `${scope}-running`, role: "assistant", content: "Working", isStreaming: true, timestamp: 1 },
+      { id: `${scope}-queued-user`, role: "user", content: "next", queueState: "queued", timestamp: 2 },
+      { id: `${scope}-queued-reply`, role: "assistant", content: "", isStreaming: false, queueState: "queued", timestamp: 3 },
+    ];
+    const work = Object.fromEntries(["active", "background", "side"].map(scope => [scope, {
+      plan: { threadId: scope, turnId: `${scope}-running`, plan: [{ step: "Continue original work", status: "in_progress" }] },
+      todos: [{ id: `${scope}-todo`, content: "Original work", activeForm: "Working", status: "in_progress" }],
+      subagents: [], agentProgress: [],
+    }])) as Record<string, ConversationAgentState>;
+    useAppStore.setState({ conversationId: "active", draft: "active unsent draft", isStreaming: true,
+      conversationStreaming: { active: true, background: true, side: true }, messages: messages("active"),
+      conversationMessages: { background: messages("background") },
+      sideChats: { side: { id: "side", messages: messages("side"), isStreaming: true, draft: "side unsent draft" } },
+      plan: work.active.plan, todos: work.active.todos, conversationAgentStates: work });
+    const before = useAppStore.getState();
+    trackPendingClientCommandAck({ type: "user_message", client_command_id: "queued-rejected", content: "next", conversation_id: owner,
+      user_message_id: `${owner}-queued-user`, assistant_message_id: `${owner}-queued-reply` });
+    acknowledgeClientCommand({ type: "client.command.ack", client_command_id: "queued-rejected", accepted: false } as ServerEvent);
+    const after = useAppStore.getState();
+    expect(after).toMatchObject({ isStreaming: true, conversationStreaming: { active: true, background: true, side: true },
+      draft: "active unsent draft", sideChats: { side: { isStreaming: true, draft: "side unsent draft" } } });
+    for (const scope of ["active", "background", "side"]) {
+      const scopedMessages = scope === "active" ? after.messages : scope === "side" ? after.sideChats.side.messages : after.conversationMessages.background;
+      expect(scopedMessages[0].isStreaming).toBe(true);
+      if (scope === owner) {
+        expect(scopedMessages[1].queueState).toBe("cancelled");
+        expect(scopedMessages[2]).toMatchObject({ isStreaming: false, terminalStatus: "failed", failureRecoverable: true });
+      } else {
+        expect(scopedMessages).toBe(scope === "active" ? before.messages : scope === "side" ? before.sideChats.side.messages : before.conversationMessages.background);
+        expect(scopedMessages[1].queueState).toBe("queued");
+      }
+    }
+    expect(after.plan).toBe(before.plan);
+    expect(after.todos).toBe(before.todos);
+    expect(after.conversationAgentStates).toBe(before.conversationAgentStates);
+    expect(after.plan?.plan[0].status).toBe("in_progress");
+    expect(after.todos[0].status).toBe("in_progress");
+  });
+  beforeEach(() => {
+    resetPendingClientCommandAcksForTests();
+    resetPendingCommandResultsForTests();
+    registerWebSocketSender(null);
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetPendingClientCommandAcksForTests();
+    resetPendingCommandResultsForTests();
+    registerWebSocketSender(null);
+  });
+
+  it("adds a stable client command id without mutating the caller command", () => {
+    const command = { type: "conversation.list" } as ClientCommand;
+
+    const withId = commandWithClientCommandId(command);
+    const replay = commandWithClientCommandId(withId);
+
+    expect(withId).not.toBe(command);
+    expect(command).toEqual({ type: "conversation.list" });
+    expect(withId.client_command_id).toMatch(/^cmd_/);
+    expect(replay.client_command_id).toBe(withId.client_command_id);
+  });
+
+  it("tracks pending command ids until the backend acknowledges them", () => {
+    const command = {
+      type: "conversation.list",
+      client_command_id: "cmd_pending",
+    } as ClientCommand;
+
+    trackPendingClientCommandAck(command);
+    expect(getPendingClientCommandAckIdsForTests()).toEqual(["cmd_pending"]);
+
+    expect(acknowledgeClientCommand({
+      type: "client.command.ack",
+      client_command_id: "cmd_pending",
+      command_type: "conversation.list",
+    } as ServerEvent)).toBe(true);
+    expect(getPendingClientCommandAckIdsForTests()).toEqual([]);
+  });
+
+  it("rejects awaited command results when the durable ACK is rejected", async () => {
+    let sentCommand: ClientCommand | null = null;
+    registerWebSocketSender((command) => {
+      sentCommand = command;
+      return true;
+    });
+    const pending = sendClientCommandAwaitResult(
+      { type: "permissions.content_rule.add", rule: "run_command(git status:*)", deny: false },
+      "permissions.content_rule.add",
+    );
+    const clientCommandId = String(sentCommand?.client_command_id || "");
+
+    expect(acknowledgeClientCommand({
+      type: "client.command.ack",
+      client_command_id: clientCommandId,
+      command_type: "permissions.content_rule.add",
+      accepted: false,
+      reason: "command.persistence",
+    } as ServerEvent)).toBe(true);
+
+    await expect(pending).rejects.toThrow("command.persistence");
+  });
+
+  it("keeps a critical user command pending until the durable ACK arrives", () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    const command = {
+      type: "user_message",
+      content: "hello",
+      client_command_id: "cmd_missing_ack",
+    } as ClientCommand;
+
+    trackPendingClientCommandAck(command);
+    vi.advanceTimersByTime(5000);
+
+    expect(pushToast).not.toHaveBeenCalled();
+    expect(getPendingClientCommandAckIdsForTests()).toEqual(["cmd_missing_ack"]);
+  });
+
+  it("does not warn for incidental background commands without acknowledgements", () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    const command = {
+      type: "commands.list",
+      client_command_id: "cmd_catalog",
+    } as ClientCommand;
+
+    trackPendingClientCommandAck(command);
+    vi.advanceTimersByTime(5000);
+
+    expect(pushToast).not.toHaveBeenCalled();
+    expect(getPendingClientCommandAckIdsForTests()).toEqual(["cmd_catalog"]);
+  });
+
+  it("does not track ping acknowledgements as pending work", () => {
+    const command = {
+      type: "ping",
+      client_command_id: "cmd_ping",
+    } as ClientCommand;
+
+    expect(shouldTrackClientCommandAck(command)).toBe(false);
+    trackPendingClientCommandAck(command);
+
+    expect(getPendingClientCommandAckIdsForTests()).toEqual([]);
+  });
+
+  it.each(["thread/sample", "thread/sample/cancel", "thread/increment_elicitation", "thread/decrement_elicitation"])(
+    "keeps %s outside command replay and the durable event cursor", type => {
+      const command = { type, threadId: "source", requestId: 7, expectedTurnId: "turn", prompt: "sample",
+        client_command_id: "connection-request" } as ClientCommand;
+      expect(isQueueableWhenOffline(command)).toBe(false);
+      expect(shouldReplayQueuedCommand({ cmd: command, queuedAt: Date.now() })).toBe(false);
+      expect(shouldTrackClientCommandAck(command)).toBe(false);
+      trackPendingClientCommandAck(command);
+      expect(getPendingClientCommandAckIdsForTests()).toEqual([]);
+      const result = { type: "command.result", command: type, level: "info", message: "",
+        conversation_id: "source", seq: 20 } as ServerEvent;
+      expect(shouldAdvanceReplayCursor(result)).toBe(false);
+    },
+  );
+});
+
+describe("useWebSocket server sequence tracking", () => {
+  beforeEach(() => {
+    resetRecentInboundEventIdsForTests();
+  });
+
+  it("commits replay cursor and dedupe only after successful handling", () => {
+    expect(getLastReceivedServerSeqForTests()).toBe(0);
+
+    const pong = { type: "pong", event_id: "a", seq: 4 } as ServerEvent;
+    expect(shouldProcessInboundEvent(pong)).toBe(true);
+    expect(shouldProcessInboundEvent(pong)).toBe(true);
+    commitProcessedInboundEvent(pong);
+    expect(shouldProcessInboundEvent(pong)).toBe(false);
+    expect(shouldProcessInboundEvent({ type: "runtime.capabilities", event_id: "b", seq: 9 } as ServerEvent)).toBe(true);
+    // Live-only deltas are never staged into the backend replay log, so they
+    // must not move the durable cursor either.
+    const delta = { type: "agent_message.delta", conversation_id: "conv-1", event_id: "c", seq: 2 } as ServerEvent;
+    expect(shouldProcessInboundEvent(delta)).toBe(true);
+    commitProcessedInboundEvent(delta);
+    expect(getLastReceivedServerSeqForTests()).toBe(0);
+
+    const durable = { type: "done", conversation_id: "conv-1", event_id: "d", seq: 3, previous_replay_seq: 0 } as ServerEvent;
+    commitProcessedInboundEvent(durable);
+    expect(getLastReceivedServerSeqForTests()).toBe(3);
+  });
+
+  it("accepts live durable links across transient wire-sequence gaps", () => {
+    const first = {
+      type: "done",
+      conversation_id: "conv-1",
+      event_id: "durable-5",
+      seq: 5,
+      previous_replay_seq: 0,
+    } as ServerEvent;
+    const afterTransientTraffic = {
+      type: "done",
+      conversation_id: "conv-1",
+      event_id: "durable-8",
+      seq: 8,
+      previous_replay_seq: 5,
+    } as ServerEvent;
+
+    assertInboundReplayCursorContinuity(first);
+    commitProcessedInboundEvent(first);
+    assertInboundReplayCursorContinuity(afterTransientTraffic);
+    commitProcessedInboundEvent(afterTransientTraffic);
+
+    expect(getLastReceivedServerSeqForTests()).toBe(8);
+  });
+
+  it("deduplicates a recovered command result without creating a replay cursor gap", () => {
+    const original = {
+      type: "command.result", command: "fixture", level: "error", message: "actual failure",
+      conversation_id: "conv-1", client_command_id: "cmd-1", event_id: "original-result",
+      seq: 5, previous_replay_seq: 0, replayed: true,
+    } as ServerEvent;
+    const recovered = {
+      type: "command.result", command: "fixture", level: "error", message: "actual failure",
+      conversation_id: "conv-1", client_command_id: "cmd-1", event_id: "original-result",
+    } as ServerEvent;
+    const next = { type: "done", conversation_id: "conv-1", event_id: "next-result",
+      seq: 8, previous_replay_seq: 5 } as ServerEvent;
+
+    expect(shouldProcessInboundEvent(original)).toBe(true);
+    commitProcessedInboundEvent(original);
+    expect(shouldAdvanceReplayCursor(recovered)).toBe(false);
+    expect(shouldProcessInboundEvent(recovered)).toBe(false);
+    expect(() => assertInboundReplayCursorContinuity(next)).not.toThrow();
+    commitProcessedInboundEvent(next);
+    expect(getLastReceivedServerSeqForTests()).toBe(8);
+  });
+
+  it.each(["artifact_content", "stream_event"])(
+    "does not advance the durable cursor for transient %s events",
+    (type) => {
+      const first = {
+        type: "done",
+        conversation_id: "conv-1",
+        event_id: "durable-5",
+        seq: 5,
+        previous_replay_seq: 0,
+      } as ServerEvent;
+      const transient = {
+        type,
+        conversation_id: "conv-1",
+        event_id: `${type}-136`,
+        seq: 136,
+      } as ServerEvent;
+      const next = {
+        type: "command.result",
+        command: "conversation.switch",
+        level: "success",
+        message: "Conversation switched",
+        conversation_id: "conv-1",
+        event_id: "durable-137",
+        seq: 137,
+        previous_replay_seq: 5,
+      } satisfies ServerEvent;
+
+      commitProcessedInboundEvent(first);
+      commitProcessedInboundEvent(transient);
+      expect(getLastReceivedServerSeqForTests()).toBe(5);
+      expect(shouldAdvanceReplayCursor(next)).toBe(true);
+      expect(() => assertInboundReplayCursorContinuity(next)).not.toThrow();
+      commitProcessedInboundEvent(next);
+      expect(getLastReceivedServerSeqForTests()).toBe(137);
+    },
+  );
+
+  it("rejects a live durable event whose predecessor was not applied", () => {
+    commitProcessedInboundEvent({
+      type: "done",
+      conversation_id: "conv-1",
+      seq: 5,
+      previous_replay_seq: 0,
+    } as ServerEvent);
+
+    expect(() => assertInboundReplayCursorContinuity({
+      type: "done",
+      conversation_id: "conv-1",
+      seq: 8,
+      previous_replay_seq: 7,
+    } as ServerEvent)).toThrow("active replay chain");
+    expect(getLastReceivedServerSeqForTests()).toBe(5);
+  });
+
+  it("commits a replay chain by durable predecessor instead of numeric adjacency", () => {
+    commitProcessedInboundEvent({
+      type: "done",
+      conversation_id: "conv-1",
+      seq: 5,
+      previous_replay_seq: 0,
+    } as ServerEvent);
+    const replayed = eventsFromSessionReplay({
+      type: "session.replay",
+      last_seq: 5,
+      current_seq: 11,
+      replayed_events: 2,
+      events: [
+        {
+          type: "done",
+          conversation_id: "conv-1",
+          message_id: "assistant-8",
+          status: "completed",
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            input_includes_cache_read: false,
+          },
+          seq: 8,
+          previous_replay_seq: 5,
+        },
+        {
+          type: "done",
+          conversation_id: "conv-1",
+          message_id: "assistant-11",
+          status: "completed",
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            input_includes_cache_read: false,
+          },
+          seq: 11,
+          previous_replay_seq: 8,
+        },
+      ],
+    } as ServerEvent);
+
+    replayed.forEach(commitProcessedInboundEvent);
+
+    expect(getLastReceivedServerSeqForTests()).toBe(11);
+  });
+
+  it("rejects replay envelopes that do not start from the active cursor", () => {
+    commitProcessedInboundEvent({
+      type: "done",
+      conversation_id: "conv-1",
+      seq: 5,
+      previous_replay_seq: 0,
+    } as ServerEvent);
+
+    expect(() => eventsFromSessionReplay({
+      type: "session.replay",
+      last_seq: 4,
+      current_seq: 8,
+      replayed_events: 1,
+      events: [{
+        type: "done",
+        conversation_id: "conv-1",
+        message_id: "assistant-8",
+        status: "completed",
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          input_includes_cache_read: false,
+        },
+        seq: 8,
+        previous_replay_seq: 4,
+      }],
+    } as ServerEvent)).toThrow("active durable cursor");
+  });
+
+  it("rebases the cursor only from an authoritative no-replay snapshot", () => {
+    commitProcessedInboundEvent({
+      type: "session.restored",
+      last_seq: 0,
+      current_seq: 5,
+      replayed_events: 0,
+    } as ServerEvent);
+    expect(getLastReceivedServerSeqForTests()).toBe(5);
+
+    commitProcessedInboundEvent({
+      type: "done",
+      conversation_id: "conv-1",
+      seq: 10,
+      previous_replay_seq: 5,
+    } as ServerEvent);
+    commitProcessedInboundEvent({
+      type: "session.restored",
+      last_seq: 4,
+      current_seq: 4,
+      requested_last_seq: 10,
+      replayed_events: 0,
+      cursor_reset: true,
+      snapshot_required: true,
+    } as ServerEvent);
+
+    expect(getLastReceivedServerSeqForTests()).toBe(4);
+  });
+
+  it("advances the replay cursor for newly-added conversation events without a manual allowlist update", () => {
+    const event = {
+      type: "agent.item",
+      conversation_id: "conv-1",
+      event_id: "agent-item-1",
+      seq: 11,
+    } as ServerEvent;
+    expect(shouldProcessInboundEvent(event)).toBe(true);
+    commitProcessedInboundEvent(event);
+
+    expect(getLastReceivedServerSeqForTests()).toBe(11);
+  });
+
+  it("freezes ordered replay at a failed event until that event succeeds", () => {
+    const failed = { type: "agent.item", conversation_id: "conv-1", event_id: "failed", seq: 5 } as ServerEvent;
+    const later = { type: "done", conversation_id: "conv-1", event_id: "later", seq: 6 } as ServerEvent;
+
+    markInboundEventFailed(failed);
+    expect(shouldProcessInboundEvent(later)).toBe(false);
+    expect(getLastReceivedServerSeqForTests()).toBe(0);
+
+    expect(shouldProcessInboundEvent(failed)).toBe(true);
+    commitProcessedInboundEvent(failed);
+    expect(shouldProcessInboundEvent(later)).toBe(true);
+    commitProcessedInboundEvent(later);
+    expect(getLastReceivedServerSeqForTests()).toBe(6);
+  });
+
+  it("admits recovery control projections across the real 143 gap without admitting later business frames", () => {
+    commitProcessedInboundEvent({ type: "session.restored", seq: 125, last_seq: 0, current_seq: 124, replayed_events: 0 } as ServerEvent);
+    const failed = { type: "skills.list", conversation_id: "owner", seq: 143, previous_replay_seq: 127,
+      event_id: "d6:143", skills: [], workspace_root: "/workspace" } as ServerEvent;
+    expect(() => assertInboundReplayCursorContinuity(failed)).toThrow("Durable event does not continue the active replay chain.");
+    markInboundEventFailed(failed);
+
+    for (const type of ["session.restored", "session.synced", "conversation.switched", "session.replay"] as const) {
+      expect(shouldProcessInboundEvent({ type, seq: 170, event_id: `recovery:${type}` } as ServerEvent)).toBe(true);
+    }
+    const later = { type: "done", conversation_id: "owner", seq: 162, previous_replay_seq: 161 } as ServerEvent;
+    expect(shouldProcessInboundEvent(later)).toBe(false);
+    expect(shouldProcessInboundEvent({ type: "stream_resume", seq: 169 } as ServerEvent)).toBe(false);
+    commitProcessedInboundEvent({ type: "session.restored", seq: 170, last_seq: 124, current_seq: 164, replayed_events: 18 } as ServerEvent);
+    expect(getLastReceivedServerSeqForTests()).toBe(124);
+    expect(shouldProcessInboundEvent(later)).toBe(false);
+
+    commitProcessedInboundEvent({ type: "command.result", command: "skills.list", level: "info", message: "", data: {},
+      conversation_id: "owner", seq: 127, previous_replay_seq: 124, replayed: true } as ServerEvent);
+    expect(shouldProcessInboundEvent(failed)).toBe(true);
+    commitProcessedInboundEvent({ ...failed, replayed: true } as ServerEvent);
+    expect(getLastReceivedServerSeqForTests()).toBe(143);
+    expect(shouldProcessInboundEvent(later)).toBe(true);
+    expect(() => assertInboundReplayCursorContinuity(later)).toThrow("active replay chain");
+  });
+
+  it("exposes replay cursor classification for restore contract tests", () => {
+    expect(shouldAdvanceReplayCursor({ type: "pong", seq: 4 } as ServerEvent)).toBe(false);
+    expect(shouldAdvanceReplayCursor({
+      type: "session.replay",
+      seq: 5,
+      last_seq: 0,
+      current_seq: 0,
+      replayed_events: 0,
+      events: [],
+    } as ServerEvent)).toBe(false);
+    expect(shouldAdvanceReplayCursor({ type: "agent_message.delta", seq: 6 } as ServerEvent)).toBe(false);
+    expect(shouldAdvanceReplayCursor({
+      type: "thinking_delta",
+      conversation_id: "conv-1",
+      seq: 7,
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      visibility: "timeline",
+    } as ServerEvent)).toBe(false);
+    expect(shouldAdvanceReplayCursor({
+      type: "thinking_delta",
+      conversation_id: "conv-1",
+      seq: 8,
+      source: "provider",
+      provider_reasoning_type: "reasoning_summary_text",
+      visibility: "timeline",
+    } as ServerEvent)).toBe(true);
+    expect(shouldAdvanceReplayCursor({ type: "done", conversation_id: "conv-1", seq: 9 } as ServerEvent)).toBe(true);
+    expect(shouldAdvanceReplayCursor({ type: "done", conversation_id: "conv-1" } as ServerEvent)).toBe(false);
+  });
+
+  it("carries undeliverable replay events through so the durable cursor advances", () => {
+    // Throwing on one unrepresentable event stranded the whole envelope, so the
+    // cursor stayed behind and the backend replayed it after every reconnect.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const replayed = eventsFromSessionReplay({
+      type: "session.replay",
+      last_seq: 0,
+      current_seq: 4,
+      replayed_events: 3,
+      events: [
+        { type: "agent_message.delta", conversation_id: "conv-1", item_id: "agent-message", delta: "hello", seq: 2, previous_replay_seq: 0, event_id: "event-2" },
+        { seq: 3, previous_replay_seq: 2 },
+        { type: "agent_message.delta", conversation_id: "conv-1", item_id: "agent-message", delta: " world", seq: 4, previous_replay_seq: 3, event_id: "event-4" },
+      ],
+    } as ServerEvent);
+
+    expect(replayed.map((event) => event.seq)).toEqual([2, 3, 4]);
+    expect(replayed.map(isUndeliverableReplayEvent)).toEqual([false, true, false]);
+    warn.mockRestore();
+  });
+
+  it("rejects a replay envelope whose durable chain is discontinuous", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(() => eventsFromSessionReplay({
+      type: "session.replay",
+      last_seq: 0,
+      current_seq: 4,
+      replayed_events: 2,
+      events: [
+        { type: "agent_message.delta", conversation_id: "conv-1", item_id: "agent-message", delta: "hello", seq: 2, previous_replay_seq: 0, event_id: "event-2" },
+        { type: "session.replay", events: [] },
+      ],
+    } as ServerEvent)).toThrow("discontinuous durable chain");
+    warn.mockRestore();
+  });
+});
+
+describe("useWebSocket inbound event dedupe", () => {
+  it("allows events without event_id for backwards compatibility", () => {
+    resetRecentInboundEventIdsForTests();
+
+    expect(shouldProcessInboundEvent({ type: "pong" } as ServerEvent)).toBe(true);
+    expect(shouldProcessInboundEvent({ type: "pong" } as ServerEvent)).toBe(true);
+  });
+
+  it("drops duplicate event_id values at the websocket ingress", () => {
+    resetRecentInboundEventIdsForTests();
+    const event = { type: "pong", event_id: "session:1" } as ServerEvent;
+
+    expect(shouldProcessInboundEvent(event)).toBe(true);
+    commitProcessedInboundEvent(event);
+    expect(shouldProcessInboundEvent(event)).toBe(false);
+    expect(shouldProcessInboundEvent({ type: "pong", event_id: "session:2" } as ServerEvent)).toBe(true);
+  });
+
+  it("retains a full backend replay window of event ids", () => {
+    resetRecentInboundEventIdsForTests();
+    const first = { type: "agent_message.delta", conversation_id: "conv-1", event_id: "event-0", seq: 1 } as ServerEvent;
+    expect(shouldProcessInboundEvent(first)).toBe(true);
+    commitProcessedInboundEvent(first);
+    for (let index = 1; index < 1000; index += 1) {
+      const event = {
+        type: "agent_message.delta",
+        conversation_id: "conv-1",
+        event_id: `event-${index}`,
+        seq: index + 1,
+      } as ServerEvent;
+      expect(shouldProcessInboundEvent(event)).toBe(true);
+      commitProcessedInboundEvent(event);
+    }
+
+    expect(shouldProcessInboundEvent(first)).toBe(false);
+  });
+});

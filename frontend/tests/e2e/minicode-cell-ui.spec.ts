@@ -1,9 +1,34 @@
+import { mockWorkspaceEnvironment } from "./http-fixtures";
 import { expect, Page, test } from "@playwright/test";
+
+// The composer draft on Home owns its model selection and reads it over HTTP;
+// the mock WebSocket alone leaves currentModel empty, so answer those requests here.
+async function mockDraftHttp(page: Page) {
+  await mockWorkspaceEnvironment(page);
+  await page.route("**/api/workspace/browser-tree**", route => route.fulfill({ json: {
+    workspace_root: "C:/Desktop/MiniCode", requested_path: ".", entries: [],
+  } }));
+  await page.route("**/api/workspace/git/status**", route => route.fulfill({ json: {
+    is_git_repo: false, branch: "", files: [],
+  } }));
+  const model = "gpt-4";
+  const selection = {
+    provider: "custom", current_model: model, model, available_models: [model], models_source: "configured",
+    available_model_options: [{ model, reasoning_effort_levels: ["low", "medium", "high"], default_reasoning_effort: "medium" }],
+    effective_reasoning_effort: "medium", model_selection_mode: "default",
+    default_model_selection: { provider: "custom", model, reasoning_effort: "medium", conversation_id: "", working_directory: "" },
+    available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [],
+    config_version: "e2e-config", config_cwd: "",
+  };
+  await page.route("**/api/llm/draft-selection**", route => route.fulfill({ json: selection }));
+  await page.route("**/api/thread-metadata/sections**", route => route.fulfill({ json: { sections: [] } }));
+}
 
 // 仿真 WebSocket 交互，模拟流式事件并拦截客户端发送的命令
 async function mockCellWebSocket(page: Page) {
   await page.addInitScript(() => {
     const messages: string[] = [];
+    localStorage.setItem("minicode.conversation.active-id", "conv-cells");
     const NativeWebSocket = window.WebSocket;
 
     // Mock the app-server transport while retaining Vite's real HMR connection.
@@ -88,6 +113,46 @@ async function mockCellWebSocket(page: Page) {
       send(data: string) {
         messages.push(data);
         const parsed = JSON.parse(data);
+        if (parsed.type === "user_message") {
+          setTimeout(() => {
+            const conversation_id = parsed.conversation_id || "conv-cells";
+            const run_id = `turn-${parsed.assistant_message_id}`;
+            this._receive({ type: "agent.run.started", role: "main", status: "running", run_id, turn_id: run_id,
+              conversation_id, message_id: parsed.assistant_message_id, started_at: Date.now() });
+            this._receive({ type: "command.result", command: "user_message", level: "success", message: "",
+              client_command_id: parsed.client_command_id, conversation_id,
+              data: { admitted: true, conversation_id, run_id, user_message_id: parsed.user_message_id,
+                assistant_message_id: parsed.assistant_message_id } });
+          }, 0);
+        }
+        if (parsed.type === "session.sync" || parsed.type === "session.restore") {
+          // The renderer only reports itself connected once the session
+          // handshake is answered; this mirrors the canonical empty-session
+          // snapshot (test/initial-session-sync.ts).
+          const restore = parsed.type === "session.restore";
+          const session = { active_conversation_id: "conv-cells", active_conversation: { id: "conv-cells", title: "Fixture chat", workspace_root: "C:/Desktop/MiniCode", transcript: [] }, active_stream_conversation_ids: [], selected_model: "gpt-4", workspace_root: "C:/Desktop/MiniCode" };
+          setTimeout(() => {
+            this._receive({
+              type: restore ? "session.restored" : "session.synced",
+              session_id: "e2e-session",
+              synced: true,
+              client_command_id: parsed.client_command_id,
+              active_conversation_id: session.active_conversation_id,
+              ...(restore ? { conversation: session.active_conversation, messages: [] } : {}),
+              current_model: "gpt-4",
+              model: "gpt-4",
+              current_seq: 0,
+              last_seq: 0,
+              replayed_events: 0,
+              event_log_gap: false,
+              snapshot_required: false,
+              cursor_reset: false,
+              requested_last_seq: 0,
+              session,
+            });
+          }, 0);
+          return;
+        }
 
         if (parsed.client_command_id) {
           setTimeout(() => this._receive({
@@ -359,6 +424,12 @@ async function mockCellWebSocket(page: Page) {
   });
 }
 
+async function expandWorkGroups(page: Page) {
+  for (const toggle of await page.locator('button.agent-loop-timeline-group-title[data-group-kind="work"]').all()) {
+    if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  }
+}
+
 test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
   test.beforeEach(async ({ page }) => {
     // 1. 无死角精确匹配拦截所有以 /api/ 开头的网络请求
@@ -375,7 +446,8 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
       localStorage.setItem("minicode.legacyMessageUi", "0");
     });
     await mockCellWebSocket(page);
-    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await mockDraftHttp(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => Boolean((window as any).__mockWs));
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().isConnected)).toBe(true);
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().currentModel || "")).not.toBe("");
@@ -386,18 +458,19 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await page.setViewportSize({ width: 1600, height: 1100 });
     const filePath = "E:/记得日记/remember-diary/src/backup/backupService.native.ts";
     const fileRequests: string[] = [];
-    await page.route(url => url.pathname.endsWith("/workspace/file"), async route => {
+    await page.route(url => url.pathname.endsWith("/workspace/browser-preview"), async route => {
       const requested = new URL(route.request().url()).searchParams.get("path") || "";
       fileRequests.push(requested);
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({
-        path: filePath, content: "export const backupFormat = 'JSON';", content_hash: "readme-replay",
+        path: filePath, file_name: "backupService.native.ts", kind: "code", media_type: "text/plain",
+        content: "export const backupFormat = 'JSON';", content_hash: "readme-replay", has_native: false,
       }) });
     });
     await page.evaluate((filePath) => {
       const store = (window as any).__zustandStore;
       store.getState().setThemeMode("light");
       const messages = [{
-        id: "readme-answer", role: "assistant", turnId: "readme-turn", content: "", timestamp: Date.now(), artifacts: [], isStreaming: true,
+        id: "readme-answer", role: "assistant", turnId: "readme-turn", content: "", runStartedAt: Date.now() - 3000, timestamp: Date.now(), artifacts: [], isStreaming: true,
         blocks: [
           { type: "text", itemId: "placeholder", source: "pending", content: "...", isStreaming: false },
           { type: "tool_call", record: { id: "read-backup", name: "read_file", args: { file_path: filePath }, status: "success", activityKind: "fileRead", outputPreview: "1→export const backupFormat = 'JSON';", startedAt: Date.now() } },
@@ -409,9 +482,10 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
         { step: "核对 README 与代码", status: "completed" }, { step: "更新 README", status: "in_progress" }, { step: "核实备份功能", status: "completed" },
       ] });
     }, filePath);
-    await expect(page.locator(".activity-cell-running")).toHaveCount(1);
+    await expandWorkGroups(page);
+    await expect(page.locator('.activity-cell[data-status="running"]')).toHaveCount(1);
     await expect(page.getByRole("status", { name: "处理中", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("status", { name: /^已处理 / })).toHaveCount(1);
+    await expect(page.locator(".agent-loop-process-summary-status-label")).toHaveText(/^已处理 \d+秒$/);
     await expect(page.locator(".thinking-cell").filter({ hasText: /^\.\.\.$/ })).toHaveCount(0);
     const plan = page.getByRole("button", { name: "已完成 2 / 3 项 · 更新 README" });
     await expect(plan).toBeVisible();
@@ -422,8 +496,8 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
       type: "tool_result", id: "search-readme", status: "success",
       summary: "(no matches)", activity_kind: "workspaceSearch", conversation_id: "conv-cells", message_id: "readme-answer",
     }));
-    await expect(page.locator(".activity-cell-running")).toHaveCount(0);
-    await expect(page.getByRole("status", { name: /^已处理 / })).toHaveCount(1);
+    await expect(page.locator('.activity-cell[data-status="running"]')).toHaveCount(0);
+    await expect(page.locator(".agent-loop-process-summary-status-label")).toHaveText(/^已处理 \d+秒$/);
     await page.evaluate(() => {
       const store = (window as any).__zustandStore;
       const content = "已核实备份使用 JSON，依据 `src/backup/backupService.native.ts`。";
@@ -434,13 +508,13 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     });
     await expect(page.locator('.turn-plan-progress')).toHaveCount(0);
     const link = page.getByRole("button", { name: "src/backup/backupService.native.ts" });
-    await expect(link).toHaveAttribute("title", `在编辑器中打开 ${filePath}`);
+    await expect(link).toHaveAttribute("title", `预览 ${filePath}`);
     await link.click();
     await expect.poll(() => fileRequests.length).toBe(1);
     expect(fileRequests[0].replace(/\\/g, "/")).toMatch(/remember-diary\/src\/backup\/backupService.native.ts$/);
-    await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().editorTabs.find((tab: any) => tab.path.includes("backupService.native.ts"))?.content)).toBe("export const backupFormat = 'JSON';");
+    await expect(page.getByRole("tabpanel").filter({ hasText: "backupFormat" })).toBeVisible();
     await expect(page.getByText("无法加载文件", { exact: true })).toHaveCount(0);
-    await expect(page.locator(".monaco-editor .view-lines")).toContainText("backupFormat");
+    await expect(page.getByRole("tabpanel").filter({ hasText: "backupFormat" })).toContainText("export const backupFormat");
     await page.screenshot({ path: "../output/playwright/readme-replay-file.png", fullPage: true });
   });
 
@@ -482,7 +556,8 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await expect(planRegion.getByText("Inspect frontend")).toBeVisible();
     await expect(planRegion.getByText("Refine rendering")).toBeVisible();
 
-    await page.getByRole("button", { name: "打开右侧栏" }).click();
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => (window as any).__zustandStore.getState().setRightStackTab("tasks"));
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().rightStackTab)).toBe("tasks");
   });
 
@@ -491,14 +566,14 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="140"><rect width="320" height="140" rx="20" fill="#e8f0fe"/><text x="30" y="80" fill="#1765cc" font-size="24">MiniCode preview</text></svg>';
     let previewRequests = 0;
     let artifactRequests = 0;
-    await page.route(/\/api\/workspace\/preview/, async (route) => {
+    await page.route(/\/api\/workspace\/browser-preview/, async (route) => {
       previewRequests += 1;
       await route.fulfill({ json: {
         file_name: "diagram.svg", path: "output/diagram.svg", media_type: "image/svg+xml",
         kind: "code", size_bytes: svg.length, content: svg, has_native: true,
       } });
     });
-    await page.route(/\/api\/workspace\/raw/, (route) => route.fulfill({ contentType: "image/svg+xml", body: svg }));
+    await page.route(/\/api\/workspace\/browser-raw/, (route) => route.fulfill({ contentType: "image/svg+xml", body: svg }));
     await page.route(/\/api\/artifacts\/raw/, async (route) => {
       artifactRequests += 1;
       await route.fulfill({ status: 404, json: { detail: "Workspace files are not artifacts" } });
@@ -549,8 +624,8 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await page.screenshot({ path: "../output/playwright/codex-layout-collapsed.png", fullPage: true });
     await page.getByRole("button", { name: "展开处理步骤" }).click();
     await expect(page.getByText("先核对生成文件与预览入口。")).toBeVisible();
-    await expect(page.getByRole("button", { name: "编辑 · 运行", exact: true }))
-      .toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("button", { name: "收起处理步骤", exact: true })).toHaveAttribute("aria-expanded", "true");
+    await expandWorkGroups(page);
     const editRows = page.locator('[data-zone="work"] .activity-cell[data-activity-kind="fileChange"]');
     await expect(editRows).toHaveCount(2);
     const gap = await editRows.first().evaluate((element) => {
@@ -560,11 +635,12 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     });
     expect(gap).toBeLessThan(24);
     await editRows.first().getByRole("button", { name: "展开活动详情" }).click();
+    await editRows.first().getByRole("button", { name: /^展开 .* 的修改$/ }).click();
     await expect(editRows.first().locator(".inline-diff")).toBeVisible();
     const patchHeader = editRows.first().locator(".activity-cell-change-card-header");
     await expect(patchHeader.getByRole("button", { name: "复制修改" })).toBeVisible();
     expect(await patchHeader.locator(".activity-cell-added").evaluate((node) => getComputedStyle(node).color))
-      .not.toBe(await patchHeader.locator(".activity-cell-removed").evaluate((node) => getComputedStyle(node).color));
+      .toBe(await patchHeader.locator(".activity-cell-removed").evaluate((node) => getComputedStyle(node).color));
     await expect(page.locator('[data-zone="diff"] .diff-cell')).toHaveCount(1);
     await expect(page.locator('[data-zone="diff"] .diff-cell-header-stats')).toHaveText("+2-0");
     await page.screenshot({ path: "../output/playwright/codex-layout-expanded.png", fullPage: true });
@@ -630,14 +706,15 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     expect(linkMetrics.proseOffset).toBeLessThanOrEqual(1);
     expect(linkMetrics.height).toBeLessThan(30);
     await page.getByRole("button", { name: "展开处理步骤" }).click();
-    const group = page.getByRole("button", { name: "读取 · 运行", exact: true });
+    const group = page.locator('button.agent-loop-timeline-group-title[data-group-kind="work"]').first();
     const processGap = await group.evaluate((element) => {
       const paragraph = document.querySelector('.thinking-cell-commentary p')!.getBoundingClientRect();
       return element.getBoundingClientRect().top - paragraph.bottom;
     });
     expect(processGap).toBeGreaterThanOrEqual(6);
     expect(processGap).toBeLessThanOrEqual(24);
-    await expect(group).toHaveAttribute("aria-expanded", "true");
+    await expect(group).toHaveAttribute("aria-expanded", "false");
+    await expandWorkGroups(page);
     await page.locator('[data-activity-kind="fileRead"]').getByRole("button", { name: "展开活动详情" }).click();
     await page.getByRole("button", { name: "展开命令详情" }).click();
     const panelMetrics = await page.locator('.exec-cell-expanded').evaluate((element) => {
@@ -645,7 +722,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
       const readOutput = document.querySelector('.activity-cell-inline-output')!;
       return { border: style.borderWidth, radius: style.borderRadius, padding: style.paddingTop, rail: getComputedStyle(readOutput, '::-webkit-scrollbar').width };
     });
-    expect(panelMetrics).toEqual({ border: "1px", radius: "16px", padding: "10px", rail: "8px" });
+    expect(panelMetrics).toEqual({ border: "1px", radius: "16px", padding: "0px", rail: "8px" });
     await expect(page.locator('.activity-cell-inline-output')).not.toContainText("→");
     await page.locator('[data-activity-kind="fileRead"] .activity-cell-expanded').screenshot({ path: "../output/playwright/chat-read-panel.png" });
     await page.locator('[data-activity-kind="fileRead"]').getByRole("button", { name: "收起活动详情" }).click();
@@ -687,14 +764,9 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
 
     const workGroup = page.locator('.agent-loop-timeline-group[data-group-kind="work"]');
     await expect(workGroup).toHaveCount(1);
-    const workToggle = workGroup.getByRole("button", { name: "读取 · 编辑", exact: true });
-    await expect(workToggle).toHaveAttribute("aria-expanded", "true");
-    await workToggle.click();
-    await expect(workToggle).toHaveAttribute("aria-expanded", "false");
-    await expect(workGroup.locator(".activity-cell")).toHaveCount(0);
-    await workToggle.click();
-    await expect(workToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(workGroup.getByRole("button", { name: "读取 · 编辑", exact: true })).toHaveCount(0);
 
+    await expandWorkGroups(page);
     const readCells = page.locator('.activity-cell[data-activity-kind="fileRead"]');
     await expect(readCells).toHaveCount(2);
     const readReadme = readCells.nth(0);
@@ -754,6 +826,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     const firstEdit = page.locator('.activity-cell[data-activity-kind="fileChange"]').first();
     await firstEdit.getByRole("button", { name: "展开活动详情" }).click();
     await expect(firstEdit.locator(".activity-cell-change-card")).toHaveCount(1);
+    await firstEdit.getByRole("button", { name: /^展开 .* 的修改$/ }).click();
     await expect(firstEdit.locator(".inline-diff")).toBeVisible();
     await collapseActivity.click();
     await expect(readCells.locator(".activity-cell-tool-detail-card")).toHaveCount(0);
@@ -771,11 +844,11 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     const replyArea = page.getByRole("region", { name: "Agent 回复" });
     // File mutations remain chronological activity rows in the process trace.
     // The aggregate diff is the durable outcome rendered after the answer.
-    const workGroup = processArea.getByRole("region", { name: "读取 · 编辑", exact: true });
+    const workGroup = processArea.locator('.agent-loop-timeline-group[data-group-kind="work"]');
     await expect(workGroup).toBeVisible();
-    await expect(workGroup.getByRole("button", { name: "读取 · 编辑", exact: true }))
-      .toHaveAttribute("aria-expanded", "true");
-    await expect(processArea.getByText("编辑文件", { exact: true })).toHaveCount(2);
+    await expect(workGroup.getByRole("button", { name: "读取 · 编辑", exact: true })).toHaveCount(0);
+    await expandWorkGroups(page);
+    await expect(processArea.locator('.activity-cell[data-activity-kind="fileChange"]')).toHaveCount(2);
     await expect(processArea.locator(".diff-cell")).toHaveCount(0);
     await expect(replyArea.locator(".diff-cell")).toHaveCount(1);
     const outcome = page.locator('[data-zone="diff"]');
@@ -818,15 +891,15 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
 
     const workGroup = page.locator('.agent-loop-timeline-group[data-group-kind="work"]');
     await expect(workGroup).toHaveCount(1);
-    await expect(workGroup.getByRole("button", { name: "读取 · 搜索 · 读取网页 · 运行 · 编辑", exact: true }))
-      .toHaveAttribute("aria-expanded", "true");
+    await expect(workGroup.getByRole("button", { name: "读取 · 搜索 · 读取网页 · 运行 · 编辑", exact: true })).toHaveCount(0);
 
+    await expandWorkGroups(page);
     const searchCell = page.locator('.activity-cell[data-activity-kind="workspaceSearch"]');
     await expect(searchCell).toHaveCount(1);
     await searchCell.getByRole("button", { name: "展开活动详情" }).click();
     await expect(searchCell.locator(".activity-cell-tool-detail-card")).toHaveCount(1);
     await expect(page.locator('.activity-cell[data-activity-kind="fileRead"]')).toHaveCount(2);
-    await expect(searchCell.locator(".activity-cell-name")).toHaveText("搜索");
+    await expect(searchCell.locator(".activity-cell-name")).toHaveText("已搜索");
     await expect(searchCell).toContainText("ActivityCell");
 
     const fetchCell = page.locator('.activity-cell[data-activity-kind="webSearch"]');
@@ -844,8 +917,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await expect(commandCell).toContainText("frontend/src.v2/chat/cells/ActivityCell.tsx");
 
     const order = await page.evaluate(() => [...document.querySelectorAll(".agent-loop-process-cell")]
-      .map((node) => node.querySelector("[data-activity-kind]")?.getAttribute("data-activity-kind")
-        || (node.querySelector(".exec-cell") ? "exec-cell" : node.className))
+      .map((node) => (node.querySelector(".exec-cell") ? "exec-cell" : node.querySelector("[data-activity-kind]")?.getAttribute("data-activity-kind") || node.className))
       .filter(Boolean));
     expect(order.findIndex((value) => value.includes("workspaceSearch"))).toBeLessThan(order.findIndex((value) => value.includes("webSearch")));
     expect(order.findIndex((value) => value.includes("webSearch"))).toBeLessThan(order.findIndex((value) => value.includes("exec-cell")));

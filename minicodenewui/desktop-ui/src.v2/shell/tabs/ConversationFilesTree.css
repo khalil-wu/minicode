@@ -1,0 +1,7 @@
+.mc-file-tree-root { display:flex; align-items:center; gap:6px; width:calc(100% - 16px); margin:3px 8px 6px; padding:6px; border:0; background:transparent; color:var(--text-secondary); font:inherit; font-size:var(--text-sm); border-radius:6px; }
+.mc-file-tree-root span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; }
+.mc-file-tree-root:hover { background:var(--surface-hover); }
+.mc-file-tree-filter { display:flex; align-items:center; gap:6px; margin:0 12px 6px; color:var(--text-muted); }
+.mc-file-tree-filter input { width:100%; min-width:0; padding:5px 0; color:var(--text-primary); background:transparent; border:0; outline:0; font:inherit; font-size:var(--text-sm); }
+.mc-file-tree-all-changes { display:flex; align-items:center; gap:8px; width:calc(100% - 14px); margin:0 7px 5px; padding:5px 8px; border:0; background:transparent; color:var(--text-secondary); border-radius:7px; text-align:left; font:inherit; font-size:var(--text-sm); }
+.mc-file-tree-all-changes:hover { background:var(--surface-hover); }

@@ -1,0 +1,67 @@
+/* Message Quote Styles */
+
+.message-quote {
+  background: var(--surface-soft);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  animation: mc-message-quote-in var(--duration-fast) var(--easing-enter);
+}
+
+@keyframes mc-message-quote-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.message-quote-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+}
+
+.message-quote-label {
+  font-size: var(--text-xs);
+  font-weight: var(--fw-semibold);
+  flex: 1;
+}
+
+.message-quote-remove {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.message-quote-remove:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.message-quote-content {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  font-style: normal;
+}
+
+.message-quote-content code { font-family: var(--font-mono); font-size: 0.95em; }
+.message-quote-link { text-decoration: none; text-decoration-color: var(--border-strong); text-underline-offset: 2px; }

@@ -1,0 +1,985 @@
+import type {
+  AppStore,
+  ChatMessage,
+  ContentBlock,
+  EditorTab,
+  PanelSlot,
+  PendingToolCallResume,
+  ThinkingContentBlock,
+  UISlice,
+  WorkspaceSlice,
+  ResolvedTheme,
+} from "./types";
+import { clamp } from "../lib/clamp";
+import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
+import { emptyAppearanceThemes } from "../lib/appearance-themes";
+import { APPEARANCE_STORAGE_KEYS, readAppearanceStorage } from "../lib/appearance-storage";
+import { rightPanelDefaultWidth, rightPanelWidthRatio } from "../shell/right-panel-width";
+import { clampTextScale } from "../lib/text-scale";
+import { safeJsonParse } from "../lib/safe-parse";
+import { cachedEditorDrafts, cachedEditorWorkspaceIndex, loadEditorDrafts, persistEditorDrafts, type EditorWorkspaceIndex } from "./editor-drafts";
+import { canClaimLegacyEditorDrafts, draftWindowOwnerId, windowDraftWorkspaceKey } from "./draft-window-owner";
+import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
+import { cacheConversationTranscript } from "./conversation-transcript-cache";
+import { promptCacheEffectivePromptTokens, promptCacheOrdinaryInputTokens } from "../chat/cacheUsage";
+import {
+  isTerminalToolCallStatus,
+  type ToolCallRecord,
+} from "../lib/tool-call-reducer";
+import { DEFAULT_SHORTCUT_BINDINGS, SHORTCUT_DEFINITIONS, type ShortcutActionId, type ShortcutBindings } from "../lib/keyboard-shortcuts";
+import {
+  normalizeWorkspacePath,
+  normalizeWorkspaceRoot,
+  workspaceFilePathComparisonKey,
+  workspacePathWithin,
+  workspacePathsEqual,
+} from "../lib/workspace-path";
+
+// ── LocalStorage keys ──────────────────────────────────────────────
+
+export const LS = {
+  theme: APPEARANCE_STORAGE_KEYS.mode,
+  // Retained names identify the authored settings migrated by appearance-storage.
+  appearanceColors: APPEARANCE_STORAGE_KEYS.legacyColors,
+  appearanceThemes: APPEARANCE_STORAGE_KEYS.legacyThemes,
+  appearanceLight: APPEARANCE_STORAGE_KEYS.light,
+  appearanceDark: APPEARANCE_STORAGE_KEYS.dark,
+  textScale: "minicode.textScale",
+  codeTextScale: "minicode.codeTextScale",
+  codeFontBase: "minicode.codeFontBase",
+  reducedMotion: "minicode.reducedMotion",
+  pointerCursors: "minicode.usePointerCursors",
+  diffMarkerStyle: "minicode.appearanceDiffMarkerStyle",
+  viewMode: "minicode.activity.viewMode",
+  sendShortcut: "minicode.composer.sendShortcut",
+  followUpBehavior: "minicode.composer.followUpBehavior",
+  shortcutBindings: "minicode.keyboard.bindings",
+  layout: {
+    leftWidth: "minicode.layout.left-width",
+    leftExpandedWidth: "minicode.layout.left-expanded-width",
+    rightWidth: "minicode.layout.right-width",
+    rightWidthRatio: "minicode.layout.right-width-ratio:v3",
+    rightOpen: "minicode.layout.right-open",
+    dockHeight: "minicode.layout.dock-height",
+    dockCollapsed: "minicode.layout.dock-collapsed",
+    dockTab: "minicode.layout.dock-tab",
+    panelSlots: "minicode.layout.panel-slots",
+    workbench: "minicode.layout.workbench",
+  },
+  permissionMode: "minicode.composer.permissionMode",
+  agentMode: "minicode.composer.agentMode",
+  remoteImagePolicy: "minicode.markdown.remoteImagePolicy",
+  conversation: {
+    get activeId() {
+      const owner = window.__MINICODE_RUNTIME__?.windowOwnerId;
+      return !owner || owner === "primary" ? "minicode.conversation.active-id" : `minicode.conversation.active-id:${owner}`;
+    },
+  },
+  editorTabs: "minicode.editor.tabs",
+  editorDrafts: "minicode.editor.drafts",
+  editorLocation: "minicode.editor.location",
+  editorView: "minicode.editor.view",
+  editorReviewKept: "minicode.editor.review-kept",
+};
+
+export const DEFAULT_WORKSPACE_KEY = "__default__";
+export const LEFT_SIDEBAR_DEFAULT_WIDTH = 340;
+export const LEFT_SIDEBAR_MIN_WIDTH = 240;
+export const LEFT_SIDEBAR_RAIL_MIN_WIDTH = 290;
+export const LEFT_SIDEBAR_MAX_WIDTH = 520;
+// Widths stored in layout state include the navigation rail when it is present.
+export const visibleLeftSidebarWidth = (width: number, shellWidth: number, minimumWidth = LEFT_SIDEBAR_MIN_WIDTH) => width === 0 ? 0
+  : Math.max(minimumWidth, Math.min(width, LEFT_SIDEBAR_MAX_WIDTH, shellWidth - 240));
+export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 600;
+export const COMPACT_WORKBENCH_MAX_WIDTH = 1199;
+
+export const isCompactWorkbenchViewport = () => (
+  typeof window !== "undefined" && window.innerWidth <= COMPACT_WORKBENCH_MAX_WIDTH
+);
+
+// ── LocalStorage read/write ────────────────────────────────────────
+
+export const readLS = (key: string): string | null => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+export const writeLS = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* noop */
+  }
+};
+
+// ── Theme & text scale ─────────────────────────────────────────────
+
+export const resolveTheme = (mode: UISlice["themeMode"]): ResolvedTheme => {
+  let resolved: ResolvedTheme = "dark";
+  if (mode === "light") resolved = "light";
+  else if (mode === "dark") resolved = "dark";
+  else {
+    const mediaQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: light)")
+      : null;
+    resolved = mediaQuery?.matches ? "light" : "dark";
+  }
+  return resolved;
+};
+
+// Store-only tools run without a renderer. Persistence belongs to the window.
+export const initialAppearanceState = () => typeof window === "undefined"
+  ? { appearanceColors: emptyAppearanceColors(), appearanceThemes: emptyAppearanceThemes() }
+  : readAppearanceStorage();
+
+// Painting consumes renderer state; persistence initialization stays with its owner.
+export const applyTheme = (mode: UISlice["themeMode"], appearance?: ReturnType<typeof readAppearanceStorage>): ResolvedTheme => {
+  const resolved = resolveTheme(mode);
+  if (typeof document !== "undefined") {
+    document.documentElement.setAttribute("data-theme", resolved);
+    if (appearance) applyAppearanceColors(resolved, appearance.appearanceColors, appearance.appearanceThemes);
+  }
+  return resolved;
+};
+
+export const applyTextScale = (s: number) => {
+  document.documentElement.style.setProperty("--app-text-scale", String(s));
+};
+
+export const applyCodeTextScale = (s: number, base = initialCodeFontBase()) => {
+  document.documentElement.style.setProperty("--code-text-scale", String(s));
+  document.documentElement.style.setProperty("--code-font-base", `${base}px`);
+  document.documentElement.style.setProperty("--code-font-size", `${base * s}px`);
+};
+
+export const applyReducedMotion = (reduced: boolean) => {
+  document.documentElement.setAttribute("data-reduced-motion", reduced ? "true" : "false");
+};
+export const applyPointerCursors = (enabled: boolean) => document.documentElement.setAttribute("data-pointer-cursors", String(enabled));
+export const applyDiffMarkerStyle = (style: "color" | "symbols") => document.documentElement.setAttribute("data-diff-marker-style", style);
+
+export const initialViewMode = (): UISlice["viewMode"] => {
+  const stored = readLS(LS.viewMode);
+  return stored === "summary" || stored === "verbose" ? stored : "normal";
+};
+
+export const initialTheme = (): UISlice["themeMode"] => {
+  const v = readLS(LS.theme);
+  if (v === "dark" || v === "light" || v === "system") return v;
+  return "system";
+};
+
+export const initialAppearanceColors = () => initialAppearanceState().appearanceColors;
+export const initialAppearanceThemes = () => initialAppearanceState().appearanceThemes;
+
+export const initialTextScale = (): number => {
+  const v = parseFloat(readLS(LS.textScale) ?? "");
+  return clampTextScale(Number.isFinite(v) ? v : 1.0);
+};
+
+// ── Panel helpers ──────────────────────────────────────────────────
+
+export const normalizePanelSlots = (slots: PanelSlot[]): PanelSlot[] => {
+  const visibleSlots = slots
+    .filter((slot) => slot.kind !== "inspector")
+    .map((slot) => slot.kind === "plan" ? { ...slot, kind: "tasks" as const, label: slot.label ?? "上下文" } : slot);
+  if (visibleSlots.length === 0) return [{ id: "main-chat", kind: "chat", label: "Chat", size: 1, focused: true }];
+  const hasFocused = visibleSlots.some((slot) => slot.focused);
+  return visibleSlots.map((slot, index) => ({
+    ...slot,
+    size: Number.isFinite(slot.size) && slot.size! > 0 ? slot.size : 1,
+    focused: hasFocused ? Boolean(slot.focused) : index === 0,
+  }));
+};
+
+export const defaultPanelSlots = (): PanelSlot[] => [
+  { id: "main-chat", kind: "chat", label: "Chat", size: 1, focused: true, maximized: false },
+];
+
+export const ensureCodePanelSlots = (slots: PanelSlot[]): PanelSlot[] => {
+  const withoutMaximized = slots.map((slot) => ({ ...slot, maximized: false }));
+  const codeSlots = withoutMaximized.filter((slot) => slot.kind === "chat" || slot.kind === "editor" || slot.kind === "file");
+  const focusedSlotId = codeSlots.find((slot) => slot.focused)?.id;
+  const chatSlot: PanelSlot = codeSlots.find((slot) => slot.kind === "chat") ?? {
+    id: "main-chat",
+    kind: "chat",
+    label: "Chat",
+    size: 1,
+    focused: !focusedSlotId,
+  };
+  const editorSlot: PanelSlot = codeSlots.find((slot) => slot.kind === "editor") ?? {
+    id: "main-editor",
+    kind: "editor",
+    label: "File",
+    size: 1,
+    focused: false,
+  };
+  const next: PanelSlot[] = [...codeSlots];
+  if (!next.some(slot => slot.kind === "chat")) next.unshift(chatSlot);
+  if (!next.some(slot => slot.kind === "editor")) next.push(editorSlot);
+  return normalizePanelSlots(next.map((slot) => ({
+    ...slot,
+    label: slot.kind === "chat" ? (slot.label ?? "Chat") : (slot.label ?? "File"),
+    focused: focusedSlotId ? slot.id === focusedSlotId : Boolean(slot.focused),
+  })));
+};
+
+export const persistPanelSlots = (slots: PanelSlot[]) => {
+  writeLS(LS.layout.panelSlots, JSON.stringify(normalizePanelSlots(slots)));
+};
+
+// ── Layout initialization ──────────────────────────────────────────
+
+export const loadInitialLayout = () => {
+  const left = parseInt(readLS(LS.layout.leftWidth) ?? "", 10);
+  const right = parseInt(readLS(LS.layout.rightWidth) ?? "", 10);
+  const dock = parseInt(readLS(LS.layout.dockHeight) ?? "", 10);
+  const rightOpenRaw = readLS(LS.layout.rightOpen);
+  const collapsedRaw = readLS(LS.layout.dockCollapsed);
+  const rightOpen = rightOpenRaw == null ? false : rightOpenRaw === "1";
+  const collapsed = collapsedRaw == null ? true : collapsedRaw === "1";
+  const tab = (readLS(LS.layout.dockTab) ?? "terminal") as WorkspaceSlice["activeBottomTab"];
+  let slots: PanelSlot[] = defaultPanelSlots();
+  try {
+    const raw = readLS(LS.layout.panelSlots);
+    if (raw) {
+      const rawSlots = safeJsonParse<unknown>(raw, []);
+      const parsed = (Array.isArray(rawSlots) ? rawSlots : [])
+        .filter((slot): slot is Record<string, unknown> => Boolean(slot) && typeof slot === "object")
+        .map((slot) =>
+          slot.kind === "subagent"
+            ? { ...slot, kind: "subagents", label: slot.label ?? "协作" }
+            : slot.kind === "plan"
+              ? { ...slot, kind: "tasks", label: slot.label ?? "上下文" }
+              : slot,
+        ) as unknown as PanelSlot[];
+      if (Array.isArray(parsed) && parsed.length > 0) slots = parsed;
+    }
+  } catch {
+    /* keep default */
+  }
+  const leftSidebarWidth = Number.isFinite(left)
+    ? left <= 0
+      ? 0
+      : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, left)
+    : LEFT_SIDEBAR_DEFAULT_WIDTH;
+  const mainContentWidth = window.innerWidth - leftSidebarWidth;
+  const rightSidebarWidth = Number.isFinite(right) ? right : rightPanelDefaultWidth(mainContentWidth, window.innerHeight);
+  const storedRightRatio = readLS(LS.layout.rightWidthRatio);
+  return {
+    leftSidebarWidth,
+    leftSidebarExpandedWidth: leftSidebarWidth || clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH,
+      Number(readLS(LS.layout.leftExpandedWidth)) || LEFT_SIDEBAR_DEFAULT_WIDTH),
+    rightSidebarWidth,
+    rightSidebarWidthRatio: storedRightRatio === null
+      ? rightPanelWidthRatio(rightSidebarWidth, mainContentWidth) : Number(storedRightRatio),
+    rightPanelOpen: rightOpen,
+    dockHeight: clamp(180, 520, Number.isFinite(dock) ? dock : 240),
+    dockCollapsed: collapsed,
+    activeBottomTab: tab,
+    panelSlots: normalizePanelSlots(slots),
+  };
+};
+
+// ── Right sidebar helpers ──────────────────────────────────────────
+
+export const automaticRightPanelState = (
+  state: AppStore,
+  tab: UISlice["rightStackTab"],
+): Partial<Pick<AppStore, "rightStackTab" | "rightPanelOpen" | "rightSidebarWidth" | "dockCollapsed">> => {
+  if (state.rightStackTabLocked) return {};
+  if (
+    state.rightPanelOpen &&
+    state.rightStackTab !== "preview" &&
+    state.rightStackTab !== "tasks"
+  ) {
+    return {};
+  }
+  writeLS(LS.layout.rightOpen, "1");
+  return {
+    rightStackTab: tab,
+    rightPanelOpen: true,
+    dockCollapsed: state.dockCollapsed,
+  };
+};
+
+// ── Editor tab helpers ─────────────────────────────────────────────
+
+export const editorWorkspaceKey = (workspace: string | null | undefined): string => {
+  const value = normalizeWorkspaceRoot(workspace);
+  return value || DEFAULT_WORKSPACE_KEY;
+};
+
+const editorTabsStorageKey = (workspace: string | null | undefined): string =>
+  `${LS.editorTabs}:${windowDraftWorkspaceKey(editorWorkspaceKey(workspace))}`;
+
+const editorDraftsStorageKey = (workspace?: string | null): string => `${LS.editorDrafts}:${windowDraftWorkspaceKey(editorWorkspaceKey(workspace))}`;
+const editorLocationStorageKey = (workspace?: string | null): string => `${LS.editorLocation}:${windowDraftWorkspaceKey(editorWorkspaceKey(workspace))}`;
+const editorViewStorageKey = (workspace: string, path: string): string =>
+  `${LS.editorView}:${JSON.stringify([draftWindowOwnerId(), editorWorkspaceKey(workspace), editorPathComparisonKey(path, workspace)])}`;
+const legacyEditorViewStorageKey = (workspace: string, path: string): string =>
+  `${LS.editorView}:${JSON.stringify([editorWorkspaceKey(workspace), editorPathComparisonKey(path, workspace)])}`;
+const editorViewRecoveryKey = (workspace: string, path: string): string => {
+  const owned = editorViewStorageKey(workspace, path);
+  const owner = draftWindowOwnerId();
+  const inherited = owner === "primary" || cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace))?.legacyClaimOwnerId === owner;
+  return readLS(owned) !== null || !inherited ? owned : legacyEditorViewStorageKey(workspace, path);
+};
+
+export interface EditorViewSnapshot { kind: "code" | "markdown"; state: unknown; }
+
+export const loadEditorViewState = (workspace: string, path: string): EditorViewSnapshot | null =>
+  safeJsonParse<EditorViewSnapshot | null>(readLS(editorViewRecoveryKey(workspace, path)) ?? "null", null);
+
+export const persistEditorViewState = (workspace: string, path: string, viewState: EditorViewSnapshot): void => {
+  writeLS(editorViewStorageKey(workspace, path), JSON.stringify(viewState));
+};
+
+export const renameEditorViewState = (workspace: string, path: string, newPath: string): void => {
+  const oldKey = editorViewRecoveryKey(workspace, path);
+  const view = readLS(oldKey);
+  if (view !== null) {
+    writeLS(editorViewStorageKey(workspace, newPath), view);
+    if (oldKey !== editorViewStorageKey(workspace, newPath)) localStorage.removeItem(oldKey);
+  }
+};
+
+export const agentEditReviewScope = (workspace: string, conversationId: string, turnId: string, path: string): string =>
+  JSON.stringify([editorWorkspaceKey(workspace), conversationId, turnId, editorPathComparisonKey(path, workspace)]);
+
+const legacyEditorTabsStorageKey = (workspace: string | null | undefined): string => {
+  const value = (workspace || "").trim() || DEFAULT_WORKSPACE_KEY;
+  return `${LS.editorTabs}:${value}`;
+};
+
+export const normalizeEditorPath = (path: string, workingDirectory = ""): string => {
+  const raw = normalizeWorkspacePath(path);
+  if (!raw) return raw;
+  const root = normalizeWorkspacePath(workingDirectory);
+  if (root && workspacePathWithin(raw, root)) {
+    if (workspacePathsEqual(raw, root)) return ".";
+    return raw.slice(root.length).replace(/^\/+/, "") || ".";
+  }
+  return raw.replace(/\/+/g, "/").replace(/^\.\/+/, "");
+};
+
+export const editorPathComparisonKey = (path: string, workingDirectory = ""): string => {
+  const normalized = normalizeEditorPath(path, workingDirectory);
+  // Tabs are stored workspace-relative, so the workspace supplies Windows
+  // case-insensitivity that cannot be inferred from the relative spelling.
+  return workspaceFilePathComparisonKey(normalized, workingDirectory);
+};
+
+export const editorPathsEqual = (
+  left: string | null | undefined,
+  right: string | null | undefined,
+  workingDirectory = "",
+): boolean => {
+  if (!left || !right) return false;
+  return editorPathComparisonKey(left, workingDirectory) === editorPathComparisonKey(right, workingDirectory);
+};
+
+const blankEditorTab = (path: string): EditorTab => ({
+  id: uniqueMessageId("editor"),
+  path,
+  content: "",
+  original: "",
+  loading: true,
+  error: null,
+  externalChanged: false,
+  largeFile: false,
+  loadWarning: null,
+  sizeBytes: undefined,
+  readOnly: false,
+});
+
+type CachedEditorWorkspace = {
+  ownerId: string;
+  workspace: string;
+  tabs: EditorTab[];
+  activeTabPath: string | null;
+  activeEditorPath: string | null;
+};
+
+// The live cache preserves buffers during workspace switches. Dirty text and
+// disk baselines are also persisted, separately from the open-file path index.
+const editorWorkspaceBuffers = new Map<string, CachedEditorWorkspace>();
+const editorWorkspaceBufferKey = (workspace: string | null | undefined) => windowDraftWorkspaceKey(editorWorkspaceKey(workspace));
+
+/** Dirty buffers include workspaces that are currently hidden from the editor. */
+export const dirtyEditorFiles = (
+  state: Pick<AppStore, "workingDirectory" | "editorTabs">,
+  workspaceRoot?: string,
+): string[] => {
+  const ownerId = draftWindowOwnerId();
+  const activeKey = editorWorkspaceBufferKey(state.workingDirectory);
+  const selectedKey = workspaceRoot === undefined ? undefined : editorWorkspaceKey(workspaceRoot);
+  const workspaces = new Map([...editorWorkspaceBuffers].filter(([, cache]) => cache.ownerId === ownerId));
+  workspaces.set(activeKey, { ownerId, workspace: editorWorkspaceKey(state.workingDirectory), tabs: state.editorTabs, activeTabPath: null, activeEditorPath: null });
+  return [...workspaces.values()].flatMap((workspace) => {
+    const root = workspace.workspace;
+    if (selectedKey !== undefined && root !== selectedKey) return [];
+    return workspace.tabs.filter((tab) => !tab.readOnly && tab.content !== tab.original).map((tab) => {
+      const path = normalizeWorkspacePath(tab.path);
+      return root === DEFAULT_WORKSPACE_KEY || path.startsWith("/") || /^[A-Za-z]:\//.test(path)
+        ? path
+        : `${root}${root.endsWith("/") ? "" : "/"}${path}`;
+    });
+  });
+
+};
+
+export const cacheEditorStateForWorkspace = (
+  workspace: string | null | undefined,
+  tabs: EditorTab[],
+  activeTabPath: string | null,
+  activeEditorPath: string | null,
+) => {
+  editorWorkspaceBuffers.set(editorWorkspaceBufferKey(workspace), {
+    ownerId: draftWindowOwnerId(), workspace: editorWorkspaceKey(workspace),
+    tabs: tabs.map((tab) => ({ ...tab })),
+    activeTabPath,
+    activeEditorPath,
+  });
+};
+
+export const clearEditorWorkspaceBufferCacheForTests = () => {
+  editorWorkspaceBuffers.clear();
+};
+
+const legacyEditorWorkspaceIndex = (workspace?: string | null, includeBrowserLegacy = false): EditorWorkspaceIndex | undefined => {
+    let storageKey = editorTabsStorageKey(workspace);
+    const ownedRaw = readLS(storageKey);
+    const inherited = draftWindowOwnerId() === "primary" || includeBrowserLegacy && canClaimLegacyEditorDrafts();
+    if (ownedRaw === null && inherited) storageKey = `${LS.editorTabs}:${editorWorkspaceKey(workspace)}`;
+    const legacyStorageKey = legacyEditorTabsStorageKey(workspace);
+    const canonicalRaw = readLS(storageKey);
+    const scopedRaw = canonicalRaw
+      ?? (inherited && legacyStorageKey !== storageKey ? readLS(legacyStorageKey) : null);
+    const raw = scopedRaw ?? (inherited && editorWorkspaceKey(workspace) === DEFAULT_WORKSPACE_KEY ? readLS(LS.editorTabs) : null);
+    if (!raw) return undefined;
+    const parsed = safeJsonParse<unknown>(raw, []);
+    if (!Array.isArray(parsed)) return undefined;
+    const paths = parsed.filter((path): path is string => typeof path === "string");
+    const seen = new Set<string>();
+    const normalizedPaths = paths
+      .map((path) => normalizeEditorPath(path, workspace ?? ""))
+      .filter((path) => {
+        if (!path) return false;
+        const key = editorPathComparisonKey(path, workspace ?? "");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    const tabMeta = safeJsonParse<EditorWorkspaceIndex["metadata"]>(readLS(storageKey + ":meta") ?? "{}", {});
+    const locationKey = ownedRaw !== null || !inherited ? editorLocationStorageKey(workspace) : `${LS.editorLocation}:${editorWorkspaceKey(workspace)}`;
+    const location = safeJsonParse<{ activeTabPath?: string | null; activeEditorPath?: string | null }>(readLS(locationKey) ?? "{}", {});
+    return { workspace: editorWorkspaceKey(workspace), ...(ownedRaw !== null ? { windowOwnerId: draftWindowOwnerId() } : {}), paths: normalizedPaths,
+      metadata: Object.fromEntries(normalizedPaths.map(path => [path, tabMeta[editorPathComparisonKey(path, workspace ?? "")] ?? {}])),
+      activeTabPath: location.activeTabPath ?? null, activeEditorPath: location.activeEditorPath ?? null };
+};
+
+export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] => {
+    const index = cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyEditorWorkspaceIndex(workspace);
+    if (!index) return [];
+    const savedDrafts = cachedEditorDrafts(editorWorkspaceKey(workspace));
+    const drafts = savedDrafts ? [...savedDrafts.values()] : legacyEditorDrafts(workspace);
+    return index.paths.map((path) => {
+      const metadata = index.metadata[path];
+      const draft = drafts.find((entry) => editorPathsEqual(entry.path, metadata?.recoveryPath ?? path, workspace ?? ""));
+      return { ...(draft ? { ...draft, path, loading: true, error: null, draftRestorePending: true, draftRestored: true } : blankEditorTab(path)),
+        recoveryPending: savedDrafts === undefined,
+        ...metadata, language: metadata?.language };
+    });
+};
+
+export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null, location?: Pick<AppStore, "activeTabPath" | "activeEditorPath">) => {
+  const seen = new Set<string>();
+  const paths = tabs.flatMap((tab) => {
+    const path = normalizeEditorPath(tab.path, workspace ?? "");
+    const key = editorPathComparisonKey(path, workspace ?? "");
+    if (!path || seen.has(key)) return [];
+    seen.add(key);
+    return [path];
+  });
+  const legacyIndex = legacyEditorWorkspaceIndex(workspace, true);
+  const previous = cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyIndex;
+  const index: EditorWorkspaceIndex = { workspace: editorWorkspaceKey(workspace), paths,
+    metadata: Object.fromEntries(tabs.map(tab => [normalizeEditorPath(tab.path, workspace ?? ""), {
+      pinned: tab.pinned, preview: tab.preview, lastActivated: tab.lastActivated, language: tab.language, recoveryPath: tab.recoveryPath,
+    }])), activeTabPath: location ? location.activeTabPath : previous?.activeTabPath ?? null,
+    activeEditorPath: location ? location.activeEditorPath : previous?.activeEditorPath ?? null };
+  persistEditorDrafts(editorWorkspaceKey(workspace), tabs.map(tab => ({ ...tab, path: normalizeEditorPath(tab.path, workspace ?? "") })),
+    legacyEditorDrafts(workspace, true), editorDraftsRecoveryKey(workspace, true), index, legacyIndex);
+};
+
+const editorDraftsRecoveryKey = (workspace?: string | null, includeBrowserLegacy = false) => {
+  const owned = editorDraftsStorageKey(workspace);
+  const inherited = draftWindowOwnerId() === "primary" || includeBrowserLegacy && canClaimLegacyEditorDrafts();
+  return readLS(owned) !== null || !inherited ? owned : `${LS.editorDrafts}:${editorWorkspaceKey(workspace)}`;
+};
+
+const legacyEditorDrafts = (workspace?: string | null, includeBrowserLegacy = false): EditorTab[] =>
+  safeJsonParse<EditorTab[]>(readLS(editorDraftsRecoveryKey(workspace, includeBrowserLegacy)) ?? "[]", [])
+    .map(tab => ({ ...tab, path: normalizeEditorPath(tab.path, workspace ?? "") }));
+
+export function mergeRestoredEditorTabs(tabs: EditorTab[], restored: EditorTab[], workspace: string) {
+  return tabs.flatMap(tab => {
+    if (!tab.recoveryPending) return tab;
+    const saved = restored.find(entry => editorPathsEqual(entry.path, tab.path, workspace)
+      || editorPathsEqual(entry.recoveryPath ?? entry.path, tab.recoveryPath ?? tab.path, workspace));
+    return saved ? [{ ...tab, ...saved, id: tab.id, path: tab.path,
+      recoveryPending: false, recoveryPath: undefined }] : [];
+  });
+}
+
+export function reconcileRestoredEditorTabs(tabs: EditorTab[], restored: EditorTab[], workspace: string) {
+  const merged = mergeRestoredEditorTabs(tabs, restored, workspace);
+  return [...merged, ...restored.filter(tab => !merged.some(current => editorPathsEqual(current.path, tab.path, workspace)))];
+}
+
+export const editorWorkspaceRecoveryLocation = (workspace: string | null | undefined) =>
+  cachedEditorWorkspaceIndex(editorWorkspaceKey(workspace)) ?? legacyEditorWorkspaceIndex(workspace);
+
+export async function restoreWorkspaceEditorDrafts(workspace: string, initialLocation?: Pick<AppStore, "activeTabPath" | "activeEditorPath">) {
+  const initialCache = editorWorkspaceBuffers.get(editorWorkspaceBufferKey(workspace));
+  const initial = initialLocation ?? { activeTabPath: initialCache?.activeTabPath ?? null, activeEditorPath: initialCache?.activeEditorPath ?? null };
+  await loadEditorDrafts(editorWorkspaceKey(workspace), legacyEditorDrafts(workspace, true), editorDraftsRecoveryKey(workspace, true), legacyEditorWorkspaceIndex(workspace, true));
+  const restored = loadPersistedEditorTabs(workspace);
+  const cached = editorWorkspaceBuffers.get(editorWorkspaceBufferKey(workspace));
+  if (cached) {
+    const location = editorWorkspaceRecoveryLocation(workspace);
+    cached.tabs = reconcileRestoredEditorTabs(cached.tabs, restored, workspace);
+    if (cached.activeTabPath === initial.activeTabPath) cached.activeTabPath = location?.activeTabPath ?? restored[0]?.path ?? null;
+    if (cached.activeEditorPath === initial.activeEditorPath) cached.activeEditorPath = location?.activeEditorPath ?? null;
+  }
+  return restored;
+}
+
+export const editorStateForWorkspace = (workspace: string | null | undefined) => {
+  const cached = editorWorkspaceBuffers.get(editorWorkspaceBufferKey(workspace));
+  if (cached) {
+    const editorTabs = cached.tabs.map((tab) => ({ ...tab }));
+    return {
+      editorTabs,
+      activeTabPath: cached.activeTabPath && editorTabs.some((tab) => editorPathsEqual(tab.path, cached.activeTabPath, workspace ?? ""))
+        ? cached.activeTabPath
+        : editorTabs[0]?.path ?? null,
+      activeEditorPath: cached.activeEditorPath,
+      editorOpenRequests: [],
+      activeEditorOpenRequestId: null,
+    };
+  }
+  const editorTabs = loadPersistedEditorTabs(workspace);
+  const location = editorWorkspaceRecoveryLocation(workspace);
+  return {
+    editorTabs,
+    activeTabPath: editorTabs.find((tab) => location?.activeTabPath && editorPathsEqual(tab.path, location.activeTabPath, workspace ?? ""))?.path ?? editorTabs[0]?.path ?? null,
+    activeEditorPath: editorTabs.find((tab) => location?.activeEditorPath && editorPathsEqual(tab.path, location.activeEditorPath, workspace ?? ""))?.path ?? null,
+    editorOpenRequests: [],
+    activeEditorOpenRequestId: null,
+  };
+};
+
+// ── Message ID helpers ─────────────────────────────────────────────
+
+let _msgIdCounter = 0;
+export const uniqueMessageId = (suffix = ""): string => {
+  const base = typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+    : `${Date.now().toString(36)}${(++_msgIdCounter).toString(36)}`;
+  return suffix ? `m-${base}-${suffix}` : `m-${base}`;
+};
+
+export const newConversationId = (): string =>
+  `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+// ── Message helpers ────────────────────────────────────────────────
+
+const hasVisibleContentBlocks = (message: ChatMessage): boolean =>
+  getContentBlocks(message).some((block) => {
+    if (block.type === "text" || block.type === "thinking" || block.type === "process") {
+      return Boolean(block.content?.trim());
+    }
+    if (block.type === "progress") {
+      return Boolean((block.label || block.summary || block.message || "").trim());
+    }
+    return block.type === "tool_call" || block.type === "guardian_assessment" || block.type === "guardian_warning";
+  });
+
+export const isStructurallyEmptyAssistantMessage = (message: ChatMessage) =>
+  message.role === "assistant"
+  && message.isStreaming
+  && !message.content
+  && !getThinkingFromMessage(message)
+  && getToolCallsFromMessage(message).length === 0
+  && !hasVisibleContentBlocks(message)
+  && message.artifacts.length === 0;
+
+/**
+ * The backend persists a running turn periodically as "partial" with reason
+ * "run_in_progress". That snapshot is not a terminal state: while the backend
+ * stream slot owns the turn, the message is still streaming.
+ */
+export const isInFlightProjection = (message: Pick<ChatMessage, "terminationReason">): boolean =>
+  message.terminationReason === "run_in_progress";
+
+/** Hand an in-flight projection back to its live stream. */
+export const resumedFromInFlightProjection = <T extends ChatMessage>(message: T): T =>
+  isInFlightProjection(message)
+    ? { ...message, terminalStatus: undefined, terminationReason: undefined }
+    : message;
+
+export const cacheMessagesForConversation = (
+  state: AppStore,
+  id: string | null,
+  messages: AppStore["messages"] = state.messages,
+  isStreaming: boolean = state.isStreaming,
+) => {
+  if (!id) {
+    return {
+      conversationMessages: state.conversationMessages,
+      conversationStreaming: state.conversationStreaming,
+    };
+  }
+  return {
+    conversationMessages: cacheConversationTranscript(state.conversationMessages, id, messages),
+    conversationStreaming: state.conversationStreaming[id] === isStreaming
+      ? state.conversationStreaming
+      : { ...state.conversationStreaming, [id]: isStreaming },
+  };
+};
+
+export const updateMessagesForConversation = (
+  state: AppStore,
+  id: string | undefined,
+  updater: (messages: AppStore["messages"]) => AppStore["messages"] | null,
+  streaming?: boolean,
+) => {
+  const targetId = id || state.conversationId || undefined;
+  if (!targetId) {
+    const nextMessages = updater(state.messages);
+    if (!nextMessages) return state;
+    return {
+      messages: nextMessages,
+      isStreaming: streaming ?? state.isStreaming,
+    };
+  }
+
+  if (state.sideChats[targetId]) {
+    const thread = state.sideChats[targetId];
+    const nextMessages = updater(thread.messages);
+    if (!nextMessages) return state;
+    return {
+      sideChats: {
+        ...state.sideChats,
+        [targetId]: {
+          ...thread,
+          messages: nextMessages,
+          isStreaming: streaming ?? thread.isStreaming,
+        },
+      },
+    };
+  }
+
+  const isActive = targetId === state.conversationId;
+  const sourceMessages = isActive
+    ? state.messages
+    : state.conversationMessages[targetId] ?? [];
+  const nextMessages = updater(sourceMessages);
+  if (!nextMessages) return state;
+  const nextStreaming = streaming ?? (isActive ? state.isStreaming : state.conversationStreaming[targetId] ?? false);
+
+  return {
+    ...(isActive ? { messages: nextMessages, isStreaming: streaming ?? state.isStreaming } : {}),
+    conversationMessages: cacheConversationTranscript(state.conversationMessages, targetId, nextMessages),
+    conversationStreaming: state.conversationStreaming[targetId] === nextStreaming
+      ? state.conversationStreaming
+      : { ...state.conversationStreaming, [targetId]: nextStreaming },
+  };
+};
+
+export const findLastStreamingIndex = (messages: AppStore["messages"]): number => {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.isStreaming) return i;
+  }
+  return -1;
+};
+
+export const computeToolCallCount = (messages: ChatMessage[]): number =>
+  messages.reduce((sum, m) => sum + getToolCallsFromMessage(m).length, 0);
+
+export const progressConversationKey = (conversationId?: string): string => conversationId?.trim() || "__unowned__";
+
+export const conversationWorkspacePath = (conversation?: AppStore["conversations"][number] | null): string =>
+  conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || "";
+
+// ── Thinking metadata helpers ──────────────────────────────────────
+
+const THINKING_METADATA_KEYS = [
+  "source",
+  "visibility",
+  "phase",
+  "providerReasoningType",
+  "item_id",
+  "content_index",
+] as const;
+
+export const normalizeThinkingMetadata = (
+  metadata?: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
+): Partial<Omit<ThinkingContentBlock, "type" | "content">> => {
+  if (!metadata) return {};
+  const normalized: Partial<Omit<ThinkingContentBlock, "type" | "content">> = {};
+  if (metadata.source !== undefined) normalized.source = metadata.source;
+  if (metadata.visibility !== undefined) normalized.visibility = metadata.visibility;
+  if (metadata.phase !== undefined) normalized.phase = metadata.phase;
+  if (metadata.providerReasoningType !== undefined) {
+    normalized.providerReasoningType = metadata.providerReasoningType;
+  }
+  if (metadata.item_id !== undefined) normalized.item_id = metadata.item_id;
+  if (metadata.content_index !== undefined) normalized.content_index = metadata.content_index;
+  if (metadata.lifecycle !== undefined) normalized.lifecycle = metadata.lifecycle;
+  return normalized;
+};
+
+export const thinkingMetadataMatches = (
+  block: ThinkingContentBlock,
+  metadata: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
+): boolean =>
+  THINKING_METADATA_KEYS.every((key) => block[key] === metadata[key]);
+
+// ── Tool call resume helpers ───────────────────────────────────────
+
+const resumeToolStatus = (status: PendingToolCallResume["status"]): ToolCallRecord["status"] => {
+  const normalized = String(status || "running").toLowerCase();
+  if (normalized === "completed") return "success";
+  if (normalized === "error") return "failed";
+  if (normalized === "waiting_approval") return "pending";
+  if (["pending", "running", "success", "failed", "blocked", "partial", "timeout", "cancelled"].includes(normalized)) {
+    return normalized as ToolCallRecord["status"];
+  }
+  return "running";
+};
+
+export const initialResolvedTheme = (): ResolvedTheme => resolveTheme(initialTheme());
+
+export const initialCodeTextScale = (): number => {
+  const value = parseFloat(readLS(LS.codeTextScale) ?? "");
+  const base = initialCodeFontBase();
+  return clamp(8 / base, 24 / base, Number.isFinite(value) ? value : 1);
+};
+
+export const initialCodeFontBase = (): 12 | 14 => {
+  const base = readLS(LS.codeFontBase);
+  return base === "14" || (base === null && readLS(LS.codeTextScale) !== null) ? 14 : 12;
+};
+export const initialReducedMotionPreference = (): UISlice["reducedMotionPreference"] => {
+  const stored = readLS(LS.reducedMotion);
+  return stored === "1" || stored === "on" ? "on" : stored === "0" || stored === "off" ? "off" : "system";
+};
+export const reducedMotionFor = (preference: UISlice["reducedMotionPreference"]): boolean => preference === "on"
+  || preference === "system" && typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+export const initialReducedMotion = (): boolean => reducedMotionFor(initialReducedMotionPreference());
+export const readAppearancePreferences = () => ({
+  textScale: initialTextScale(), codeTextScale: initialCodeTextScale(), codeFontBase: initialCodeFontBase(),
+  reducedMotionPreference: initialReducedMotionPreference(), reducedMotion: initialReducedMotion(),
+  pointerCursors: readLS(LS.pointerCursors) === "1", diffMarkerStyle: readLS(LS.diffMarkerStyle) === "symbols" ? "symbols" as const : "color" as const,
+});
+
+export const initialSendShortcut = (): UISlice["sendShortcut"] => {
+  const shortcut = readLS(LS.sendShortcut);
+  return shortcut === "mod-enter" || shortcut === "cmdIfMultiline" ? shortcut : "enter";
+};
+
+export const initialFollowUpBehavior = (): UISlice["followUpBehavior"] => (
+  readLS(LS.followUpBehavior) === "steer" ? "steer" : "queue"
+);
+
+export const initialShortcutBindings = (): ShortcutBindings => {
+  const raw = safeJsonParse<unknown>(readLS(LS.shortcutBindings) ?? "{}", {});
+  const parsed = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const bindings = { ...DEFAULT_SHORTCUT_BINDINGS };
+  const customized = new Set<ShortcutActionId>();
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    const saved = parsed[definition.id];
+    // Existing single-binding preferences implicitly included the default alias chords.
+    if (typeof saved === "string") bindings[definition.id] = saved === definition.defaultBinding
+      ? [...DEFAULT_SHORTCUT_BINDINGS[definition.id]] : saved ? [saved] : [];
+    else if (Array.isArray(saved) && saved.every(chord => typeof chord === "string")) bindings[definition.id] = [...saved];
+    if (JSON.stringify(bindings[definition.id]) !== JSON.stringify(DEFAULT_SHORTCUT_BINDINGS[definition.id])) customized.add(definition.id);
+  }
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    if (!customized.has(definition.id)) bindings[definition.id] = bindings[definition.id]
+      .filter(chord => ![...customized].some(action => bindings[action].includes(chord)));
+  }
+  return bindings;
+};
+
+const pendingToolCallToRecord = (
+  tc: PendingToolCallResume,
+  fallbackStartedAt?: number,
+): ToolCallRecord => ({
+  id: tc.id,
+  name: tc.name,
+  args: tc.args ?? {},
+  mcpApp: tc.mcpApp ?? tc.mcp_app,
+  mcpAppResourceUri: tc.mcpAppResourceUri ?? tc.mcp_app_resource_uri,
+  mcpAppUi: tc.mcpAppUi ?? tc.mcp_app_ui,
+  status: resumeToolStatus(tc.status),
+  transition: tc.transition,
+  startedAt: tc.startedAt ?? tc.started_at ?? fallbackStartedAt ?? Date.now(),
+  finishedAt: tc.finishedAt ?? tc.finished_at,
+  durationMs: tc.durationMs ?? tc.duration_ms,
+  displayHint: tc.displayHint ?? tc.display_hint,
+  inputSummary: tc.inputSummary ?? tc.input_summary,
+  commandActions: tc.commandActions ?? tc.command_actions,
+  turnId: tc.turnId ?? tc.turn_id,
+  iterationId: tc.iterationId ?? tc.iteration_id,
+  phase: tc.phase,
+  waitingOn: tc.waitingOn ?? tc.waiting_on,
+  blockingReason: tc.blockingReason ?? tc.blocking_reason,
+  outputPreview: tc.outputPreview,
+  stdoutPreview: tc.stdoutPreview,
+  stderrPreview: tc.stderrPreview,
+  exitCode: tc.exitCode,
+  recipientId: tc.recipientId,
+  recipientIds: tc.recipientIds,
+});
+
+export const mergeResumeToolCalls = (
+  blocks: ContentBlock[],
+  pendingToolCalls?: PendingToolCallResume[],
+  preserveText = false,
+): ContentBlock[] => {
+  const next = preserveText
+    ? blocks.slice()
+    : blocks.filter((block) => block.type !== "text" && block.type !== "thinking");
+  for (const pending of pendingToolCalls ?? []) {
+    const candidate = pendingToolCallToRecord(pending);
+    const existingIndex = next.findIndex((block) =>
+      block.type === "tool_call" && sameToolCallRecord(block.record, candidate)
+    );
+    if (existingIndex >= 0) {
+      const existing = next[existingIndex];
+      if (existing.type === "tool_call") {
+        const record = pendingToolCallToRecord(pending, existing.record.startedAt);
+        const definedRecord = Object.fromEntries(
+          Object.entries(record).filter(([, value]) => value !== undefined),
+        ) as Partial<ToolCallRecord>;
+        next[existingIndex] = {
+          type: "tool_call",
+          record: {
+            ...existing.record,
+            ...definedRecord,
+            // Reconnect data may enrich a completed item, but cannot move it
+            // back into the active lifecycle.
+            status: isTerminalToolCallStatus(existing.record.status)
+              ? existing.record.status
+              : record.status,
+            args: pending.args ?? existing.record.args,
+            name: pending.name || existing.record.name,
+          },
+        };
+      }
+      continue;
+    }
+    next.push({ type: "tool_call", record: candidate });
+  }
+  return next;
+};
+
+/** Rebuild the session usage headline from a restored transcript's messages. */
+export function usageTotalsFromMessages(messages: ChatMessage[]) {
+  const totals = { input: 0, ordinaryInput: 0, output: 0, cacheRead: 0, cacheWrite: 0, promptCacheTotal: 0, reasoning: 0, turns: 0 };
+  for (const message of messages) {
+    const usage = message.usage;
+    if (!usage) continue;
+    totals.input += Math.max(0, usage.input || 0);
+    totals.ordinaryInput += promptCacheOrdinaryInputTokens(usage);
+    totals.output += Math.max(0, usage.output || 0);
+    totals.cacheRead += Math.max(0, usage.cacheRead || 0);
+    totals.cacheWrite += Math.max(0, usage.cacheWrite || 0);
+    totals.promptCacheTotal += promptCacheEffectivePromptTokens(usage);
+    totals.reasoning += Math.max(0, usage.reasoning || 0);
+    totals.turns += 1;
+  }
+  return totals;
+}
+
+/** Single source of truth for resetting conversation-scoped state on switch/create. */
+export function conversationResetPayload(): Record<string, unknown> {
+  return {
+    diffReview: null,
+    gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
+    previewArtifact: null,
+    livePreviewUrl: null,
+    previewServers: [],
+    previewLaunchConfigs: [],
+    previewLaunchProcesses: [],
+    previewVerification: null,
+    previewOwnerConversationId: null,
+    terminalSessions: [],
+    mcpServers: [],
+    activeTerminalSessionId: null,
+    rightStackTab: "tasks",
+    rightPanelOpen: false,
+    rightStackTabLocked: false,
+    allowedRemoteImageDomains: [],
+    plan: null,
+    todos: [],
+    subagents: [],
+    agentProgress: [],
+    activeGoal: null,
+    budgetBuckets: [],
+    totalBudgetPercent: 0,
+    contextUsage: null,
+    lastUsage: null,
+    usageTotals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, turns: 0 },
+    inspectorEntries: [],
+    inspectorFocus: null,
+  };
+}
+
+export const promptTargetsConversation = (
+  prompt: { conversationId?: string } | null | undefined,
+  conversationId: string | null | undefined,
+): boolean => {
+  const owner = prompt?.conversationId?.trim();
+  const target = conversationId?.trim();
+  if (!target) return false;
+  return !owner || owner === target;
+};
+
+export const visibleDiffReviewForConversation = (
+  conversationId: string | null | undefined,
+  pending: AppStore["pendingDiffReview"],
+  queue: AppStore["diffReviewQueue"],
+) => [pending, ...queue].find((item) =>
+  promptTargetsConversation(item, conversationId),
+)?.reviewState ?? null;
+
+export const removeConversationOwnedPrompts = <T extends { conversationId?: string }>(
+  pending: T | null,
+  queue: T[],
+  conversationId: string,
+): { pending: T | null; queue: T[] } => {
+  const retained = [pending, ...queue].filter((item): item is T => (
+    Boolean(item) && item?.conversationId?.trim() !== conversationId
+  ));
+  const [next, ...rest] = retained;
+  return { pending: next ?? null, queue: rest };
+};
+
+const sameToolCallRecord = (
+  left: ToolCallRecord,
+  right: ToolCallRecord,
+): boolean => {
+  if (left.id !== right.id) return false;
+  if (left.turnId && right.turnId) return left.turnId === right.turnId;
+  if (left.iterationId && right.iterationId) return left.iterationId === right.iterationId;
+  if (left.stepId && right.stepId) return left.stepId === right.stepId;
+  return true;
+};

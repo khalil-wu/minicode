@@ -836,6 +836,11 @@ def sanitize_llm_error_message(
     if kind == "unsupported_capability":
         return "\u5f53\u524d\u6a21\u578b\u4e0d\u652f\u6301\u56fe\u7247\u8f93\u5165\uff0c\u8bf7\u5207\u6362\u5230\u652f\u6301\u89c6\u89c9\u8f93\u5165\u7684\u6a21\u578b\u3002" + suffix
     if kind == "protocol":
+        if "protocol_error_code=duplicate_tool_call_id" in _normalize_error_text(message):
+            # The provider reused a tool-call id inside one response. MiniCode
+            # refused the response rather than execute a misattributed call;
+            # this is not a request-format or Base URL problem.
+            return "服务商在同一次回复中重复使用了工具调用 ID，MiniCode 已拒绝这次回复以免执行错位的工具调用；请重试或更换模型。" + suffix
         return "\u6240\u9009 API \u683c\u5f0f\u65e0\u6cd5\u88ab\u5f53\u524d\u670d\u52a1\u5546\u6216\u7f51\u5173\u5904\u7406\uff0c\u8bf7\u68c0\u67e5 API \u683c\u5f0f\u4e0e Base URL\u3002MiniCode \u672a\u5207\u6362\u5230\u5176\u4ed6\u534f\u8bae\u3002" + suffix
     if kind == "prompt_too_long":
         return "\u8bf7\u6c42\u8d85\u51fa\u4e86\u6a21\u578b\u7684\u4e0a\u4e0b\u6587\u7a97\u53e3\u3002\u8bf7\u4f7f\u7528 /compact \u538b\u7f29\u5bf9\u8bdd\uff0c\u6216\u5728\u6a21\u578b\u8bbe\u7f6e\u4e2d\u628a\u4e0a\u4e0b\u6587\u7a97\u53e3\u8bbe\u4e3a\u8be5\u6a21\u578b\u7684\u771f\u5b9e\u5927\u5c0f\u3002" + suffix

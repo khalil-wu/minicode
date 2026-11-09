@@ -1,0 +1,662 @@
+import { useI18n } from "../i18n";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { ArrowDown } from "lucide-react";
+import { useAppStore } from "../stores";
+import { HomeTaskMark } from "./HomeTaskMark";
+import {
+  createRecentTurnProjectionCache,
+  projectMessagesToTurns,
+  projectRecentMessagesToTurns,
+} from "./chatSurfaceState";
+import { ChatTurn } from "./components/ChatTurn";
+import { SafeBoundary } from "../shell/ChunkErrorBoundary";
+import { loadEarlierConversationMessages } from "./historyPagination";
+import { hasVisibleActiveConversation } from "./activeConversation";
+import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
+import type { ChatTurnState } from "./cells/cellTypes";
+import { loadRevealMessage } from "./revealConversationMessage";
+import { useReplyViewport } from "./useReplyViewport";
+import { conversationReadingState } from "./transcriptReadingState";
+import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
+import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
+import { useShallow } from "zustand/react/shallow";
+import { visibleRetainedComposerInputs } from "../composer/retainedComposerInputs";
+import { conversationWorkspacePath } from "../stores/shared-helpers";
+import type { ChatMessage } from "../stores/types";
+
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
+// A turn that throws while rendering must not take the rest of the transcript
+// down with it: the row keeps its place and offers the same recovery as the pane.
+const TurnRenderFallback = () => {
+  const { t: tr } = useI18n();
+  return (
+    <div role="alert" style={{ padding: "8px 12px", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
+      {tr("此回复渲染失败")}
+      <button type="button" onClick={() => window.location.reload()} style={{ marginLeft: 8 }}>{tr("重新加载")}</button>
+    </div>
+  );
+};
+
+const RECENT_TURN_WINDOW = 40;
+const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
+const ESTIMATED_TURN_HEIGHT = 220;
+const ESTIMATED_TURN_GAP = 8;
+const INITIAL_VIRTUAL_VIEWPORT_HEIGHT = 800;
+const estimateTurnHeight = () => ESTIMATED_TURN_HEIGHT;
+
+export const MessageList = ({ searchActive = false, previewConversationId }: { searchActive?: boolean; previewConversationId?: string } = {}) => {
+  const { t: tr } = useI18n();
+  const messages = useAppStore((s) => previewConversationId ? s.conversationMessages[previewConversationId] ?? EMPTY_MESSAGES : s.messages);
+  const retainedDraftInputs = useAppStore(useShallow(state => previewConversationId ? [] : visibleRetainedComposerInputs(state)));
+  const pendingDraftMessage = useAppStore(state => previewConversationId ? undefined : selectPendingDraftUserMessage(state)
+    ?? (state.conversationId ? state.preparingComposerMessages[state.conversationId] : undefined));
+  const ownedMessages = useMemo(() => {
+    const retained = retainedDraftInputs.filter(input => !messages.some(message => message.id === input.message.id)).map(input => input.message);
+    const next = retained.length ? [...messages, ...retained] : messages;
+    return pendingDraftMessage && !next.some(message => message.id === pendingDraftMessage.id) ? [...next, pendingDraftMessage] : next;
+  }, [messages, pendingDraftMessage, retainedDraftInputs]);
+  const isStreaming = useAppStore((s) => !previewConversationId && s.isStreaming);
+  const reducedMotion = useAppStore((s) => s.reducedMotion);
+  const conversationId = useAppStore((s) => previewConversationId ?? s.conversationId);
+  const readingState = useMemo(() => conversationId ? conversationReadingState(conversationId) : undefined, [conversationId]);
+  const historyPage = useAppStore((s) => !previewConversationId && conversationId ? s.conversationHistoryPages[conversationId] : undefined);
+  const revealTarget = useAppStore((s) => previewConversationId ? null : s.messageRevealTarget);
+  const hydrating = useAppStore((s) => Boolean(!previewConversationId && conversationId && s.conversationHydration[conversationId]?.isHydrating));
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
+  const workingDirectory = useAppStore((s) => previewConversationId
+    ? conversationWorkspacePath(s.conversations.find(item => item.id === previewConversationId)) : s.workingDirectory);
+  const conversations = useAppStore((s) => s.conversations);
+  const turnDiff = useAppStore((s) => conversationId ? s.turnDiffs[conversationId] : undefined);
+  const [sourceMessage, setSourceMessage] = useState<{ id: string; requestId: string } | null>(null);
+  const [revealStatus, setRevealStatus] = useState("");
+  const startedReveal = useRef<string | null>(null);
+  const historyScrollRef = useRef<{
+    conversationId: string | null;
+    scrollTop: number;
+    scrollHeight: number;
+  } | null>(null);
+
+  // Defer settled transcript updates to keep composer input responsive.
+  // Owner changes and history commits use the current transcript immediately.
+  const deferredTranscript = useDeferredValue(useMemo(
+    () => ({ conversationId, workspaceRoot: workingDirectory, messages: ownedMessages }),
+    [conversationId, ownedMessages, workingDirectory],
+  ));
+  const displayMessages = isStreaming || pendingDraftMessage || retainedDraftInputs.length || messages.at(-1)?.role === "user" || sourceMessage || revealTarget || historyScrollRef.current
+    || deferredTranscript.conversationId !== conversationId
+    || deferredTranscript.workspaceRoot !== workingDirectory
+    ? ownedMessages : deferredTranscript.messages;
+  // Queue filtering is performed by the turn projector while it scans only
+  // the visible recent window.  Filtering the full transcript here made every
+  // streaming token copy an otherwise unchanged multi-thousand-message array.
+  const timelineMessages = displayMessages;
+  const recentProjectionCacheRef = useRef(createRecentTurnProjectionCache());
+  const ref = useRef<HTMLDivElement>(null);
+  const getScrollElement = useCallback(() => ref.current, []);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const tailRef = useRef<HTMLDivElement>(null);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const [isFollowing, setIsFollowing] = useState(readingState?.viewport?.isFollowing ?? true);
+  const isNearBottom = useRef(readingState?.viewport?.isFollowing ?? true);
+  const lastRenderedMessageIdRef = useRef<string | null>(messages.at(-1)?.id ?? null);
+  const lastRenderedMessageCountRef = useRef(messages.length);
+  const userScrollIntentRef = useRef(0);
+  const followPausedRef = useRef(false);
+  followPausedRef.current = Boolean(previewConversationId) || searchActive || Boolean(sourceMessage);
+  const [showAllHistory, setShowAllHistory] = useState(readingState?.viewport?.showAllHistory ?? false);
+  const visibleHistoryRef = useRef(showAllHistory);
+  visibleHistoryRef.current = showAllHistory;
+  const [isScrollbarActive, setIsScrollbarActive] = useState(false);
+  const scrollbarFadeTimerRef = useRef<number | null>(null);
+
+  const shouldShowMessages = hasVisibleActiveConversation(conversationId, conversations)
+    || retainedDraftInputs.length > 0
+    || Boolean(pendingDraftMessage)
+    || (isStreaming && messages.length > 0);
+
+  const projectedTurns = useMemo(
+    () => !shouldShowMessages
+      ? { turns: [], hiddenTurnCount: 0, totalTurnCount: 0 }
+      : showAllHistory || searchActive
+        ? {
+            turns: projectMessagesToTurns(timelineMessages, isStreaming, workingDirectory),
+            hiddenTurnCount: 0,
+            totalTurnCount: 0,
+          }
+        : projectRecentMessagesToTurns(
+            timelineMessages,
+            isStreaming,
+            RECENT_TURN_WINDOW,
+            recentProjectionCacheRef.current,
+            conversationId ?? "",
+            workingDirectory,
+          ),
+    [conversationId, isStreaming, showAllHistory, searchActive, shouldShowMessages, timelineMessages, workingDirectory],
+  );
+  const turns = useMemo(
+    () => applyAuthoritativeTurnDiff(projectedTurns.turns, turnDiff),
+    [projectedTurns.turns, turnDiff],
+  );
+  const hiddenTurnCount = projectedTurns.hiddenTurnCount;
+  // Keep recent turns in one keyed list. Appending a reply must not remount
+  // the previous reply by moving it from a tail container into history.
+  const tailTurn = turns.at(-1) ?? null;
+  const liveTurn = isStreaming && tailTurn?.status === "streaming" ? tailTurn : null;
+  const reserveLatestReply = Boolean(tailTurn?.userCell && !searchActive && !sourceMessage);
+  // DOM Range search needs all loaded turns, not just the current viewport.
+  // Use the existing full-history renderer only while the user searches.
+  const shouldVirtualize = !searchActive && !sourceMessage && turns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION + 1;
+  const historicalTurns = shouldVirtualize ? turns.slice(0, -MAX_TURNS_WITHOUT_VIRTUALIZATION) : [];
+  const recentTurns = shouldVirtualize ? turns.slice(-MAX_TURNS_WITHOUT_VIRTUALIZATION) : turns;
+  useEffect(() => {
+    setSourceMessage(null);
+    setRevealStatus("");
+  }, [conversationId]);
+  useEffect(() => {
+    if (!revealTarget || revealTarget.conversationId !== conversationId || pendingConversationSwitchId || hydrating || historyPage?.loading || startedReveal.current === revealTarget.requestId) return;
+    startedReveal.current = revealTarget.requestId;
+    const ownerState = useAppStore.getState();
+    const chat = ownerState.panelSlots.find((slot) => slot.kind === "chat");
+    if (chat) ownerState.focusPanel(chat.id);
+    setRevealStatus(tr("正在定位来源消息…"));
+    isNearBottom.current = false;
+    setIsFollowing(false);
+    setShowScrollBtn(true);
+    void loadRevealMessage(revealTarget).then((result) => {
+      if (useAppStore.getState().messageRevealTarget?.requestId !== revealTarget.requestId) return;
+      if (result === "found") {
+        setShowAllHistory(true);
+        setSourceMessage({ id: revealTarget.messageId, requestId: revealTarget.requestId });
+      } else {
+        setRevealStatus(result === "missing" ? tr("找不到来源消息，它可能已被删除。") : tr("来源历史加载失败，请再次点击“回到对话”重试。"));
+        useAppStore.setState({ messageRevealTarget: null });
+      }
+    });
+  }, [revealTarget, conversationId, pendingConversationSwitchId, hydrating, historyPage?.loading]);
+  useLayoutEffect(() => {
+    if (!sourceMessage) return;
+    const target = [...(contentRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? [])].find((element) => element.dataset.messageId === sourceMessage.id);
+    if (!target) {
+      const queued = useAppStore.getState().messages.find((message) => message.id === sourceMessage.id)?.queueState === "queued";
+      setRevealStatus(queued ? tr("来源消息仍在队列中，执行后会出现在对话中。") : tr("来源消息已载入，但当前视图无法显示这条记录。"));
+      if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
+      return;
+    }
+    target.scrollIntoView({ block: "center", behavior: reducedMotion ? "auto" : "smooth" });
+    ref.current?.focus({ preventScroll: true });
+    setRevealStatus("");
+    if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
+  }, [sourceMessage, showAllHistory, reducedMotion]);
+  const firstHistoricalTurnId = historicalTurns[0]?.id;
+  const lastHistoricalTurnId = historicalTurns.at(-1)?.id;
+  // TanStack includes getItemKey identity in its measurement cache key. Keep
+  // that callback stable while only the streaming tail changes; otherwise a
+  // long transcript rebuilds every historical row measurement on each delta.
+  const getHistoricalTurnKey = useMemo(() => {
+    const keys = historicalTurns.map((turn) => turn.id);
+    return (index: number) => keys[index] ?? index;
+  }, [conversationId, firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId]);
+  const initialVirtualOffset = useCallback(() => Math.max(
+    0,
+    readingState?.viewport?.scrollTop ?? historicalTurns.length * (ESTIMATED_TURN_HEIGHT + ESTIMATED_TURN_GAP)
+      - INITIAL_VIRTUAL_VIEWPORT_HEIGHT,
+  ), [firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId, readingState]);
+  const virtualListRef = useRef<HTMLDivElement>(null);
+  const [virtualScrollMargin, setVirtualScrollMargin] = useState(0);
+  useLayoutEffect(() => {
+    if (!shouldVirtualize) {
+      setVirtualScrollMargin((current) => current === 0 ? current : 0);
+      return;
+    }
+    const list = virtualListRef.current;
+    const scrollElement = ref.current;
+    if (!list || !scrollElement) return;
+    const listRect = list.getBoundingClientRect();
+    const scrollRect = scrollElement.getBoundingClientRect();
+    const next = Math.max(0, Math.round(listRect.top - scrollRect.top + scrollElement.scrollTop));
+    setVirtualScrollMargin((current) => current === next ? current : next);
+  }, [hiddenTurnCount, shouldVirtualize]);
+  const turnVirtualizer = useVirtualizer({
+    enabled: shouldVirtualize,
+    count: shouldVirtualize ? historicalTurns.length : 0,
+    getScrollElement,
+    estimateSize: estimateTurnHeight,
+    getItemKey: getHistoricalTurnKey,
+    overscan: 3,
+    gap: ESTIMATED_TURN_GAP,
+    scrollMargin: virtualScrollMargin,
+    initialRect: { width: 0, height: INITIAL_VIRTUAL_VIEWPORT_HEIGHT },
+    initialOffset: initialVirtualOffset,
+    initialMeasurementsCache: readingState?.viewport?.measurements,
+  });
+  const renderedMeasurementsRef = useRef(turnVirtualizer.measurementsCache);
+  useLayoutEffect(() => { renderedMeasurementsRef.current = turnVirtualizer.measurementsCache; });
+  // Measurements are keyed by turn id and stay valid across conversation
+  // switches; discarding them here left the saved scroll offset mapping onto
+  // estimated sizes when the user returned to a long conversation.
+  const liveScrollSignature = useMemo(() => {
+    if (!shouldShowMessages || timelineMessages.length === 0) return "empty";
+    let last = timelineMessages[timelineMessages.length - 1];
+    // A user input is an item in the same physical turn. Its canonical row
+    // can follow the aggregate assistant, whose work/reply still grows.
+    if (tailTurn) for (let index = timelineMessages.length - 1; index >= 0; index -= 1) {
+      if (timelineMessages[index].id === tailTurn.id) {
+        last = timelineMessages[index];
+        break;
+      }
+    }
+    const blocks = last?.blocks ?? [];
+    const lastBlockRaw = blocks[blocks.length - 1];
+    const lastBlock = (lastBlockRaw && typeof lastBlockRaw === "object")
+      ? lastBlockRaw as unknown as Record<string, unknown>
+      : undefined;
+    const record = (lastBlock?.record && typeof lastBlock.record === "object")
+      ? lastBlock.record as unknown as Record<string, unknown>
+      : undefined;
+    return [
+      conversationId || "",
+      timelineMessages.length,
+      last?.id || "",
+      last?.role || "",
+      last?.content?.length || 0,
+      Boolean(last?.isStreaming),
+      Boolean(last?.isThinkingStreaming),
+      blocks.length,
+      String(lastBlock?.type || ""),
+      String(lastBlock?.content || "").length,
+      String(lastBlock?.status || record?.status || ""),
+      String(record?.outputPreview || "").length,
+      String(record?.stdoutPreview || "").length,
+      String(record?.stderrPreview || "").length,
+      turns.length,
+      hiddenTurnCount,
+    ].join("|");
+  }, [conversationId, hiddenTurnCount, shouldShowMessages, timelineMessages, turns.length, tailTurn?.id]);
+
+  const scrollRafRef = useRef<number | null>(null);
+  const programmaticScrollRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+
+  const setScrollTop = useCallback((el: HTMLDivElement, top: number, behavior: ScrollBehavior = "auto") => {
+    programmaticScrollRef.current = true;
+    if (behavior === "smooth") el.scrollTo({ top, behavior });
+    else el.scrollTop = top;
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+      lastScrollTopRef.current = el.scrollTop;
+    });
+  }, []);
+
+  const scheduleBottomScroll = useCallback((behavior: ScrollBehavior = "auto", force = false, alignTurnStart = false) => {
+    if (!force && (!isNearBottom.current || followPausedRef.current)) return;
+    if (force) {
+      isNearBottom.current = true;
+      setIsFollowing(true);
+      setShowScrollBtn(false);
+    }
+    if (scrollRafRef.current !== null) {
+      if (!force) return;
+      cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const el = ref.current;
+      if (!el || (!force && (!isNearBottom.current || followPausedRef.current))) return;
+      if (force) {
+        isNearBottom.current = true;
+        setIsFollowing(true);
+        setShowScrollBtn(false);
+      }
+      // Mark this as programmatic so the resulting scroll event doesn't
+      // re-engage auto-follow or fight a user reading upstream. One snap per
+      // frame is enough — the old second-rAF re-snap caused a visible jog.
+      const tail = tailRef.current;
+      const top = alignTurnStart && tail
+        ? el.scrollTop + tail.getBoundingClientRect().top - el.getBoundingClientRect().top
+          - Number(getComputedStyle(el).paddingTop.replace("px", ""))
+        : el.scrollHeight;
+      setScrollTop(el, top, behavior);
+    });
+  }, [setScrollTop]);
+  const followBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    scheduleBottomScroll(behavior, false);
+  }, [scheduleBottomScroll]);
+  const startLatestTurn = useCallback(() => {
+    scheduleBottomScroll("auto", true, true);
+  }, [scheduleBottomScroll]);
+  useReplyViewport(ref, followBottom);
+
+  useLayoutEffect(() => {
+    const el = ref.current!;
+    const viewport = readingState?.viewport;
+    setShowAllHistory(viewport?.showAllHistory ?? false);
+    isNearBottom.current = viewport?.isFollowing ?? true;
+    setIsFollowing(isNearBottom.current);
+    setShowScrollBtn(!isNearBottom.current);
+    const state = useAppStore.getState();
+    const currentMessages = previewConversationId ? state.conversationMessages[previewConversationId] ?? EMPTY_MESSAGES : state.messages;
+    lastRenderedMessageIdRef.current = currentMessages.at(-1)?.id ?? null;
+    lastRenderedMessageCountRef.current = currentMessages.length;
+    historyScrollRef.current = null;
+    const frame = viewport && !viewport.isFollowing ? requestAnimationFrame(() => {
+      if (!isNearBottom.current) setScrollTop(el, viewport.scrollTop);
+    }) : null;
+    if (!viewport || viewport.isFollowing) scheduleBottomScroll("auto", Boolean(previewConversationId));
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+      if (readingState && !previewConversationId) readingState.viewport = {
+        // React has already replaced the content before layout cleanup. A
+        // shorter preview may clamp the DOM position; retain this owner's
+        // last observed position instead of reading the incoming transcript.
+        scrollTop: lastScrollTopRef.current,
+        isFollowing: isNearBottom.current,
+        showAllHistory: visibleHistoryRef.current,
+        measurements: renderedMeasurementsRef.current,
+      };
+    };
+  }, [readingState, scheduleBottomScroll, setScrollTop, previewConversationId]);
+
+  const captureHistoryScroll = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    historyScrollRef.current = { conversationId, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight };
+    isNearBottom.current = false;
+    setIsFollowing(false);
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+  }, [conversationId]);
+
+  const revealEarlierHistory = useCallback(() => {
+    if (followPausedRef.current) return;
+    if (hiddenTurnCount > 0) {
+      captureHistoryScroll();
+      setShowAllHistory(true);
+    } else if (conversationId && historyPage?.hasMore && !historyPage.loading) {
+      void loadEarlierConversationMessages(conversationId, () => {
+        if (useAppStore.getState().conversationId !== conversationId) return;
+        captureHistoryScroll();
+        setShowAllHistory(true);
+      });
+    }
+  }, [captureHistoryScroll, conversationId, hiddenTurnCount, historyPage]);
+
+  useLayoutEffect(() => {
+    const previous = historyScrollRef.current;
+    const el = ref.current;
+    if (!previous || !el) return;
+    historyScrollRef.current = null;
+    if (previous.conversationId !== conversationId) return;
+    setScrollTop(el, previous.scrollTop + Math.max(0, el.scrollHeight - previous.scrollHeight));
+    setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 200);
+  }, [conversationId, showAllHistory, timelineMessages, setScrollTop]);
+
+  const scrollToBottom = useCallback(() => {
+    setSourceMessage(null);
+    scheduleBottomScroll(reducedMotion ? "auto" : "smooth", true);
+  }, [scheduleBottomScroll, reducedMotion]);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const showScrollbarBriefly = () => {
+      setIsScrollbarActive(true);
+      if (scrollbarFadeTimerRef.current !== null) window.clearTimeout(scrollbarFadeTimerRef.current);
+      scrollbarFadeTimerRef.current = window.setTimeout(() => {
+        scrollbarFadeTimerRef.current = null;
+        setIsScrollbarActive(false);
+      }, 700);
+    };
+    const onScroll = () => {
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const prev = lastScrollTopRef.current;
+      lastScrollTopRef.current = el.scrollTop;
+      // Ignore the scroll event fired by our own follow snap.
+      if (programmaticScrollRef.current) {
+        return;
+      }
+      showScrollbarBriefly();
+      if (el.scrollTop <= 160) revealEarlierHistory();
+      // Any user-driven upward scroll (wheel OR drag) disengages auto-follow —
+      // the old 80px band yanked users back who scrolled up < 80px to read.
+      if (el.scrollTop < prev - 4) {
+        userScrollIntentRef.current = Date.now();
+        isNearBottom.current = false;
+        setIsFollowing(false);
+        setShowScrollBtn(gap > 200);
+        return;
+      }
+      if (Date.now() - userScrollIntentRef.current < 200) return;
+      isNearBottom.current = gap < 80;
+      setIsFollowing(gap < 80);
+      setShowScrollBtn(gap > 200);
+    };
+    const onWheel = (event: WheelEvent) => {
+      showScrollbarBriefly();
+      if (event.deltaY < 0) {
+        userScrollIntentRef.current = Date.now();
+        isNearBottom.current = false;
+        setIsFollowing(false);
+        if (el.scrollTop <= 160) revealEarlierHistory();
+      }
+    };
+    el.addEventListener("scroll", onScroll);
+    el.addEventListener("wheel", onWheel, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      el.removeEventListener("wheel", onWheel);
+      if (scrollbarFadeTimerRef.current !== null) window.clearTimeout(scrollbarFadeTimerRef.current);
+    };
+  }, [revealEarlierHistory]);
+
+  useLayoutEffect(() => {
+    followBottom();
+  }, [followBottom, isStreaming, liveScrollSignature]);
+
+  useLayoutEffect(() => {
+    if (!shouldShowMessages) {
+      lastRenderedMessageIdRef.current = messages.at(-1)?.id ?? null;
+      lastRenderedMessageCountRef.current = messages.length;
+      return;
+    }
+    const previousCount = lastRenderedMessageCountRef.current;
+    const previousTailId = lastRenderedMessageIdRef.current;
+    let appendedMessages = previousCount === 0 ? messages : [];
+    if (messages.length > previousCount && previousTailId) {
+      // A history prepend increases length without adding a new turn at the
+      // tail. Walk only the new suffix instead of mistaking old users for sends.
+      let previousTailIndex = messages.length - 1;
+      while (previousTailIndex >= 0 && messages[previousTailIndex].id !== previousTailId) previousTailIndex -= 1;
+      if (previousTailIndex >= 0) appendedMessages = messages.slice(previousTailIndex + 1);
+    }
+    lastRenderedMessageCountRef.current = messages.length;
+    const latest = messages.at(-1);
+    const latestId = latest?.id ?? null;
+    const messageChanged = Boolean(latestId && latestId !== lastRenderedMessageIdRef.current);
+    lastRenderedMessageIdRef.current = latestId;
+    if (!messageChanged && appendedMessages.length === 0) return;
+    if (appendedMessages.some((message) => message.role === "user" && !message.queueState && !message.steeredIntoMessageId
+      && message.messageSource?.kind !== "scheduled_task") && !searchActive) {
+      setSourceMessage(null);
+      startLatestTurn();
+    }
+    else if (latest?.role === "assistant") followBottom();
+  }, [followBottom, startLatestTurn, messages, searchActive, shouldShowMessages, sourceMessage]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      followBottom();
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [followBottom]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current);
+    };
+  }, []);
+
+  return (
+    <div
+      data-testid="message-list-shell"
+      ref={node => { if (node) node.inert = Boolean(previewConversationId); }}
+      className="relative flex-1 min-h-0 h-full flex flex-col"
+      style={{ position: "relative", flex: 1, minHeight: 0, height: "100%", display: "flex", flexDirection: "column" }}
+    >
+      {revealStatus && <div role="status" className="chat-reveal-status">{revealStatus}</div>}
+      <div
+        ref={ref}
+        data-testid="message-list-scroll"
+        className={`message-list-scroll chat-scrollbar-auto-hide${isScrollbarActive ? " is-scrolling" : ""} flex-1 min-h-0 overflow-y-auto flex flex-col`}
+        role="log"
+        aria-label={tr("会话历史")}
+        tabIndex={0}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          // TanStack owns height compensation while historical rows are
+          // virtualized. Native anchoring would apply the same delta twice.
+          overflowAnchor: shouldVirtualize ? "none" : undefined,
+          display: "flex",
+          flexDirection: "column",
+          gap: "var(--space-turn-gap)",
+          overscrollBehavior: "contain",
+          scrollbarGutter: "stable both-edges",
+          opacity: 1,
+        }}
+      >
+        <div
+          ref={contentRef}
+          className="message-list-content flex flex-col"
+          data-layout-mode="code"
+          style={{
+            gap: "var(--space-turn-gap)",
+            minHeight: "100%",
+            flex: "0 0 auto",
+          }}
+        >
+          {!shouldShowMessages || timelineMessages.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <>
+            {shouldVirtualize ? (
+              <div
+                ref={virtualListRef}
+                data-testid="virtual-turn-list"
+                style={{
+                  flex: "0 0 auto",
+                  height: turnVirtualizer.getTotalSize(),
+                  position: "relative",
+                  width: "100%",
+                }}
+              >
+                {turnVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const turn = historicalTurns[virtualRow.index];
+                  if (!turn) return null;
+                  return (
+                    <div
+                      key={turn.id}
+                      ref={turnVirtualizer.measureElement}
+                      data-index={virtualRow.index}
+                      style={{
+                        left: 0,
+                        position: "absolute",
+                        top: 0,
+                        transform: `translateY(${virtualRow.start - virtualScrollMargin}px)`,
+                        width: "100%",
+                      }}
+                    >
+                      <SafeBoundary fallback={<TurnRenderFallback />}>
+                        <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} readOnly={Boolean(previewConversationId)} />
+                      </SafeBoundary>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+            {recentTurns.map((turn) => {
+              const isTail = turn === tailTurn;
+
+              return (
+                <div
+                  key={turn.id}
+                  ref={isTail ? tailRef : undefined}
+                  data-testid={isTail ? liveTurn ? "streaming-turn-tail" : "latest-turn-tail" : undefined}
+                  data-reply-viewport={isTail ? reserveLatestReply ? "true" : "false" : undefined}
+                  style={{
+                    flex: "0 0 auto",
+                    minHeight: isTail && reserveLatestReply ? "var(--reply-viewport-height)" : undefined,
+                  }}
+                >
+                <SafeBoundary fallback={<TurnRenderFallback />}>
+                  <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} readOnly={Boolean(previewConversationId)} />
+                </SafeBoundary>
+                </div>
+              );
+            })}
+            </>
+          )}
+        </div>
+      </div>
+      {showScrollBtn && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          aria-label={tr("回到底部")}
+          title={isStreaming && !isFollowing ? tr("回到底部 · 正在回复") : tr("回到底部")}
+          data-testid="scroll-to-bottom-button"
+          className="absolute bottom-3 z-[20] inline-flex items-center justify-center cursor-pointer"
+          style={{
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "var(--surface-raised)",
+            border: "1px solid var(--border-soft)",
+            borderRadius: "var(--radius-full)",
+            width: 44,
+            minWidth: 44,
+            minHeight: 44,
+            padding: 0,
+            fontSize: "var(--text-xs)",
+            color: "var(--text-secondary)",
+            boxShadow: "var(--shadow-md)",
+            pointerEvents: "auto",
+          }}
+        >
+          <ArrowDown size={18} aria-hidden="true" />
+        </button>
+      )}
+    </div>
+  );
+};
+
+const EmptyState = () => {
+  const { t: tr } = useI18n();
+  const workingDirectory = useAppStore((state) => {
+    const conversation = state.conversations.find((item) => item.id === state.conversationId);
+    return conversation?.executionCwd && !conversation.workspaceRoot && !conversation.worktreePath ? "" : state.workingDirectory;
+  });
+  return (
+  <div className="workbench-empty-state">
+    <section className="workbench-empty-hero">
+      <div className="workbench-empty-brand">
+        <div className="workbench-empty-mark" aria-hidden="true">
+          <HomeTaskMark />
+        </div>
+        <h1 className="workbench-empty-title">{workingDirectory ? <>{tr("你想让我们在")}<button type="button" className="workbench-empty-project" onClick={() => window.dispatchEvent(new CustomEvent("composer:open-project-picker"))}>{workspaceDisplayName(canonicalWorkspacePath(workingDirectory))}</button> {tr("中构建什么？")}</> : tr("我们要构建什么？")}</h1>
+      </div>
+    </section>
+  </div>
+  );
+};

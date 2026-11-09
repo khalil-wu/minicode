@@ -1,8 +1,10 @@
+import { mockWorkspaceEnvironment } from "./http-fixtures";
 import { test, expect, Page } from "@playwright/test";
 
 async function mockWebSocket(page: Page) {
   await page.addInitScript(() => {
     const messages: string[] = [];
+    localStorage.setItem("minicode.conversation.active-id", "conv-e2e");
     const originalWebSocket = window.WebSocket;
 
     class MockWebSocket extends EventTarget {
@@ -68,6 +70,18 @@ async function mockWebSocket(page: Page) {
       send(data: string) {
         messages.push(data);
         const parsed = JSON.parse(data);
+        if (parsed.type === "user_message") {
+          setTimeout(() => {
+            const conversation_id = parsed.conversation_id || "conv-e2e";
+            const run_id = `turn-${parsed.assistant_message_id}`;
+            this._receive({ type: "agent.run.started", role: "main", status: "running", run_id, turn_id: run_id,
+              conversation_id, message_id: parsed.assistant_message_id, started_at: Date.now() });
+            this._receive({ type: "command.result", command: "user_message", level: "success", message: "",
+              client_command_id: parsed.client_command_id, conversation_id,
+              data: { admitted: true, conversation_id, run_id, user_message_id: parsed.user_message_id,
+                assistant_message_id: parsed.assistant_message_id } });
+          }, 0);
+        }
 
         if (parsed.client_command_id) {
           setTimeout(() => {
@@ -80,6 +94,36 @@ async function mockWebSocket(page: Page) {
           }, 0);
         }
 
+        if (parsed.type === "session.sync" || parsed.type === "session.restore") {
+          // The renderer only reports itself connected once the session
+          // handshake is answered. This mirrors the canonical empty-session
+          // snapshot (test/initial-session-sync.ts); the earlier
+          // conversation.list and llm.model.updated frames are replayed by the
+          // renderer after the snapshot lands.
+          const restore = parsed.type === "session.restore";
+          const session = { active_conversation_id: "conv-e2e", active_conversation: { id: "conv-e2e", title: "Fixture chat", workspace_root: "/tmp/test", transcript: [] }, active_stream_conversation_ids: [], selected_model: "gpt-4", workspace_root: "/tmp/test" };
+          setTimeout(() => {
+            this._receive({
+              type: restore ? "session.restored" : "session.synced",
+              session_id: "e2e-session",
+              synced: true,
+              client_command_id: parsed.client_command_id,
+              active_conversation_id: session.active_conversation_id,
+              ...(restore ? { conversation: session.active_conversation, messages: [] } : {}),
+              current_model: "gpt-4",
+              model: "gpt-4",
+              current_seq: 0,
+              last_seq: 0,
+              replayed_events: 0,
+              event_log_gap: false,
+              snapshot_required: false,
+              cursor_reset: false,
+              requested_last_seq: 0,
+              session,
+            });
+          }, 0);
+          return;
+        }
         if (parsed.type === "conversation.truncate") {
           setTimeout(() => {
             this._receive({
@@ -182,7 +226,7 @@ async function mockWebSocket(page: Page) {
             };
             this._receive({
               type: "item.started",
-              item: { id: "mock-answer", type: "agent_message" },
+              item: { id: "mock-answer", type: "agent_message", source: "model_final" },
               ...owner,
             });
             this._receive({
@@ -193,7 +237,7 @@ async function mockWebSocket(page: Page) {
             });
             this._receive({
               type: "item.completed",
-              item: { id: "mock-answer", type: "agent_message", text: "Mock response to: " + parsed.content, status: "completed" },
+              item: { id: "mock-answer", type: "agent_message", text: "Mock response to: " + parsed.content, status: "completed", source: "model_final" },
               ...owner,
             });
             this._receive({
@@ -229,12 +273,29 @@ async function mockWebSocket(page: Page) {
   });
 }
 
+// The composer draft on Home owns its model selection and reads it over HTTP;
+// the mock WebSocket alone leaves currentModel empty, so answer those requests here.
+async function mockDraftHttp(page: Page) {
+  await mockWorkspaceEnvironment(page);
+  const selection = {
+    provider: "openai", current_model: "gpt-4", model: "gpt-4", available_models: ["gpt-4", "gpt-3.5-turbo"], models_source: "configured",
+    available_model_options: ["gpt-4", "gpt-3.5-turbo"].map(model => ({ model, reasoning_effort_levels: ["low", "medium", "high"], default_reasoning_effort: "medium" })),
+    effective_reasoning_effort: "medium", model_selection_mode: "default",
+    default_model_selection: { provider: "openai", model: "gpt-4", reasoning_effort: "medium", conversation_id: "", working_directory: "" },
+    available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [],
+    config_version: "e2e-config", config_cwd: "",
+  };
+  await page.route("**/api/llm/draft-selection**", route => route.fulfill({ json: selection }));
+  await page.route("**/api/thread-metadata/sections**", route => route.fulfill({ json: { sections: [] } }));
+}
+
 async function openApp(page: Page) {
+  await mockDraftHttp(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => Boolean((window as any).__mockWs));
   await expect(page.locator(
     'textarea, input[placeholder*="message" i], [contenteditable="true"]'
-  ).first()).toBeVisible();
+  ).first()).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().isConnected)).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().currentModel || "")).not.toBe("");
 }
@@ -399,7 +460,7 @@ test.describe("Bug Fix: authoritative live projection", () => {
     await expect(page.locator(".agent-loop-work-area").getByText("正在检查真实调用链。")).toBeVisible();
   });
 
-  test("renders delegation before the task tool completes and updates it in place", async ({ page }) => {
+  test("shows real delegation starts before the task result without inventing starts from instructions", async ({ page }) => {
     await page.evaluate(() => {
       const store = (window as any).__zustandStore;
       store.setState({
@@ -435,9 +496,18 @@ test.describe("Bug Fix: authoritative live projection", () => {
     });
 
     const runningCell = page.locator('.collaboration-cell[data-status="running"]');
-    await expect(runningCell).toContainText("正在委派 · 2 个子任务");
-    await expect(runningCell).toContainText("读取 fact-1.txt");
-    await expect(runningCell).toContainText("读取 fact-2.txt");
+    await expect(page.locator(".collaboration-delegated-row")).toHaveCount(0);
+    await page.evaluate(() => {
+      for (const [id, name] of [["ada", "Ada"], ["lin", "Lin"]]) {
+        (window as any).__mockWs._receive({ type: "subagent.start", conversation_id: "conv-e2e", message_id: "assistant-stream",
+          subagent_id: `worker-${id}`, parent_id: "main", role: "explore", display_name: name, agent_path: `/root/${id}`,
+          parent_message_id: "assistant-stream", parent_tool_call_id: "task-live",
+          delegation: { agent_id: `worker-${id}`, name, agent_path: `/root/${id}`, status: "running", started_at: Date.now() } });
+      }
+    });
+    await expect(runningCell).toContainText("Ada开始工作");
+    await expect(runningCell).toContainText("Lin开始工作");
+    await expect(runningCell).not.toContainText("读取 fact-");
 
     await page.evaluate(() => {
       const ws = (window as any).__mockWs;
@@ -448,46 +518,35 @@ test.describe("Bug Fix: authoritative live projection", () => {
         id: "task-live",
         status: "success",
         result_kind: "subagent",
-        summary: "4 个智能体已启动",
+        summary: "2 个智能体已启动",
       });
     });
 
     await expect(page.locator('.collaboration-cell[data-status="success"]')).toHaveCount(1);
     await expect(page.locator('.collaboration-cell[data-status="running"]')).toHaveCount(0);
-    await expect(page.getByText("读取 fact-1.txt", { exact: true })).toHaveCount(1);
+    await expect(page.getByText("读取 fact-1.txt", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".collaboration-delegated-row")).toHaveCount(2);
+    await page.getByRole("button", { name: "打开子智能体：Ada" }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().focusedSubagentId)).toBe("worker-ada");
   });
 
-  test("keeps chat and Code navigation fully visible and directly clickable", async ({ page }) => {
+  test("keeps Home and the work-mode menu visible and directly clickable", async ({ page }) => {
     await page.setViewportSize({ width: 1600, height: 1000 });
-    await page.evaluate(() => {
-      const store = (window as any).__zustandStore;
-      store.setState({ leftSidebarWidth: 272, appMode: "code" });
-    });
-
-    const switcher = page.getByRole("navigation", { name: "应用导航" });
-    await expect(switcher).toBeVisible();
-    const result = await switcher.evaluate((element) => {
-      const listRect = element.getBoundingClientRect();
-      const tabs = Array.from(element.querySelectorAll<HTMLElement>('button[aria-label="聊天首页"], button[aria-label="Code"]'));
-      return tabs.map((tab) => {
-        const rect = tab.getBoundingClientRect();
-        const points = [
-          [rect.left + 1, rect.top + rect.height / 2],
-          [rect.right - 1, rect.top + rect.height / 2],
-        ];
-        return {
-          inside: rect.left >= listRect.left && rect.right <= listRect.right,
-          hits: points.map(([x, y]) => document.elementFromPoint(x, y)?.closest('button') === tab),
-        };
-      });
-    });
-
-    expect(result).toHaveLength(2);
-    expect(result.every((tab) => tab.inside && tab.hits.every(Boolean))).toBe(true);
-    await page.getByRole("button", { name: "聊天首页", exact: true }).click();
-    await expect(page.getByRole("button", { name: "聊天首页", exact: true })).toHaveAttribute("aria-current", "page");
-    await page.getByRole("button", { name: "Code", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Code", exact: true })).toHaveAttribute("aria-current", "page");
+    await page.evaluate(() => (window as any).__zustandStore.setState({ leftSidebarWidth: 272 }));
+    const home = page.getByRole("button", { name: "首页", exact: true });
+    const switcher = page.getByRole("button", { name: "切换工作模式", exact: true });
+    for (const control of [home, switcher]) {
+      await expect(control).toBeVisible();
+      expect(await control.evaluate(element => {
+        const r = element.getBoundingClientRect();
+        return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest("button") === element;
+      })).toBe(true);
+    }
+    await switcher.click();
+    await page.getByRole("menuitem", { name: "代码", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().appMode)).toBe("code");
+    await home.click();
+    await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().appMode)).toBe("cowork");
   });
 });
 
@@ -725,7 +784,8 @@ test.describe("Message context and compact assistant process UI", () => {
       'textarea, input[placeholder*="message" i], [contenteditable="true"]'
     ).first();
     await composer.click();
-    await composer.fill("Help me answer this question");
+    await composer.press("Control+End");
+    await page.keyboard.insertText(" Help me answer this question");
     await page.keyboard.press("Enter");
     await page.waitForTimeout(500);
 
@@ -740,7 +800,7 @@ test.describe("Message context and compact assistant process UI", () => {
     await recallButton.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' user-cell-wrap ')][1]").hover();
     await recallButton.click();
     await page.getByRole("dialog").getByRole("button", { name: "撤回" }).click();
-    await expect(composer).toHaveValue("Help me answer this question");
+    await expect(composer).toContainText("Help me answer this question");
     const restoredMentions = await page.evaluate(() =>
       (window as any).__zustandStore?.getState().selectedMentions.map((item: any) => item.path),
     );
@@ -784,8 +844,9 @@ test.describe("Message context and compact assistant process UI", () => {
     await page.waitForTimeout(400);
     await page.keyboard.press("Enter");
 
-    await expect(page.getByRole("button", { name: "打开 App.tsx" })).toBeVisible();
-    await composer.fill("Explain this file");
+    await expect(composer.getByText("App.tsx", { exact: true })).toBeVisible();
+    await composer.press("Control+End");
+    await page.keyboard.insertText(" Explain this file");
     await page.keyboard.press("Enter");
     await page.waitForTimeout(500);
 
@@ -839,7 +900,8 @@ test.describe("Message context and compact assistant process UI", () => {
     expect(selectedMentions[0].path).toBe("frontend/src.v2/App.tsx#2");
     expect(selectedMentions[0].path).not.toContain("file:");
 
-    await composer.fill("Explain this line");
+    await composer.press("Control+End");
+    await page.keyboard.insertText(" Explain this line");
     await page.keyboard.press("Enter");
     await page.waitForTimeout(500);
 
@@ -867,7 +929,8 @@ test.describe("Message context and compact assistant process UI", () => {
       'textarea, input[placeholder*="message" i], [contenteditable="true"]'
     ).first();
     await composer.click();
-    await composer.fill("Continue anyway");
+    await composer.press("Control+End");
+    await page.keyboard.insertText(" Continue anyway");
     await page.keyboard.press("Enter");
     await page.waitForTimeout(500);
 
@@ -913,8 +976,8 @@ test.describe("Message context and compact assistant process UI", () => {
 
     await processSummary.click();
     await expect(page.getByRole("button", { name: "收起处理步骤" }).first()).toBeVisible();
-    await expect(page.getByText("frontend/src.v2/App.tsx").first()).toBeVisible();
-    await page.getByRole("button", { name: "Thinking", exact: true }).click();
+    await expect(page.getByRole("button", { name: "展开活动详情", exact: true })).toContainText("App.tsx");
+    await page.getByRole("button", { name: "thinking line 1", exact: true }).click();
     await expect(page.getByText("thinking line 20")).toBeVisible();
   });
 
@@ -952,7 +1015,9 @@ test.describe("Message context and compact assistant process UI", () => {
     await expect(page.getByText('"command": "npm test"')).toBeHidden();
   });
 
-  test("approval requests render inline in the chat instead of a blocking modal", async ({ page }) => {
+  test("approval replaces the composer and restores its draft after a decision", async ({ page }) => {
+    const composer = page.locator('.composer-input-region [contenteditable="true"]');
+    await composer.fill("Preserve this unsent draft");
     await page.evaluate(() => {
       const ws = (window as any).__mockWs;
       ws?._receive({
@@ -969,12 +1034,13 @@ test.describe("Message context and compact assistant process UI", () => {
     });
 
     await expect(page.getByLabel("Agent is waiting for input")).toBeVisible();
-    await expect(page.getByText("允许使用 运行？", { exact: false })).toBeVisible();
+    await expect(page.getByText("允许 MiniCode 运行此命令？", { exact: false })).toBeVisible();
+    await expect(page.locator(".composer-input-region [contenteditable=true]")).toBeHidden();
     await expect(page.getByRole("button", { name: "允许使用工具" })).toBeVisible();
     await expect(page.locator(".overlay-backdrop")).toHaveCount(0);
 
     await page.getByRole("button", { name: "允许使用工具" }).click();
-    await page.waitForTimeout(100);
+    await expect(composer).toHaveText("Preserve this unsent draft");
     const sent = await page.evaluate(() => (window as any).__mockWsMessages ?? []);
     expect(sent.some((raw: string) => {
       const parsed = JSON.parse(raw);
@@ -1074,12 +1140,13 @@ test.describe("Message context and compact assistant process UI", () => {
     await page.evaluate(() => (window as any).__zustandStore?.setState({ rightPanelOpen: true }));
     await expect(page.getByText("Reading request and workspace context").first()).toBeVisible();
     await expect(page.getByText("Scanning BrowserPanel structure").first()).toBeVisible();
-    await expect(page.getByText("frontend/src.v2/panels/BrowserPanel.tsx").first()).toBeVisible();
+    await page.locator('button.agent-loop-timeline-group-title[data-group-kind="work"][aria-expanded="false"]').first().click();
+    await expect(page.getByText("BrowserPanel.tsx", { exact: true }).first()).toBeVisible();
     await page.getByRole("button", { name: "关闭右侧栏", exact: true }).first().click();
     await expect(page.getByRole("tablist", { name: "右侧栏面板" })).toBeHidden();
-    await page.getByRole("button", { name: "Thinking", exact: true }).click();
+    await page.getByRole("button", { name: "I will inspect the selected panel, then map the execution state into a concise answer.", exact: true }).click();
     await expect(page.getByText(/I will inspect the selected panel/).first()).toBeVisible();
-    await page.getByRole("button", { name: "打开右侧栏" }).click();
+    await page.evaluate(() => (window as any).__zustandStore.getState().setRightStackTab("tasks"));
 
     await page.evaluate(() => {
       (window as any).__zustandStore?.getState().setPlan({
@@ -1168,7 +1235,7 @@ test.describe("Message context and compact assistant process UI", () => {
       });
       receive({
         type: "item.started",
-        item: { id: "plan-answer", type: "agent_message" },
+        item: { id: "plan-answer", type: "agent_message", source: "model_final" },
       });
       receive({
         type: "agent_message.delta",
@@ -1213,7 +1280,7 @@ test.describe("Message context and compact assistant process UI", () => {
 
     await expect(page.getByText("Plan complete. I checked BrowserPanel").first()).toBeVisible();
     await page.getByRole("button", { name: "关闭右侧栏", exact: true }).first().click();
-    await page.getByRole("button", { name: "展开处理步骤" }).click();
+    await expect(page.getByRole("button", { name: "收起处理步骤" })).toBeVisible();
     await page.getByRole("button", { name: "展开活动详情" }).click();
     await expect(page.getByText(/Read BrowserPanel\.tsx and found CDP target selection/).first()).toBeVisible();
     await expect
@@ -1519,7 +1586,7 @@ test.describe("Conversation session cache", () => {
     await expect(page.getByText("Conversation B is separate")).toHaveCount(0);
   });
 
-  test("clicking a task immediately blanks the old chat until its page arrives", async ({ page }) => {
+  test("clicking a task immediately hides the old chat until its page arrives", async ({ page }) => {
     await page.evaluate(() => {
       const store = (window as any).__zustandStore;
       const oldMessage = { id: "old-answer", role: "assistant", content: "Old task content", artifacts: [], timestamp: Date.now() };
@@ -1543,7 +1610,7 @@ test.describe("Conversation session cache", () => {
     const targetTask = page.getByTestId("conversation-list").getByText("Task B", { exact: true });
     await targetTask.click();
     await expect(page.locator(".chat-pane")).toHaveAttribute("data-switching", "true");
-    await expect(page.getByText("Old task content")).toHaveCount(0);
+    await expect(page.getByText("Old task content")).toBeHidden();
     await expect(targetTask.locator("xpath=ancestor::button[1]")).toHaveAttribute("aria-current", "page");
     await page.screenshot({ path: "../output/playwright/session-switch-pending-20260928.png", fullPage: true });
 

@@ -838,6 +838,9 @@ export interface WorkspaceFileTab {
   endLine?: number;
   endColumn?: number;
   isPreview?: boolean;
+  // Opened by a single click while browsing: the next single click in the
+  // same scope replaces it in place. A double click or pin keeps the tab.
+  transient?: boolean;
   locationRequestId?: string;
 }
 
@@ -846,6 +849,7 @@ export interface WorkspaceFileOpenOptions {
   endLine?: number;
   endColumn?: number;
   isPreview?: boolean;
+  transient?: boolean;
 }
 
 export interface WorkspaceSlice {

@@ -1,0 +1,110 @@
+import { describe, expect, it } from "vitest";
+import {
+  isProviderCompletionProgress,
+  isProviderRequestProgress,
+  providerProgressLabel,
+} from "./provider-progress";
+
+describe("providerProgressLabel", () => {
+  it("keeps source stream failure notifications visible while hiding ordinary request liveness", () => {
+    const notice = {
+      id: "provider:connection:child:iteration-2:error:reconnecting:1", status: "info" as const,
+      phase: "recover" as const, providerState: "reconnecting" as const, retryAttempt: 1, maxRetries: 2,
+      message: "连接中断，正在重连（第 1/2 次）", errorMessage: "stream closed before response.completed",
+    };
+    expect(isProviderRequestProgress(notice)).toBe(false);
+    expect(providerProgressLabel(notice)).toBe("Reconnecting 1/2");
+    expect(isProviderRequestProgress({ ...notice, errorMessage: undefined, phase: "model", status: "running" })).toBe(true);
+  });
+  it("uses the reconnect ladder only while the provider is reconnecting", () => {
+    expect(providerProgressLabel({
+      id: "provider:connection:run:iteration",
+      status: "running",
+      providerState: "reconnecting",
+      retryAttempt: 1,
+      maxRetries: 5,
+      message: "连接失败，正在重连",
+    })).toBe("Reconnecting 1/5");
+
+    expect(providerProgressLabel({
+      id: "provider:connection:run:iteration",
+      status: "running",
+      providerState: "responding",
+      retryAttempt: 1,
+      maxRetries: 5,
+      message: "已连接，模型正在响应",
+    })).toBe("Waiting for model");
+  });
+
+  it("renders typed terminal provider states", () => {
+    expect(providerProgressLabel({
+      id: "provider:connection:run:iteration",
+      status: "completed",
+      providerState: "completed",
+      retryAttempt: 2,
+      maxRetries: 5,
+      message: "提供商响应完成",
+    })).toBe("Response completed (2/5)");
+    expect(providerProgressLabel({
+      id: "provider:connection:run:iteration",
+      status: "partial",
+      providerState: "interrupted",
+      retryAttempt: 2,
+      maxRetries: 5,
+      message: "提供商请求已取消",
+    })).toBe("Connection interrupted (2/5)");
+  });
+
+  it("identifies successful provider completion as internal lifecycle data", () => {
+    expect(isProviderCompletionProgress({
+      id: "provider:connection:run:iteration",
+      status: "completed",
+      providerState: "responding",
+      retryAttempt: 0,
+      maxRetries: 5,
+      message: "Waiting for model",
+    })).toBe(true);
+    expect(isProviderCompletionProgress({
+      id: "provider:connection:run:iteration",
+      status: "failed",
+      providerState: "failed",
+      retryAttempt: 5,
+      maxRetries: 5,
+      message: "连接失败",
+    })).toBe(false);
+    expect(isProviderCompletionProgress({
+      id: "provider:mcp-1",
+      status: "completed",
+      message: "MCP tool completed: lookup",
+    })).toBe(false);
+  });
+
+  it("classifies the complete provider request ladder but not provider-owned tools", () => {
+    for (const providerState of ["connecting", "responding", "reconnecting", "failed", "completed"] as const) {
+      expect(isProviderRequestProgress({
+        id: "provider:connection:run:iteration",
+        status: providerState === "failed" ? "failed" : providerState === "completed" ? "completed" : "running",
+        providerState,
+        retryAttempt: 1,
+        maxRetries: 5,
+        message: providerState,
+      })).toBe(true);
+    }
+    expect(isProviderRequestProgress({
+      id: "provider:mcp-1",
+      status: "completed",
+      message: "MCP tool completed",
+    })).toBe(false);
+    expect(isProviderRequestProgress({
+      id: "provider-request:legacy-1",
+      status: "completed",
+      message: "Provider request completed",
+    })).toBe(true);
+    expect(isProviderRequestProgress({
+      id: "child-turn:progress:1", status: "running", message: "Connecting provider", providerState: "connecting",
+    })).toBe(true);
+    expect(isProviderRequestProgress({
+      id: "journal-item-9", status: "running", phase: "model", label: "provider", message: "Preparing request",
+    })).toBe(true);
+  });
+});

@@ -79,13 +79,25 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         && tab.owner.conversationId === owner.conversationId && tab.owner.environmentId === owner.environmentId
         && workspaceRootsEqual(tab.owner.executionCwd, owner.executionCwd)
         && workspaceRootsEqual(tab.owner.browserRoot, owner.browserRoot) && tab.path === relativePath);
-      const id = current?.id ?? uniqueMessageId("file");
+      // A single click while browsing reuses the scope's open transient tab in
+      // place: the id is kept, so the right stack switches the viewer's file
+      // instead of mounting a new viewer and tree for every file.
+      const transientHost = !current && options?.transient
+        ? get().workspaceFileTabs.find(tab => tab.open && tab.transient && !tab.pinned && tab.pane === "right"
+          && tab.owner.scopeId === owner.scopeId && tab.owner.environmentId === owner.environmentId)
+        : undefined;
+      const id = current?.id ?? transientHost?.id ?? uniqueMessageId("file");
+      const resolvedTitle = title ?? relativePath.split("/").at(-1)!;
       const location = line !== undefined ? { line, column: options?.column, endLine: options?.endLine,
         endColumn: options?.endColumn, locationRequestId: uniqueMessageId("file-location") } : {};
       const previewMode = options?.isPreview === undefined ? {} : { isPreview: current?.isPreview === false || current?.pinned ? false : options.isPreview };
+      const transientMode = options?.transient === undefined ? {} : { transient: current ? current.transient === true && options.transient : options.transient };
       set(state => ({ workspaceFileTabs: saveFiles(current
-        ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, open: true, ...location, ...previewMode } : tab)
-        : [...state.workspaceFileTabs, { id, owner, path: relativePath, title: title ?? relativePath.split("/").at(-1)!, open: true, pinned: false, pane: "right", ...location, ...previewMode }]) }));
+        ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, open: true, ...location, ...previewMode, ...transientMode } : tab)
+        : transientHost
+          ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, owner, path: relativePath, title: resolvedTitle, open: true,
+            line: undefined, column: undefined, endLine: undefined, endColumn: undefined, locationRequestId: undefined, ...location, ...previewMode, transient: true } : tab)
+          : [...state.workspaceFileTabs, { id, owner, path: relativePath, title: resolvedTitle, open: true, pinned: false, pane: "right", ...location, ...previewMode, ...transientMode }]) }));
       get().activateWorkspaceFileTab(id);
       return id;
     },
@@ -112,7 +124,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         ...(state.pendingWorkspaceFileTabId === id ? { pendingWorkspaceFileTabId: null } : {}) }));
       if (wasFocused && next) get().activateWorkspaceFileTab(next.id);
     },
-    pinWorkspaceFileTab: (id, pinned) => set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, pinned, ...(pinned ? { isPreview: false } : {}) } : tab)) })),
+    pinWorkspaceFileTab: (id, pinned) => set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, pinned, ...(pinned ? { isPreview: false, ...(tab.transient ? { transient: false } : {}) } : {}) } : tab)) })),
     moveWorkspaceFileTab: (id, pane) => {
       const tab = get().workspaceFileTabs.find(tab => tab.id === id)!;
       set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(value => value.id === id ? { ...value, pane, open: true } : value)) }));

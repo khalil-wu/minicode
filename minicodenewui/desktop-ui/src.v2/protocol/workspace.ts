@@ -1,0 +1,414 @@
+import { appendWorkspaceOwner, workspaceRequestPath, type WorkspaceRequestOwner } from "./workspace-owner";
+import { ApiError, apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "./api";
+
+export interface WorkspaceFileResponse {
+  session_id?: string; conversation_id?: string; environment_id?: string; path_uri?: string; read_only?: boolean;
+  path: string;
+  content: string;
+  content_hash?: string;
+  size?: number;
+  size_bytes?: number;
+  modified_at?: string;
+  language_hint?: string;
+  mime?: string;
+}
+
+export interface WorkspaceProjectIndexFile extends WorkspaceFileResponse {
+  kind: "source" | "config" | "package" | "declaration";
+  content_hash: string;
+}
+
+export interface WorkspaceProjectIndex {
+  workspace_root: string;
+  files: WorkspaceProjectIndexFile[];
+  dependency_paths?: string[] | null;
+  revision?: number | null;
+  index_instance_id?: string | null;
+  base_revision?: number | null;
+  removed_paths?: string[];
+  complete: boolean;
+  issues: Array<{ path: string; status_code: number; message: string }>;
+}
+
+export interface WorkspaceFilePreviewResponse {
+  session_id?: string; conversation_id?: string; environment_id?: string; path_uri?: string;
+  file_name: string;
+  path: string;
+  media_type: string;
+  kind: string;
+  size_bytes: number;
+  summary: string;
+  parse_error: string;
+  parse_warning?: string;
+  content: string;
+  content_chars: number;
+  truncated: boolean;
+  has_native: boolean;
+}
+
+export type WorkspaceCompareWriteResult =
+  | { ok: true; file: WorkspaceFileResponse }
+  | { ok: false; conflict: true; actualHash?: string; message: string }
+  | { ok: false; conflict: false; message: string };
+
+export interface WorkspaceTreeNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size_bytes?: number | null;
+  modified_at?: string;
+  has_children?: boolean;
+  children?: WorkspaceTreeNode[];
+}
+
+interface WorkspaceTreeEntry {
+  name?: string;
+  path?: string;
+  is_dir?: boolean;
+  isDirectory?: boolean;
+  size_bytes?: number | null;
+  sizeBytes?: number | null;
+  modified_at?: string;
+  modifiedAt?: string;
+  has_children?: boolean;
+  hasChildren?: boolean;
+}
+
+interface WorkspaceTreePayload {
+  name?: string;
+  path?: string;
+  requested_path?: string;
+  requestedPath?: string;
+  workspace_root?: string;
+  workspaceRoot?: string;
+  is_dir?: boolean;
+  children?: WorkspaceTreeNode[];
+  entries?: WorkspaceTreeEntry[];
+}
+
+const ws = (
+  path: string,
+  workspaceRoot: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+  owner?: WorkspaceRequestOwner,
+): string => {
+  const root = workspaceRoot.trim();
+  if (!root) throw new Error("Workspace folder is missing.");
+  const url = new URL(`${apiBase()}/api/workspace${path.startsWith("/") ? path : `/${path}`}`);
+  url.searchParams.set("workspace_root", root);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) url.searchParams.set(key, typeof value === "string" && ["path", "file"].includes(key) ? workspaceRequestPath(value, root) : String(value));
+  }
+  appendWorkspaceOwner(url, owner);
+  return url.toString();
+};
+
+export const readWorkspaceFile = async (path: string, workspaceRoot: string, signal?: AbortSignal, owner?: WorkspaceRequestOwner): Promise<WorkspaceFileResponse> => {
+  const r = await fetchWithTimeout(ws("/file", workspaceRoot, { path: owner?.path_uri ?? path }, owner), { headers: authHeaders(), signal });
+  if (!r.ok) {
+    throw new ApiError(r.status, await errorMessageFromWorkspaceResponse(r));
+  }
+  return (await r.json()) as WorkspaceFileResponse;
+};
+
+export const readWorkspaceProjectIndex = async (workspaceRoot: string, includeDependencies = true, signal?: AbortSignal, previousRevision?: number, previousInstanceId?: string): Promise<WorkspaceProjectIndex> => {
+  const response = await fetchWithTimeout(ws("/project-index", workspaceRoot, { include_dependencies: false, include_dependency_paths: includeDependencies, previous_revision: previousRevision, previous_instance_id: previousInstanceId }), { headers: authHeaders(), signal });
+  if (!response.ok) throw new Error(await errorMessageFromWorkspaceResponse(response));
+  return await response.json() as WorkspaceProjectIndex;
+};
+
+export const fetchWorkspaceFilePreview = async (
+  path: string,
+  workspaceRoot: string,
+  signal?: AbortSignal,
+  owner?: WorkspaceRequestOwner,
+): Promise<WorkspaceFilePreviewResponse> => {
+  const r = await fetchWithTimeout(
+    ws("/preview", workspaceRoot, { path }, owner),
+    { headers: authHeaders(), signal },
+    { timeoutMessage: "文件预览加载超时，请重试。" },
+  );
+  if (!r.ok) {
+    const detail = await errorMessageFromWorkspaceResponse(r);
+    throw new Error(detail || `Workspace preview request failed (${r.status} ${r.statusText || "error"}).`);
+  }
+  return (await r.json()) as WorkspaceFilePreviewResponse;
+};
+
+export const writeWorkspaceFile = async (
+  path: string,
+  content: string,
+  workspaceRoot: string,
+): Promise<void> => {
+  const r = await fetchWithTimeout(ws("/file", workspaceRoot), {
+    method: "PUT",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ path: workspaceRequestPath(path, workspaceRoot), content }),
+  });
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
+};
+
+const conflictPayload = async (response: Response): Promise<WorkspaceCompareWriteResult> => {
+  try {
+    const payload = await response.json();
+    const detail = payload?.detail;
+    if (detail && typeof detail === "object") {
+      if (typeof detail.actual_hash !== "string") {
+        return { ok: false, conflict: false, message: typeof detail.message === "string" ? detail.message : "Workspace request failed." };
+      }
+      return {
+        ok: false,
+        conflict: true,
+        actualHash: typeof detail.actual_hash === "string" ? detail.actual_hash : undefined,
+        message: typeof detail.message === "string" ? detail.message : "File has changed on disk.",
+      };
+    }
+    return {
+      ok: false,
+      conflict: false,
+      message: typeof detail === "string" ? detail : "File has changed on disk.",
+    };
+  } catch {
+    return { ok: false, conflict: true, message: "File has changed on disk." };
+  }
+};
+
+export const compareWriteWorkspaceFile = async (
+  path: string,
+  expectedHash: string,
+  content: string,
+  workspaceRoot: string,
+  owner?: WorkspaceRequestOwner,
+): Promise<WorkspaceCompareWriteResult> => {
+  try {
+    const r = await fetchWithTimeout(ws("/file/compare-write", workspaceRoot, {}, owner), {
+      method: "PUT",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ path: owner?.path_uri ?? workspaceRequestPath(path, workspaceRoot), expected_hash: expectedHash, content }),
+    });
+    if (r.ok) {
+      return { ok: true, file: (await r.json()) as WorkspaceFileResponse };
+    }
+    if (r.status === 409) {
+      return conflictPayload(r);
+    }
+    return { ok: false, conflict: false, message: await errorMessageFromWorkspaceResponse(r) };
+  } catch (error) {
+    return { ok: false, conflict: false, message: error instanceof Error ? error.message : String(error) };
+  }
+};
+
+export const createWorkspaceDirectory = async (path: string, workspaceRoot: string): Promise<void> => {
+  const r = await fetchWithTimeout(ws("/directory", workspaceRoot), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ path: workspaceRequestPath(path, workspaceRoot) }),
+  });
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
+};
+
+export const renameWorkspacePath = async (
+  path: string,
+  newPath: string,
+  workspaceRoot: string,
+): Promise<void> => {
+  const r = await fetchWithTimeout(ws("/rename", workspaceRoot), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ path: workspaceRequestPath(path, workspaceRoot), new_path: workspaceRequestPath(newPath, workspaceRoot) }),
+  });
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
+};
+
+export const deleteWorkspacePath = async (
+  path: string,
+  workspaceRoot: string,
+  recursive = false,
+): Promise<void> => {
+  const r = await fetchWithTimeout(
+    ws("/path", workspaceRoot, { path, recursive }),
+    { method: "DELETE", headers: authHeaders() },
+  );
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
+};
+
+export const listWorkspaceTree = async (
+  workspaceRoot: string,
+  path: string = ".",
+  owner?: WorkspaceRequestOwner,
+): Promise<WorkspaceTreeNode | null> => {
+  try {
+    const r = await fetchWithTimeout(ws("/tree", workspaceRoot, { path }, owner), { headers: authHeaders() });
+    if (!r.ok) {
+      const detail = await errorMessageFromWorkspaceResponse(r);
+      throw new Error(detail || `Workspace tree request failed (${r.status} ${r.statusText || "error"}).`);
+    }
+    const tree = normalizeWorkspaceTree(await r.json(), path);
+    if (!tree) throw new Error("Workspace API returned an invalid tree payload.");
+    return tree;
+  } catch (err) {
+    if (err instanceof Error) {
+      if (err.name === "TypeError") {
+        throw new Error(`Could not load file tree: API request failed. ${err.message}`);
+      }
+      if (/^Could not load file tree:/i.test(err.message)) throw err;
+      throw new Error(`Could not load file tree: ${err.message}`);
+    }
+    throw new Error("Could not load file tree: API request failed.");
+  }
+};
+
+const errorMessageFromWorkspaceResponse = async (response: Response): Promise<string> => {
+  const fallback = `Workspace request failed (${response.status} ${response.statusText || "error"}).`;
+  const text = await response.text().catch(() => "");
+  return errorMessageFromResponseText(text, fallback);
+};
+
+const normalizeWorkspaceTree = (payload: unknown, fallbackPath: string): WorkspaceTreeNode | null => {
+  if (!payload || typeof payload !== "object") return null;
+  const value = payload as WorkspaceTreePayload;
+  const nodePath = value.path ?? value.requested_path ?? value.requestedPath ?? fallbackPath;
+  const nodeName = value.name ?? nodePath.split(/[/\\]/).filter(Boolean).pop() ?? nodePath;
+  if (Array.isArray(value.children)) {
+    return {
+      name: nodeName,
+      path: nodePath,
+      is_dir: value.is_dir ?? true,
+      children: value.children,
+    };
+  }
+  if (Array.isArray(value.entries)) {
+    return {
+      name: nodeName,
+      path: nodePath,
+      is_dir: true,
+      children: value.entries.map((entry) => {
+        const entryPath = entry.path ?? entry.name ?? "";
+        return {
+          name: entry.name ?? entryPath.split(/[/\\]/).filter(Boolean).pop() ?? entryPath,
+          path: entryPath,
+          is_dir: Boolean(entry.is_dir ?? entry.isDirectory),
+          size_bytes: entry.size_bytes ?? entry.sizeBytes,
+          modified_at: entry.modified_at ?? entry.modifiedAt,
+          has_children: Boolean(entry.has_children ?? entry.hasChildren),
+          children: entry.is_dir || entry.isDirectory ? [] : undefined,
+        };
+      }),
+    };
+  }
+  return {
+    name: nodeName,
+    path: nodePath,
+    is_dir: value.is_dir ?? true,
+    children: [],
+  };
+};
+
+export interface WorkspaceSearchResult {
+  path: string;
+  name: string;
+  score: number;
+  kind?: "file" | "folder";
+}
+
+export const searchWorkspaceFiles = async (
+  workspaceRoot: string,
+  query: string,
+  limit: number = 20,
+  kind: "file" | "folder" | "all" = "file",
+  owner?: WorkspaceRequestOwner,
+): Promise<WorkspaceSearchResult[]> => {
+  const r = await fetchWithTimeout(
+    ws("/search", workspaceRoot, { query, limit, kind }, owner),
+    { headers: authHeaders() },
+  );
+  if (!r.ok) {
+    throw new Error(await errorMessageFromWorkspaceResponse(r));
+  }
+  const data = await r.json();
+  return data.results;
+};
+
+export interface WorkspaceGitWorktreeResponse {
+  is_git_repo?: boolean | null;
+  current_path: string;
+  current_branch?: string | null;
+  is_worktree?: boolean;
+  main_repo_path?: string | null;
+  common_git_dir?: string | null;
+  worktree_count?: number;
+  worktrees?: {
+    path: string;
+    branch?: string | null;
+    commit?: string;
+    is_main?: boolean;
+    is_current?: boolean;
+    is_detached?: boolean;
+    is_isolated?: boolean;
+    can_remove?: boolean;
+  }[];
+  error?: string;
+}
+
+const readWorkspaceGitResponse = async <T extends { error?: string | null }>(response: Response): Promise<T> => {
+  if (!response.ok) throw new Error(await errorMessageFromWorkspaceResponse(response));
+  const payload = await response.json() as T;
+  if (payload.error) throw new Error(payload.error);
+  return payload;
+};
+
+export const fetchWorkspaceGitWorktree = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitWorktreeResponse> => {
+  const r = await fetchWithTimeout(ws("/git/worktree", workspaceRoot, { path }), { headers: authHeaders() });
+  return readWorkspaceGitResponse<WorkspaceGitWorktreeResponse>(r);
+};
+
+export interface WorkspaceGitStatusResponse {
+  is_git_repo?: boolean;
+  branch: string;
+  modified: string[];
+  staged: string[];
+  untracked: string[];
+  error?: string;
+}
+
+export const fetchWorkspaceGitStatus = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitStatusResponse> => {
+  const r = await fetchWithTimeout(ws("/git/status", workspaceRoot, { path }), { headers: authHeaders() });
+  return readWorkspaceGitResponse<WorkspaceGitStatusResponse>(r);
+};
+
+export const fetchWorkspaceGitDiff = async (workspaceRoot: string, file = "", path = ""): Promise<{ is_git_repo?: boolean; diff: string; error?: string }> => {
+  const r = await fetchWithTimeout(
+    ws("/git/diff", workspaceRoot, { file, path }),
+    { headers: authHeaders() },
+  );
+  return readWorkspaceGitResponse<{ is_git_repo?: boolean; diff: string; error?: string }>(r);
+};
+
+export const switchWorkspaceGitWorktree = async (
+  workspaceRoot: string,
+  path: string,
+): Promise<{ success: boolean; project?: { root_path?: string; name?: string }; error?: string } | null> => {
+  try {
+    const r = await fetchWithTimeout(ws("/git/worktree/switch", workspaceRoot), {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ path }),
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as { success: boolean; project?: { root_path?: string; name?: string }; error?: string };
+  } catch {
+    return null;
+  }
+};
+
+export const removeWorkspaceGitWorktree = async (
+  workspaceRoot: string,
+  path: string,
+  force = false,
+): Promise<{ removed: boolean; path: string; branch?: string; error?: string } | null> => {
+  const r = await fetchWithTimeout(
+    ws("/git/worktree", workspaceRoot, { path, force }),
+    { method: "DELETE", headers: authHeaders() },
+  );
+  return readWorkspaceGitResponse<{ removed: boolean; path: string; branch?: string; error?: string }>(r);
+};

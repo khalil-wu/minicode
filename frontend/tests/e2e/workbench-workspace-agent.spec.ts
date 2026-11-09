@@ -1,4 +1,22 @@
+import { mockWorkspaceEnvironment } from "./http-fixtures";
 import { expect, Page, test } from "@playwright/test";
+
+// The composer draft on Home owns its model selection and reads it over HTTP;
+// the mock WebSocket alone leaves currentModel empty, so answer those requests here.
+async function mockDraftHttp(page: Page) {
+  await mockWorkspaceEnvironment(page);
+  const model = "gpt-5";
+  const selection = {
+    provider: "custom", current_model: model, model, available_models: [model], models_source: "configured",
+    available_model_options: [{ model, reasoning_effort_levels: ["low", "medium", "high"], default_reasoning_effort: "medium" }],
+    effective_reasoning_effort: "medium", model_selection_mode: "default",
+    default_model_selection: { provider: "custom", model, reasoning_effort: "medium", conversation_id: "", working_directory: "" },
+    available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [],
+    config_version: "e2e-config", config_cwd: "",
+  };
+  await page.route("**/api/llm/draft-selection**", route => route.fulfill({ json: selection }));
+  await page.route("**/api/thread-metadata/sections**", route => route.fulfill({ json: { sections: [] } }));
+}
 
 const workspacePath = "C:\\Desktop\\MiniCode";
 const readmePath = `${workspacePath}\\README.md`;
@@ -6,6 +24,7 @@ const readmePath = `${workspacePath}\\README.md`;
 async function mockDesktopWorkbench(page: Page) {
   await page.addInitScript(({ workspacePath, readmePath }) => {
     localStorage.clear();
+    localStorage.setItem("minicode.conversation.active-id", "conv-workbench");
     const sentMessages: string[] = [];
 
     (window as any).__MINICODE_RUNTIME__ = {
@@ -18,6 +37,25 @@ async function mockDesktopWorkbench(page: Page) {
           minimize: async () => undefined,
           maximize: async () => undefined,
           close: async () => undefined,
+          onStateChanged: () => () => {},
+          getState: async () => ({ maximized: false, focused: true }),
+          onAppearanceChanged: () => () => {},
+          setAppearance: async () => ({ opaque: false }),
+          captureUnloadIntent: () => null,
+          resumeUnload: async () => true,
+        },
+        menu: { setState: async () => {}, popup: async () => {}, execute: async () => true },
+        pets: {
+          onActionRequested: () => () => {}, onStateChanged: () => () => {}, publishActivity: async () => {}, completeAction: async () => {},
+          getState: async () => ({ pets: [], selectedPetId: null, size: 96, petVisible: false, miniOpen: false,
+            petDirectory: "", reducedMotion: false, mutedConversationIds: [], activity: { tasks: [] }, issues: [] }),
+          update: async () => {},
+        },
+        hideNotifications: async () => {},
+        preferences: {
+          get: async () => ({ localeOverride: "zh-CN", systemLocale: "zh-CN" }),
+          set: async (patch: object) => ({ localeOverride: "zh-CN", systemLocale: "zh-CN", ...patch }),
+          onChanged: () => () => {},
         },
         notify: async () => undefined,
         onDeepLink: () => () => undefined,
@@ -152,6 +190,46 @@ async function mockDesktopWorkbench(page: Page) {
       send(data: string) {
         sentMessages.push(data);
         const parsed = JSON.parse(data);
+        if (parsed.type === "user_message") {
+          setTimeout(() => {
+            const conversation_id = parsed.conversation_id || "conv-workbench";
+            const run_id = `turn-${parsed.assistant_message_id}`;
+            this._receive({ type: "agent.run.started", role: "main", status: "running", run_id, turn_id: run_id,
+              conversation_id, message_id: parsed.assistant_message_id, started_at: Date.now() });
+            this._receive({ type: "command.result", command: "user_message", level: "success", message: "",
+              client_command_id: parsed.client_command_id, conversation_id,
+              data: { admitted: true, conversation_id, run_id, user_message_id: parsed.user_message_id,
+                assistant_message_id: parsed.assistant_message_id } });
+          }, 0);
+        }
+        if (parsed.type === "session.sync" || parsed.type === "session.restore") {
+          // The renderer only reports itself connected once the session
+          // handshake is answered; this mirrors the canonical empty-session
+          // snapshot (test/initial-session-sync.ts).
+          const restore = parsed.type === "session.restore";
+          const session = { active_conversation_id: "conv-workbench", active_conversation: { id: "conv-workbench", title: "Fixture chat", workspace_root: "C:/Desktop/MiniCode", transcript: [] }, active_stream_conversation_ids: [], selected_model: "gpt-5", workspace_root: "C:/Desktop/MiniCode" };
+          setTimeout(() => {
+            this._receive({
+              type: restore ? "session.restored" : "session.synced",
+              session_id: "e2e-session",
+              synced: true,
+              client_command_id: parsed.client_command_id,
+              active_conversation_id: session.active_conversation_id,
+              ...(restore ? { conversation: session.active_conversation, messages: [] } : {}),
+              current_model: "gpt-5",
+              model: "gpt-5",
+              current_seq: 0,
+              last_seq: 0,
+              replayed_events: 0,
+              event_log_gap: false,
+              snapshot_required: false,
+              cursor_reset: false,
+              requested_last_seq: 0,
+              session,
+            });
+          }, 0);
+          return;
+        }
         if (parsed.client_command_id) {
           setTimeout(() => {
             this._receive({
@@ -255,7 +333,7 @@ async function mockDesktopWorkbench(page: Page) {
           });
           this._receive({
             type: "item.started",
-            item: { id: "workbench-answer", type: "agent_message" },
+            item: { id: "workbench-answer", type: "agent_message", source: "model_final" },
             ...owner,
           });
           this._receive({
@@ -326,6 +404,8 @@ async function mockDesktopWorkbench(page: Page) {
 }
 
 async function openApp(page: Page) {
+  page.on("console", message => { if (message.type() === "error") console.error(`[workbench renderer] ${message.text()}`); });
+  await mockDraftHttp(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => Boolean((window as any).__mockWs));
   await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().isConnected)).toBe(true);
@@ -347,7 +427,7 @@ test.describe("Workbench workspace and chat continuity", () => {
       const messages = [{ id: "old-user", role: "user", content: "Keep Alpha history", timestamp: 1, blocks: [], artifacts: [] }];
       store.setState({ workingDirectory: "C:/Alpha", messages, conversations: [{ id: "conv-workbench", title: "Alpha", workspaceRoot: "C:/Alpha", updatedAt: "2026-06-15T00:00:00Z" }] });
     });
-    await page.getByRole("button", { name: "添加项目", exact: true }).click();
+    await page.evaluate(() => window.dispatchEvent(new Event("open-import-modal")));
 
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().workingDirectory)).toBe(workspacePath);
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().appMode)).toBe("code");
@@ -358,7 +438,7 @@ test.describe("Workbench workspace and chat continuity", () => {
     })).toEqual({ root: "C:/Alpha", history: "Keep Alpha history", count: 0 });
     await expect(page.getByRole("tree", { name: "文件资源管理器" })).toBeVisible();
 
-    await page.keyboard.press("Control+L");
+    await page.getByRole("button", { name: "首页", exact: true }).click();
     const composer = page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first();
     await composer.fill("Update the README for private beta.");
     await composer.press("Enter");
@@ -370,19 +450,19 @@ test.describe("Workbench workspace and chat continuity", () => {
 
     const payloads = await sentPayloads(page);
     expect(payloads).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "workspace.set", path: workspacePath }),
+      expect.objectContaining({ type: "workspace.set", path: workspacePath, permission_mode: "confirm" }),
     ]));
 
     const userMessage = payloads.find((payload: any) => payload.type === "user_message" && payload.content === "Update the README for private beta.");
     expect(userMessage).toMatchObject({
       conversation_id: "conv-new-project",
       workspace_root: workspacePath,
-      permission_mode: "confirm",
     });
+    expect(userMessage).not.toHaveProperty("permission_mode");
   });
 
   test("keeps an opened project visible after its last conversation disappears", async ({ page }) => {
-    await page.getByRole("button", { name: "聊天首页", exact: true }).click();
+    await page.getByRole("button", { name: "首页", exact: true }).click();
     await page.evaluate((workspacePath) => {
       (window as any).__mockWs._receive({ type: "workspace.recent.list", projects: [{
         path: workspacePath, name: "MiniCode", project_type: "typescript", last_opened: 1,
@@ -404,7 +484,7 @@ test.describe("Workbench workspace and chat continuity", () => {
 
   test("Cowork home keeps the composer readable across desktop and mobile", async ({ page }) => {
     await page.setViewportSize({ width: 2048, height: 1100 });
-    await page.getByRole("button", { name: "聊天首页", exact: true }).click();
+    await page.getByRole("button", { name: "首页", exact: true }).click();
 
     const home = page.locator(".chat-pane-main");
     const composer = page.locator(".composer-container");

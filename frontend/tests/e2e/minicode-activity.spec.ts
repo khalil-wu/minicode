@@ -1,8 +1,27 @@
+import { mockWorkspaceEnvironment } from "./http-fixtures";
 import { expect, Page, test } from "@playwright/test";
+
+// The composer draft on Home owns its model selection and reads it over HTTP;
+// the mock WebSocket alone leaves currentModel empty, so answer those requests here.
+async function mockDraftHttp(page: Page) {
+  await mockWorkspaceEnvironment(page);
+  const model = "gpt-4.1";
+  const selection = {
+    provider: "custom", current_model: model, model, available_models: [model], models_source: "configured",
+    available_model_options: [{ model, reasoning_effort_levels: ["low", "medium", "high"], default_reasoning_effort: "medium" }],
+    effective_reasoning_effort: "medium", model_selection_mode: "default",
+    default_model_selection: { provider: "custom", model, reasoning_effort: "medium", conversation_id: "", working_directory: "" },
+    available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [],
+    config_version: "e2e-config", config_cwd: "",
+  };
+  await page.route("**/api/llm/draft-selection**", route => route.fulfill({ json: selection }));
+  await page.route("**/api/thread-metadata/sections**", route => route.fulfill({ json: { sections: [] } }));
+}
 
 async function mockWebSocket(page: Page) {
   await page.addInitScript(() => {
     const messages: string[] = [];
+    localStorage.setItem("minicode.conversation.active-id", "conv-activity");
 
     class MockWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -54,6 +73,46 @@ async function mockWebSocket(page: Page) {
       send(data: string) {
         messages.push(data);
         const parsed = JSON.parse(data);
+        if (parsed.type === "user_message") {
+          setTimeout(() => {
+            const conversation_id = parsed.conversation_id || "conv-activity";
+            const run_id = `turn-${parsed.assistant_message_id}`;
+            this._receive({ type: "agent.run.started", role: "main", status: "running", run_id, turn_id: run_id,
+              conversation_id, message_id: parsed.assistant_message_id, started_at: Date.now() });
+            this._receive({ type: "command.result", command: "user_message", level: "success", message: "",
+              client_command_id: parsed.client_command_id, conversation_id,
+              data: { admitted: true, conversation_id, run_id, user_message_id: parsed.user_message_id,
+                assistant_message_id: parsed.assistant_message_id } });
+          }, 0);
+        }
+        if (parsed.type === "session.sync" || parsed.type === "session.restore") {
+          // The renderer only reports itself connected once the session
+          // handshake is answered; this mirrors the canonical empty-session
+          // snapshot (test/initial-session-sync.ts).
+          const restore = parsed.type === "session.restore";
+          const session = { active_conversation_id: "conv-activity", active_conversation: { id: "conv-activity", title: "Fixture chat", workspace_root: "C:/Desktop/MiniCode", transcript: [] }, active_stream_conversation_ids: [], selected_model: "gpt-4.1", workspace_root: "C:/Desktop/MiniCode" };
+          setTimeout(() => {
+            this._receive({
+              type: restore ? "session.restored" : "session.synced",
+              session_id: "e2e-session",
+              synced: true,
+              client_command_id: parsed.client_command_id,
+              active_conversation_id: session.active_conversation_id,
+              ...(restore ? { conversation: session.active_conversation, messages: [] } : {}),
+              current_model: "gpt-4.1",
+              model: "gpt-4.1",
+              current_seq: 0,
+              last_seq: 0,
+              replayed_events: 0,
+              event_log_gap: false,
+              snapshot_required: false,
+              cursor_reset: false,
+              requested_last_seq: 0,
+              session,
+            });
+          }, 0);
+          return;
+        }
         if (parsed.client_command_id) {
           setTimeout(() => this._receive({
             type: "client.command.ack",
@@ -93,7 +152,7 @@ async function mockWebSocket(page: Page) {
           });
           this._receive({
             type: "item.started",
-            item: { id: "activity-answer", type: "agent_message" },
+            item: { id: "activity-answer", type: "agent_message", source: "model_final" },
             conversation_id: "conv-activity",
             message_id: parsed.assistant_message_id,
           });
@@ -106,7 +165,7 @@ async function mockWebSocket(page: Page) {
           });
           this._receive({
             type: "item.completed",
-            item: { id: "activity-answer", type: "agent_message", text: "MiniCode 是一个本地 AI 编程工作台。", status: "completed" },
+            item: { id: "activity-answer", type: "agent_message", text: "MiniCode 是一个本地 AI 编程工作台。", status: "completed", source: "model_final" },
             conversation_id: "conv-activity",
             message_id: parsed.assistant_message_id,
           });
@@ -142,6 +201,7 @@ async function mockWebSocket(page: Page) {
 }
 
 async function openApp(page: Page) {
+  await mockDraftHttp(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => Boolean((window as any).__mockWs));
   await expect(page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first()).toBeVisible();

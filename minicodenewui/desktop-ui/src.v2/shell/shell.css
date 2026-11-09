@@ -1,0 +1,1385 @@
+/*
+ * shell.css — Single source of truth for desktop shell LAYOUT.
+ *
+ * Responsibility split (enforced after the 2026-08-07 convergence):
+ *   shell.css      → layout, positioning, spacing, responsive behavior,
+ *                    and shell-only elements (home landing, empty states,
+ *                    workspace tree, resize handles, drawers, keyframes).
+ *   ui-polish.css  → the canonical SURFACE contract: backgrounds, borders,
+ *                    radii, font sizes/weights, shadows, focus rings.
+ *
+ * Anything ui-polish.css already owns (header/sidebar/right-rail/message-list
+ * backgrounds, tab geometry, nav-row geometry, bubble skin, focus rings) is
+ * deliberately NOT restated here — earlier "second pass / final pass / Keep at
+ * EOF" layers fought ui-polish with `!important` and produced 14 copies of the
+ * same selector. There is now exactly one definition per concern.
+ *
+ * Numeric scales route through tokens: font-weight uses --fw-*, radii use
+ * --radius-* / --mc-control-radius, spacing uses the 4px rhythm.
+ */
+
+/* ════════════════════════════════════════════════════════
+   Layout density tokens (shell-owned; visual tokens live in tokens.css)
+   ════════════════════════════════════════════════════════ */
+
+:root {
+  --desktop-rail-width: 52px;
+  --height-toolbar: 46px;
+  --height-toolbar-sm: 44px;
+  --height-toolbar-pane: 40px;
+  --sidebar-navigation-header-height: 52px;
+  --app-shell-header-height: var(--height-toolbar);
+  /* The chat toolbar and the right panel header share one height so their
+     bottom borders land on the same line across the divider. */
+  --chat-toolbar-height: 70px;
+  --shell-page-inset-top: 0px;
+  --shell-page-inset-end: 0px;
+  --shell-page-inset-bottom: 0px;
+  --shell-page-radius: 0px;
+  --thread-outer-width: 768px;
+  --sidebar-min-width: 240px;
+  --sidebar-max-width: 520px;
+  --context-panel-width: 292px;
+  --input-max-width: calc(var(--thread-outer-width) - 32px);
+
+  /* Conversation reading axes. Code mode runs wider than Cowork. */
+  --chat-axis-width: min(var(--input-max-width), calc(100% - 32px));
+  --chat-composer-axis-width: var(--chat-axis-width);
+  --chat-wide-axis-width: min(1320px, calc(100% - 48px));
+  --chat-code-container-width: min(1320px, calc(100% - 48px));
+  --chat-cowork-container-width: min(960px, calc(100% - 48px));
+  --chat-code-composer-width: min(960px, calc(100% - 48px));
+  --chat-unified-container-width: min(960px, calc(100% - 48px));
+
+  /* Conversation rhythm */
+  --space-turn-gap: 12px;
+  --space-cell-internal: 10px;
+}
+
+.mc-desktop-shell[data-app-shell-application-menu-header="true"] {
+  --app-shell-header-height: var(--sidebar-navigation-header-height);
+}
+
+@media (max-width: 1023px) {
+  :root {
+    --chat-axis-width: min(var(--input-max-width), calc(100% - 32px));
+    --chat-composer-axis-width: var(--chat-axis-width);
+  }
+}
+
+@media (max-width: 820px) {
+  :root {
+    --chat-cowork-container-width: calc(100% - 24px);
+    --chat-code-container-width: calc(100% - 24px);
+    --chat-code-composer-width: calc(100% - 24px);
+    --chat-unified-container-width: calc(100% - 24px);
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   Global surfaces (app frame only — text/focus owned by ui-polish)
+   ════════════════════════════════════════════════════════ */
+
+html,
+body,
+#root {
+  background: var(--surface-sunken);
+}
+
+html,
+body {
+  font-family: var(--font-ui);
+}
+
+button {
+  font-family: var(--font-ui);
+}
+
+html[data-theme="light"],
+html[data-theme="light"] body,
+html[data-theme="light"] #root {
+  background: var(--surface-page);
+}
+
+html[data-theme="dark"],
+html[data-theme="dark"] body,
+html[data-theme="dark"] #root {
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+}
+
+html[data-theme="dark"] ::selection {
+  background: color-mix(in oklch, var(--accent-primary) 28%, transparent);
+}
+
+/* ════════════════════════════════════════════════════════
+   Panel content wrapper (pure layout)
+   ════════════════════════════════════════════════════════ */
+
+.panel-content-wrapper {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mc-workbench-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  min-width: 0;
+  height: var(--chat-toolbar-height);
+  min-height: var(--chat-toolbar-height);
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-base);
+}
+
+.mc-workbench-toolbar[data-home="true"] {
+  position: absolute;
+  inset: 0 0 auto auto;
+  z-index: 2;
+  border: 0;
+  background: transparent;
+}
+
+.mc-main-surface[data-home="true"] .workbench-empty-state {
+  transform: translateY(-11px);
+}
+.mc-main-surface[data-home="true"] .workbench-empty-brand {
+  gap: 28px;
+}
+.mc-main-surface[data-home="true"] .chat-pane {
+  --mc-chat-width: 748px;
+  --chat-composer-axis-width: min(748px, calc(100% - 32px));
+}
+#root .mc-main-surface[data-home="true"] .chat-pane .composer-container {
+  margin-bottom: 24px !important;
+}
+
+.mc-workbench-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.mc-workbench-title > svg { flex-shrink: 0; }
+.mc-workbench-task-actions { display: flex; align-items: center; gap: 5px; margin-left: 4px; }
+.mc-desktop-body { display: flex; flex: 1; min-height: 0; min-width: 0; padding: 0; }
+.mc-desktop-workspace { margin: var(--shell-page-inset-top) var(--shell-page-inset-end) var(--shell-page-inset-bottom) 0; border: 0; border-radius: var(--shell-page-radius); background: var(--surface-base); }
+.workbench-stage { border-top-left-radius: 0; }
+.mc-navigation-rail { display: flex; flex-direction: column; align-items: center; width: var(--desktop-rail-width); min-width: var(--desktop-rail-width); padding: 8px 0; gap: 8px; }
+.mc-navigation-rail-main { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 1; }
+.mc-navigation-rail button { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12.5px; color: var(--text-muted); }
+.mc-navigation-rail button:hover { background: var(--workbench-hover); color: var(--text-primary); }
+.mc-navigation-rail button[aria-current="page"] { background: var(--surface-selected); color: var(--text-primary); }
+.mc-navigation-rail-main > button:first-child[aria-current="page"] > svg { fill: currentColor; stroke: currentColor; }
+.mc-navigation-rail button > svg { width: 20px; height: 20px; stroke-width: var(--mc-icon-stroke); }
+.mc-rail-divider { width: 22px; height: 1px; background: var(--border-subtle); margin: 2px 0; }
+.mc-titlebar-menus { display: flex; align-items: center; gap: 2px; padding-inline: 4px 8px; -webkit-app-region: no-drag; }
+.mc-titlebar-menus > button { flex: 0 0 auto; white-space: nowrap; padding: 4px 10px; border: 1px solid transparent; border-radius: 10px; color: var(--text-muted); font-size: var(--text-sm); font-weight: var(--fw-regular); line-height: 1; }
+.mc-titlebar-menus > button:hover, .mc-titlebar-menus > button[aria-expanded="true"] { background: var(--workbench-hover); color: var(--text-primary); }
+.mc-titlebar-navigation { display: grid; place-items: center; width: 28px; padding: 0; color: var(--text-secondary); }
+.header-bar .mc-titlebar-navigation { height: 28px; min-height: 28px; }
+.mc-titlebar-navigation:disabled { opacity: .32; cursor: default; }
+.mc-header-project-accessible, .mc-connected-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.mc-sidebar-heading { display: flex; align-items: center; gap: 4px; height: var(--sidebar-navigation-header-height); min-height: var(--sidebar-navigation-header-height); }
+.mc-sidebar-heading-actions { display: flex; gap: 1px; margin-left: auto; }
+.mc-sidebar-mode-toggle { display: inline-flex; align-items: center; min-height: 32px; gap: 5px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.mc-sidebar-mode-menu { position: fixed; width: min(280px, calc(100vw - 24px)); padding: 6px; z-index: var(--z-popover); --mc-menu-origin: top left; }
+.mc-sidebar-mode-menu > button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 10px; border: 0; background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; }
+.mc-sidebar-mode-menu > button:hover,
+.mc-sidebar-mode-menu > button:focus-visible { background: var(--workbench-hover); }
+.mc-sidebar-mode-menu > button > span { display: grid; gap: 3px; flex: 1; min-width: 0; }
+.mc-sidebar-mode-menu small { color: var(--text-muted); font-size: var(--text-xs); }
+.mc-sidebar-catalog { display: flex; flex-direction: column; gap: 4px; overflow: auto; min-height: 0; }
+.mc-sidebar-catalog nav { display: grid; gap: 2px; padding: 8px 2px 12px; }
+.mc-sidebar-catalog-heading { padding: 16px 8px 8px; color: var(--text-muted); }
+.mc-sidebar-catalog-status { padding: 8px; color: var(--text-muted); }
+.mc-sidebar-catalog-status button { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.mc-sidebar-brand { min-width: 0; flex: 1; font-size: 19px; font-weight: var(--fw-semibold); }
+.mc-sidebar-recents { padding-top: 18px; }
+.mc-sidebar-recents > .mc-sidebar-project-heading { padding: 7px 10px; }
+.mc-sidebar-recent-list { display: grid; gap: 2px; --conversation-row-indent: 10px; }
+.mc-sidebar-more-recents { color: var(--text-muted); padding: 8px 10px; font-size: var(--text-sm); text-align: left; }
+.mc-sidebar-project-add { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; color: var(--text-muted); border-radius: 6px; }
+.mc-sidebar-project-add:hover, .mc-sidebar-project-add:focus-visible { background: var(--workbench-hover); color: var(--text-primary); }
+.mc-sidebar-more-project-sessions { padding-left: 40px; }
+.mc-sidebar-activity-group { display: grid; gap: 4px; padding-top: 16px; --conversation-row-indent: 10px; }
+.mc-sidebar-activity-group > .mc-sidebar-project-heading { padding: 6px 10px; }
+.mc-sidebar-activity-task { min-width: 0; }
+.mc-sidebar-activity-summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin: 0 10px 10px; overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); line-height: 1.6; }
+.mc-sidebar-heading-actions > button[aria-pressed="true"] { background: var(--workbench-active); color: var(--text-primary); }
+
+@media (max-width: 1199px) {
+  .mc-desktop-body { padding: 0; }
+  .mc-desktop-workspace { border: 0; }
+}
+
+@media (min-width: 1200px), (max-width: 640px) {
+  .mc-header-end > .mc-header-icon-button { display: none; }
+}
+
+.mc-sidebar-primary-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mc-sidebar-primary-actions > .mc-sidebar-action {
+  flex: 1;
+}
+
+/* ════════════════════════════════════════════════════════
+   Workbench mode body and main surface (the "floating canvas" corner)
+   ════════════════════════════════════════════════════════ */
+
+.workbench-mode-body {
+  padding-top: 4px;
+  background: var(--surface-sidebar);
+}
+
+.mc-main-surface {
+  overflow: hidden;
+  border-top-left-radius: var(--radius-lg);
+  border-top: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--border-subtle);
+}
+
+@media (max-width: 1023px) {
+  .workbench-mode-body {
+    padding-top: 0;
+  }
+
+  .mc-main-surface {
+    border-top-left-radius: 0;
+    border-top: 0;
+    border-left: 0;
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   Workbench empty state / home landing (shell-only)
+   ════════════════════════════════════════════════════════ */
+
+.workbench-empty-state {
+  width: var(--chat-axis-width);
+  margin: auto;
+  display: grid;
+  gap: 12px;
+  background: transparent;
+}
+
+.workbench-empty-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.workbench-empty-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+
+.workbench-empty-mark {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  opacity: .3;
+}
+
+.workbench-empty-copy-block {
+  min-width: 0;
+}
+
+.workbench-empty-kicker,
+.workbench-status-title {
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.workbench-empty-title {
+  margin: 0;
+  max-width: 720px;
+  color: var(--text-primary);
+  font-size: calc(28px * var(--app-text-scale));
+  font-weight: var(--fw-regular);
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.workbench-empty-copy {
+  margin: 5px 0 0;
+  max-width: 620px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.workbench-empty-meta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  padding: 8px 0 0;
+  color: var(--text-muted);
+}
+
+.workbench-empty-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+/* ════════════════════════════════════════════════════════
+   Workbench status panel (shell-only)
+   ════════════════════════════════════════════════════════ */
+
+.workbench-status-panel {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklch, var(--surface-page) 72%, var(--surface-sunken));
+}
+
+.workbench-status-panel.wide {
+  grid-column: 1 / -1;
+}
+
+.workbench-status-list {
+  display: grid;
+  gap: 6px;
+}
+
+.workbench-status-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  font-size: var(--text-xs);
+}
+
+.workbench-status-label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+}
+
+.workbench-status-value {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-status-value.mono {
+  font-family: var(--font-mono);
+}
+
+/* ════════════════════════════════════════════════════════
+   Workbench home (Cowork landing) — layout only
+   ════════════════════════════════════════════════════════ */
+
+.workbench-home {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+  padding: clamp(20px, 3vh, 32px) clamp(16px, 3vw, 32px) clamp(18px, 2.5vh, 28px);
+}
+
+.workbench-home-layout {
+  width: 100%;
+  height: 100%;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 13px;
+  align-items: start;
+}
+
+.workbench-home-main {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.workbench-home-side {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.workbench-home-section {
+  display: grid;
+  gap: 8px;
+}
+
+.workbench-home-main > .workbench-empty-brand {
+  flex: 1 1 auto;
+  align-self: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 14px;
+  text-align: center;
+  width: min(760px, 100%);
+  padding-top: clamp(48px, 10.5vh, 126px);
+}
+
+.workbench-home-main .workbench-empty-mark {
+  width: 40px;
+  height: 40px;
+  flex-basis: 40px;
+}
+
+.workbench-home-main .workbench-empty-title {
+  font-size: calc(28px * var(--app-text-scale));
+  font-weight: var(--fw-regular);
+}
+
+.workbench-home-composer {
+  flex: 0 0 auto;
+  width: min(960px, 100%);
+  margin: 0 auto;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.workbench-home-composer .composer-textarea {
+  font-family: var(--font-prose);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+}
+
+.workbench-home-meta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.workbench-home-meta-item {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.workbench-home-meta-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+}
+
+.workbench-home-meta-value {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-home-prompts,
+.workbench-home-suggestions {
+  display: grid;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.workbench-home-prompts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+/* Suggestion rows: quiet list rows (final pass flattened the old cards). */
+.workbench-home-suggestion-grid {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 22px;
+  margin-top: 18px;
+}
+
+.workbench-home-suggestion-card {
+  min-width: 0;
+  min-height: 46px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 5px;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.workbench-home-suggestion-card svg {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.workbench-home-suggestion-card span {
+  font-size: var(--text-xs);
+  font-weight: var(--fw-medium);
+}
+
+.workbench-home-suggestion-card:hover {
+  background: color-mix(in oklch, var(--surface-hover) 58%, transparent);
+  color: var(--text-primary);
+}
+
+/* Legacy single-column suggestion list (kept for the simple variant). */
+.workbench-home-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+.workbench-home-suggestion:hover {
+  color: var(--text-primary);
+  background: color-mix(in oklch, var(--accent-primary) 4%, transparent);
+}
+
+.workbench-home-suggestion-icon {
+  display: inline-flex;
+  color: var(--accent-primary);
+}
+
+@media (max-width: 820px) {
+  .workbench-empty-state,
+  .workbench-home-layout,
+  .workbench-home-composer {
+    width: 100%;
+  }
+
+  .workbench-empty-grid,
+  .workbench-home-layout,
+  .workbench-home-prompts {
+    grid-template-columns: 1fr;
+  }
+
+  .workbench-status-panel.wide {
+    grid-column: auto;
+  }
+
+  .workbench-home {
+    padding: 16px 14px 14px;
+  }
+
+  .workbench-home-main {
+    gap: 16px;
+  }
+
+  .workbench-home-main > .workbench-empty-brand {
+    padding-top: 24px;
+  }
+}
+
+@media (max-width: 700px) {
+  .workbench-home-suggestion-grid {
+    grid-template-columns: minmax(0, 1fr);
+    margin-top: 16px;
+  }
+}
+
+@media (max-height: 680px) {
+  .workbench-home {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
+  .workbench-home-main > .workbench-empty-brand {
+    padding-top: 12px;
+  }
+}
+
+html[data-theme="dark"] .workbench-home,
+html[data-theme="dark"] .workbench-empty-state {
+  background: var(--surface-base);
+}
+
+html[data-theme="light"] .workbench-home {
+  background: var(--surface-base);
+}
+
+/* ════════════════════════════════════════════════════════
+   Header brand (layout/ellipsis only; header skin is ui-polish)
+   ════════════════════════════════════════════════════════ */
+
+.mc-header-brand {
+  min-width: 0;
+  max-width: min(360px, 34vw);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mc-header-brand > svg {
+  flex: 0 0 auto;
+  stroke-width: var(--mc-icon-stroke);
+}
+
+.mc-header-brand > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ════════════════════════════════════════════════════════
+   Left sidebar — layout + shell-only footer/workspace rows.
+   Row geometry & skin (height, radius, color, active state) → ui-polish.
+   ════════════════════════════════════════════════════════ */
+
+.mc-sidebar-left {
+  flex: 0 0 auto;
+  padding: 11px 9px 8px;
+  transition:
+    width var(--transition-fast),
+    opacity var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.mc-sidebar-left-inner {
+  display: flex;
+  flex: 1 1 0%;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 8px 8px;
+}
+
+.mc-sidebar-left-resize-handle {
+  position: absolute;
+  z-index: var(--z-content);
+  inset: 0 0 0 auto;
+  width: 16px;
+  transform: translateX(50%);
+  touch-action: none;
+  cursor: col-resize;
+}
+
+.mc-sidebar-left-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  background: transparent;
+  transition: background-color var(--transition-fast);
+}
+
+.mc-sidebar-left-resize-handle:hover::after,
+.mc-sidebar-left-resize-handle:focus-visible::after,
+.layout-dragging .mc-sidebar-left-resize-handle::after { background: var(--border-strong); }
+.mc-sidebar-left-resize-handle:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+
+/* Full workspace view retains the same main transcript and composer tree.
+   The transparent layer exposes only the floating composer to input. */
+.workbench-primary[data-floating="true"] {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-composer);
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.workbench-primary[data-floating="true"] :is(.mc-main-surface, .mc-main-slot-frame, .chat-pane) {
+  background: transparent !important;
+}
+
+.workbench-primary[data-floating="true"] .chat-pane-composer-region {
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  width: min(540px, calc(100% - 24px));
+  visibility: visible;
+  pointer-events: auto;
+  animation: mc-floating-composer-in var(--duration-fast) var(--easing-enter) both;
+}
+
+#root .workbench-primary[data-floating="true"] .chat-pane .composer-container {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin-bottom: 12px !important;
+  box-shadow: var(--shadow-medium) !important;
+}
+.workbench-primary[data-floating="true"] .chat-turn-change-summary { display: none; }
+
+@keyframes mc-floating-composer-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.mc-sidebar-nav {
+  gap: 2px;
+  padding: 8px 2px 12px;
+}
+
+.mc-sidebar-action {
+  letter-spacing: 0;
+}
+
+.mc-sidebar-footer {
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding: 8px 2px 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mc-sidebar-footer .mc-sidebar-action {
+  width: 100%;
+}
+
+.mc-sidebar-footer-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 4px;
+}
+
+.mc-sidebar-profile-button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); font: inherit; text-align: left; cursor: pointer; }
+.mc-sidebar-profile-button:hover { background: var(--workbench-hover); color: var(--text-primary); }
+
+.mc-sidebar-theme-toggle {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--mc-control-radius);
+  color: var(--text-secondary);
+}
+
+.mc-sidebar-theme-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.mc-sidebar-theme-toggle > svg {
+  width: 17px;
+  height: 17px;
+  stroke-width: var(--mc-icon-stroke);
+}
+
+/* Workspace / project tree (shell-only) */
+.mc-sidebar-project-heading {
+  min-height: 28px;
+}
+
+.mc-sidebar-project-label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0;
+}
+
+.mc-workspace-folder-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  color: var(--text-secondary);
+}
+
+.mc-workspace-folder-icon > svg {
+  stroke-width: var(--mc-icon-stroke);
+}
+
+.mc-workspace-group-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--mc-control-radius);
+}
+
+.mc-workspace-group-header[data-active="true"] { background: var(--surface-selected); }
+.mc-workspace-group-header:hover { background: var(--workbench-hover); }
+
+.mc-workspace-group-toggle {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.mc-workspace-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+}
+
+.mc-workspace-new-session,
+.mc-workspace-menu {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--mc-control-radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.mc-workspace-group-header:hover .mc-workspace-actions,
+.mc-workspace-group-header:focus-within .mc-workspace-actions,
+.mc-workspace-actions[data-menu-open="true"] { opacity: 1; }
+
+.mc-workspace-new-session:hover,
+.mc-workspace-new-session:focus-visible,
+.mc-workspace-menu:hover,
+.mc-workspace-menu:focus-visible {
+  border-color: var(--border-subtle);
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  opacity: 1;
+}
+
+.mc-workspace-new-session:focus-visible,
+.mc-workspace-menu:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--accent-primary) 55%, transparent);
+  outline-offset: 1px;
+}
+
+/* ════════════════════════════════════════════════════════
+   Right sidebar launcher (shell-only in-panel tool picker)
+   ════════════════════════════════════════════════════════ */
+
+.side-chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+
+.side-chat-empty h2 { margin: 0; color: var(--text-primary); font-size: var(--text-lg); font-weight: var(--fw-medium); }
+.side-chat-empty p { margin: 0; line-height: 1.6; }
+.mc-workbench-layout-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+}
+.mc-workbench-layout-actions button[aria-pressed="true"] {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+/* ════════════════════════════════════════════════════════
+   Right sidebar — theme custom-properties + shell-only bits.
+   Surfaces/tab skin → ui-polish (which reads --mc-sidebar-header-bg /
+   --mc-sidebar-body-bg). These vars are the theme seam.
+   ════════════════════════════════════════════════════════ */
+
+.mc-sidebar-right {
+  --mc-sidebar-header-bg: var(--surface-page);
+  --mc-sidebar-body-bg: var(--surface-sidebar);
+  --mc-sidebar-tab-height: 34px;
+}
+
+[data-theme="light"] .mc-sidebar-right {
+  --mc-sidebar-header-bg: var(--surface-base);
+  --mc-sidebar-body-bg: var(--surface-sidebar);
+}
+
+html[data-theme="dark"] .mc-sidebar-right {
+  --mc-sidebar-header-bg: var(--surface-page);
+  --mc-sidebar-body-bg: color-mix(in oklch, var(--surface-sidebar) 88%, var(--surface-page));
+}
+
+@media (max-width: 768px) {
+  .mc-sidebar-right[data-embedded="true"] {
+    --mc-sidebar-tab-height: 40px;
+  }
+}
+
+.mc-sidebar-right [role="tabpanel"] > .panel-content-wrapper {
+  height: 100%;
+}
+
+/* 头部一行：标签条占据剩余宽度，操作组（+ / 收起）贴右。
+   ui-polish 拥有本行的高度/内边距/下边框/底色，这里只补它未设的布局——
+   缺了 flex 时 header 退回 block，操作组会掉到标签下一行。 */
+.mc-sidebar-right-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mc-sidebar-right-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.mc-sidebar-right-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 标签内部：frame 是「按钮 + 关闭按钮」的容器，胶囊两侧留白由它负责；
+   ui-polish 只定义 frame 的高度/圆角/底色，不含任何内边距与内部布局，
+   缺了这层图标与文字会直接贴住胶囊边缘。 */
+.mc-sidebar-right-tab-frame {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding-inline: 10px 6px;
+  min-width: 0;
+}
+
+/* 只有一个标签时没有关闭按钮，两侧留白应对称。 */
+.mc-sidebar-right-tab-frame:not(:has(.mc-sidebar-right-tab-close)) {
+  padding-inline: 10px;
+}
+
+.mc-sidebar-right-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+}
+
+.mc-sidebar-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-sidebar-tab-badge {
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+/* In-panel "add" action lives inside the sidebar body, not a detached popover. */
+.mc-sidebar-right-action-add {
+  border-color: transparent;
+  background: transparent;
+}
+
+.mc-sidebar-right-action-add:hover:not(:disabled),
+.mc-sidebar-right-action-add[data-active="true"] {
+  border-color: var(--border-subtle);
+  background: var(--surface-soft);
+}
+
+/* Activity / Output / Browser / Sources section list rhythm (shell-only) */
+.activity-sidebar-section {
+  min-width: 0;
+}
+
+.activity-sidebar-section-header {
+  width: 100%;
+}
+
+.activity-sidebar-section-header:disabled {
+  cursor: default;
+}
+
+.activity-sidebar-section-header:focus-visible,
+.activity-sidebar-section-more:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--accent-primary) 32%, transparent);
+  outline-offset: 2px;
+}
+
+.activity-sidebar-section-more:hover {
+  color: var(--accent-primary);
+}
+
+.mc-sidebar-right section[aria-label="Output"],
+.mc-sidebar-right section[aria-label="Browser"],
+.mc-sidebar-right section[aria-label="Sources"] {
+  gap: 2px;
+}
+
+.mc-sidebar-right section[aria-label="Output"] > div,
+.mc-sidebar-right section[aria-label="Browser"] > div,
+.mc-sidebar-right section[aria-label="Sources"] > div {
+  gap: 0;
+}
+
+.mc-sidebar-right section[aria-label="Output"] button,
+.mc-sidebar-right section[aria-label="Browser"] button,
+.mc-sidebar-right section[aria-label="Sources"] button,
+.mc-sidebar-right section[aria-label="Sources"] a {
+  min-height: 28px;
+  padding: 4px 0;
+}
+
+.mc-sidebar-right section[aria-label="Output"] button:hover,
+.mc-sidebar-right section[aria-label="Browser"] button:hover,
+.mc-sidebar-right section[aria-label="Sources"] button:hover,
+.mc-sidebar-right section[aria-label="Sources"] a:hover {
+  background: color-mix(in oklch, var(--accent-primary) 5%, transparent);
+  color: var(--text-primary);
+}
+
+/* ════════════════════════════════════════════════════════
+   Resize handles (shell-only). The left sidebar is fixed-width;
+   only the right sidebar and main split remain resizable.
+   ════════════════════════════════════════════════════════ */
+
+.mc-sidebar-right-resize-handle {
+  background: transparent;
+  padding: 0;
+  min-height: 0;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+}
+
+/* Keep the separator outside the native browser view; clip only panel content. */
+.mc-sidebar-right-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mc-sidebar-right-inner {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.mc-sidebar-right-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 1px;
+  background: transparent;
+  transition: background var(--transition-fast), width var(--transition-fast);
+}
+
+.mc-sidebar-right-resize-handle:hover::after,
+.layout-dragging .mc-sidebar-right-resize-handle::after {
+  width: 2px;
+  background: var(--border-strong);
+}
+
+.mc-sidebar-right-resize-handle:focus-visible,
+.mc-main-resize-handle:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent-primary));
+  outline-offset: -2px;
+}
+
+body.layout-dragging,
+body.layout-dragging * {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.layout-dragging .mc-sidebar-left,
+body.layout-dragging .mc-sidebar-right {
+  transition: none !important;
+}
+
+.mc-sidebar-return-chat {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-height: 30px;
+  max-width: 220px;
+  padding: 4px 10px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+}
+.mc-sidebar-return-chat:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mc-sidebar-return-chat span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+/* ════════════════════════════════════════════════════════
+   Message list + chat pane (layout/widths only; surface → ui-polish)
+   ════════════════════════════════════════════════════════ */
+
+.message-list-scroll {
+  padding-block: 32px;
+}
+
+.message-list-content {
+  width: min(var(--input-max-width), 100%);
+  max-width: 100%;
+  margin-inline: auto;
+}
+
+.message-list-content[data-layout-mode="cowork"],
+.message-list-content[data-layout-mode="code"] {
+  width: min(var(--input-max-width), 100%);
+  max-width: 100%;
+}
+
+.chat-pane .workbench-empty-state {
+  width: min(var(--input-max-width), calc(100% - 48px));
+  max-width: var(--input-max-width);
+  margin-inline: auto;
+}
+
+.chat-pane-composer-region > .composer-container[data-layout-mode="code"] {
+  width: var(--chat-code-composer-width);
+  max-width: var(--chat-code-composer-width);
+}
+
+/* ════════════════════════════════════════════════════════
+   Agent waiting for input (shell-only surface)
+   ════════════════════════════════════════════════════════ */
+
+[aria-label="Agent is waiting for input"] {
+  width: var(--chat-axis-width);
+  margin: 0 auto 8px;
+}
+
+[aria-label="Agent is waiting for input"] section {
+  border-color: var(--border-subtle);
+  background: var(--surface-base);
+  box-shadow: 0 1px 2px color-mix(in oklch, black 4%, transparent);
+}
+
+[aria-label="Agent is waiting for input"] button {
+  box-shadow: none;
+}
+
+html[data-theme="dark"] [aria-label="Agent is waiting for input"] section {
+  background: var(--surface-page);
+  box-shadow: none;
+}
+
+/* ════════════════════════════════════════════════════════
+   Responsive (layout only)
+   ════════════════════════════════════════════════════════ */
+
+@media (max-width: 1040px) {
+  .mc-sidebar-right:not([data-embedded="true"]) {
+    width: min(var(--right-sidebar-width, 360px), 42vw);
+    min-width: min(292px, 42vw);
+    max-width: 46vw;
+    flex-basis: min(var(--right-sidebar-width, 360px), 42vw);
+  }
+}
+
+@media (max-width: 820px) {
+  .mc-sidebar-left[data-open="true"]:not([data-embedded="true"]) {
+    width: clamp(252px, 36vw, 320px);
+    min-width: clamp(252px, 36vw, 320px);
+    max-width: clamp(252px, 36vw, 320px);
+  }
+}
+
+@media (max-width: 620px) {
+  .mc-sidebar-right:not([data-embedded="true"]) {
+    display: none;
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   Motion (shell-owned keyframes)
+   ════════════════════════════════════════════════════════ */
+
+.mc-sidebar-right-tab-frame,
+.mc-sidebar-right [role="tab"].mc-sidebar-right-tab,
+.mc-sidebar-right-action,
+.mc-workspace-actions,
+.mc-workspace-menu,
+.mc-workspace-new-session,
+.mc-sidebar-action,
+.mc-navigation-rail button {
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.session-status-spinner {
+  animation: mc-session-status-spin 1.1s linear infinite;
+}
+
+.mc-sidebar-tab-icon {
+  transform: none;
+}
+
+.mc-sidebar-panel-view {
+  animation: mc-sidebar-panel-view-in var(--duration-base) var(--easing-enter) both;
+}
+
+.mc-sidebar-panel-view > .panel-content-wrapper {
+  animation: none;
+}
+
+/* Reveal the existing panel through the sidebar clip instead of rewrapping
+   its files, diffs and browser toolbar at every intermediate animation width. */
+.mc-sidebar-right[data-embedded="false"][data-expanded="false"] > .mc-sidebar-right-content > :is(.mc-sidebar-right-header, .mc-sidebar-panel-view) {
+  width: var(--right-sidebar-width);
+}
+
+.mc-workspace-folder-glyph {
+  transform-origin: 50% 60%;
+  animation: mc-workspace-folder-glyph-in var(--duration-fast) var(--easing-enter) both;
+}
+
+.mc-workspace-group-body {
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  animation: mc-workspace-group-expand var(--duration-slow) var(--easing-enter) both;
+}
+
+.mc-workspace-group-body-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mc-narrow-drawer-backdrop {
+  animation: mc-shell-backdrop-in var(--duration-base) var(--easing-standard) both;
+}
+
+.mc-narrow-drawer-surface[data-side="left"] {
+  animation: mc-shell-drawer-left-in var(--duration-slow) var(--easing-enter) both;
+}
+
+.mc-narrow-drawer-surface[data-side="right"] {
+  animation: mc-shell-drawer-right-in var(--duration-slow) var(--easing-enter) both;
+}
+
+@keyframes mc-workspace-folder-glyph-in {
+  from { opacity: 0.45; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes mc-workspace-group-expand {
+  from { grid-template-rows: 0fr; opacity: 0; transform: translateY(-3px); }
+  to { grid-template-rows: 1fr; opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mc-sidebar-panel-view-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mc-shell-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes mc-shell-drawer-left-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes mc-shell-drawer-right-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes mc-session-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-reduced-motion="false"]) .mc-sidebar-left,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right-tab-frame,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right [role="tab"].mc-sidebar-right-tab,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right-action,
+  html:not([data-reduced-motion="false"]) .mc-process-disclosure,
+  html:not([data-reduced-motion="false"]) .mc-workspace-actions,
+  html:not([data-reduced-motion="false"]) .mc-workspace-menu,
+  html:not([data-reduced-motion="false"]) .mc-workspace-new-session,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-action,
+  html:not([data-reduced-motion="false"]) .mc-navigation-rail button {
+    transition: none;
+  }
+
+  html:not([data-reduced-motion="false"]) .mc-workspace-folder-glyph,
+  html:not([data-reduced-motion="false"]) .mc-workspace-group-body,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-panel-view,
+  html:not([data-reduced-motion="false"]) .mc-narrow-drawer-backdrop,
+  html:not([data-reduced-motion="false"]) .mc-narrow-drawer-surface,
+  html:not([data-reduced-motion="false"]) .session-status-spinner {
+    animation: none;
+  }
+}

@@ -1,0 +1,450 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  LONG_COMMAND_RESULT_TIMEOUT_MS,
+  CommandNotSentError,
+  CommandRejectedError,
+  clientCommandIsAwaitingReceipt,
+  notifyClientCommandReceived,
+  rejectClientCommandResult,
+  rejectPendingConnectionResults,
+  registerWebSocketSender,
+  resetPendingCommandResultsForTests,
+  resolveClientCommandResult,
+  sendClientCommand,
+  sendClientCommandAwaitResult,
+  sendConversationDeleteCommand,
+  sendPromptResponseCommand,
+} from "./ws-outbox";
+import { pushToast } from "../overlays/ToastContainer";
+import {
+  embeddedBrowserCloseConversation,
+  desktop,
+  isDesktop,
+  ptyKillConversation,
+} from "../desktop/runtime";
+
+vi.mock("../overlays/ToastContainer", () => ({
+  pushToast: vi.fn(),
+}));
+
+vi.mock("../desktop/runtime", () => ({
+  desktop: vi.fn(),
+  embeddedBrowserCloseConversation: vi.fn(),
+  isDesktop: vi.fn(),
+  ptyKillConversation: vi.fn(),
+}));
+
+describe("ws-outbox", () => {
+  beforeEach(() => {
+    resetPendingCommandResultsForTests();
+    registerWebSocketSender(null);
+    vi.clearAllMocks();
+    vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(embeddedBrowserCloseConversation).mockResolvedValue(0);
+    vi.mocked(ptyKillConversation).mockResolvedValue(0);
+  });
+
+  it.each(["thread/sample", "thread/sample/cancel", "thread/increment_elicitation", "thread/decrement_elicitation"])(
+    "rejects a pending %s result when its connection closes", async type => {
+      registerWebSocketSender(() => true);
+      const command = { type, requestId: 7, threadId: "source", expectedTurnId: "turn", prompt: "sample",
+        client_command_id: "live-thread" } as import("./events").ClientCommand;
+      const pending = sendClientCommandAwaitResult(command, type);
+      const rejected = expect(pending).rejects.toThrow("connection lost");
+      expect(rejectPendingConnectionResults("connection lost")).toEqual(["live-thread"]);
+      await rejected;
+      expect(resolveClientCommandResult({ type: "command.result", command: type, message: "", level: "info",
+        client_command_id: "live-thread" } as import("./events").CommandResultEvent)).toBe(false);
+    },
+  );
+
+  it.each(["success", "error"])("notification resolution waits for the real %s result rather than a transport receipt", async level => {
+    const hideNotifications = vi.fn(async () => 0);
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(desktop).mockReturnValue({ hideNotifications } as never);
+    const commands: import("./events").ClientCommand[] = [];
+    registerWebSocketSender(command => { commands.push(command); return true; });
+    const pending = sendPromptResponseCommand({ type: "control_response", request_id: "actual-request", conversation_id: "original-conversation", turn_id: "original-turn", message_id: "original-message", task_id: "original-task",
+      response: { subtype: "success", response: { action: "approve" } } });
+    await Promise.resolve();
+    expect(hideNotifications).not.toHaveBeenCalled();
+    resolveClientCommandResult({ type: "command.result", command: "control_response", level, message: level === "error" ? "Actual refusal" : "", client_command_id: commands[0].client_command_id });
+    await pending;
+    if (level === "success") expect(hideNotifications).toHaveBeenCalledExactlyOnceWith({ conversationId: "original-conversation", requestId: "actual-request", turnId: "original-turn", messageId: "original-message", taskId: "original-task" });
+    else expect(hideNotifications).not.toHaveBeenCalled();
+  });
+
+  it("an unconfirmed response withdrawn on disconnect leaves its notification and request available for retry", async () => {
+    const hideNotifications = vi.fn(async () => 0);
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(desktop).mockReturnValue({ hideNotifications } as never);
+    registerWebSocketSender(() => true);
+    const pending = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "actual-request", conversation_id: "original-conversation", client_command_id: "actual-pending" });
+    rejectPendingConnectionResults("Actual connection loss");
+    await expect(pending).rejects.toThrow("Actual connection loss");
+    expect(hideNotifications).not.toHaveBeenCalled();
+  });
+
+  it("reports offline commands instead of silently succeeding", () => {
+    const sent = sendClientCommand({ type: "conversation.list" });
+
+    expect(sent).toBe(false);
+    expect(pushToast).toHaveBeenCalledWith(
+      "操作失败：连接已断开。",
+      "error",
+      3000,
+    );
+  });
+
+  it("distinguishes a rejected local send from an unknown outcome after dispatch", async () => {
+    registerWebSocketSender(() => false);
+    await expect(sendClientCommandAwaitResult({ type: "conversation.list" }, "conversation.list", { silent: true }))
+      .rejects.toBeInstanceOf(CommandNotSentError);
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "sent-unconfirmed" }, "conversation.list");
+    rejectClientCommandResult("sent-unconfirmed", "receipt lost");
+    await expect(pending).rejects.not.toBeInstanceOf(CommandNotSentError);
+  });
+
+  it("keeps an explicit server receipt rejection distinguishable from an unknown outcome", async () => {
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "receipt-rejected" }, "conversation.list");
+    expect(rejectClientCommandResult("receipt-rejected", "transport admission rejected", new CommandRejectedError("transport admission rejected"))).toBe(true);
+    await expect(pending).rejects.toBeInstanceOf(CommandRejectedError);
+  });
+
+  it("reports local acceptance before receipt and keeps the two boundaries distinct", async () => {
+    const submitted = vi.fn();
+    const received = vi.fn();
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "local-accepted" }, "conversation.list",
+      { onSubmitted: submitted, onReceived: received });
+    expect(submitted).toHaveBeenCalledOnce();
+    expect(received).not.toHaveBeenCalled();
+    expect(clientCommandIsAwaitingReceipt("local-accepted")).toBe(true);
+    notifyClientCommandReceived("local-accepted");
+    expect(received).toHaveBeenCalledOnce();
+    expect(submitted).toHaveBeenCalledOnce();
+    resolveClientCommandResult({ type: "command.result", command: "conversation.list", client_command_id: "local-accepted", level: "success", message: "" });
+    await pending;
+  });
+
+  it("resolves the original caller with an unsequenced recovered failure", async () => {
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "recovered-command" }, "conversation.list");
+    notifyClientCommandReceived("recovered-command");
+    const event = { type: "command.result", command: "conversation.list", level: "error", message: "Actual failure",
+      client_command_id: "recovered-command", client_command_type: "conversation.list", event_id: "original-result" } as const;
+    expect(resolveClientCommandResult(event)).toBe(true);
+    await expect(pending).resolves.toMatchObject({ level: "error", message: "Actual failure", event_id: "original-result" });
+  });
+
+  it("does not report local acceptance when the sender refuses the captured command", async () => {
+    const submitted = vi.fn();
+    registerWebSocketSender(() => false);
+    await expect(sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "local-refused" }, "conversation.list",
+      { onSubmitted: submitted, silent: true })).rejects.toBeInstanceOf(CommandNotSentError);
+    expect(submitted).not.toHaveBeenCalled();
+  });
+
+  it("releases the result registry if a local acceptance callback throws", async () => {
+    registerWebSocketSender(() => true);
+    await expect(sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "local-callback-error" }, "conversation.list",
+      { onSubmitted: () => { throw new Error("actual acceptance callback error"); }, onReceived: vi.fn() }))
+      .rejects.toThrow("actual acceptance callback error");
+    expect(clientCommandIsAwaitingReceipt("local-callback-error")).toBe(false);
+    expect(resolveClientCommandResult({ type: "command.result", command: "conversation.list", client_command_id: "local-callback-error", level: "success", message: "" })).toBe(false);
+  });
+
+  it("returns false when the registered sender rejects the command", () => {
+    registerWebSocketSender(() => false);
+
+    const sent = sendClientCommand({ type: "conversation.list" });
+
+    expect(sent).toBe(false);
+    expect(pushToast).toHaveBeenCalledOnce();
+  });
+
+  it("reports the transport's recovery refusal to both direct and awaiting callers", async () => {
+    registerWebSocketSender(() => false, () => "会话正在恢复，请恢复完成后重试");
+
+    expect(sendClientCommand({ type: "subagent.cancel", subagent_id: "child-1" })).toBe(false);
+    expect(pushToast).toHaveBeenCalledWith("操作失败：会话正在恢复，请恢复完成后重试。", "error", 3000);
+    await expect(sendClientCommandAwaitResult(
+      { type: "subagent.cancel", subagent_id: "child-1" },
+      "subagent.cancel", { silent: true },
+    )).rejects.toThrow("会话正在恢复，请恢复完成后重试");
+
+    registerWebSocketSender(null);
+    await expect(sendClientCommandAwaitResult(
+      { type: "subagent.cancel", subagent_id: "child-1" },
+      "subagent.cancel", { silent: true },
+    )).rejects.toThrow("连接已断开");
+  });
+
+  it("can send background commands silently while offline", () => {
+    const sent = sendClientCommand({ type: "conversation.list" }, { silent: true });
+
+    expect(sent).toBe(false);
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("correlates authoritative command results by client command id and command name", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    registerWebSocketSender((command) => {
+      commands.push(command as unknown as Record<string, unknown>);
+      return true;
+    });
+
+    const pending = sendClientCommandAwaitResult(
+      { type: "permissions.content_rule.add", rule: "run_command(git status:*)", deny: false },
+      "permissions.content_rule.add",
+    );
+    const clientCommandId = String(commands[0]?.client_command_id || "");
+
+    expect(resolveClientCommandResult({
+      type: "command.result",
+      command: "permissions.content_rule.remove",
+      level: "success",
+      message: "wrong command",
+      data: { client_command_id: clientCommandId },
+    })).toBe(false);
+
+    const result = {
+      type: "command.result" as const,
+      command: "permissions.content_rule.add",
+      level: "success",
+      message: "saved",
+      data: { client_command_id: clientCommandId },
+    };
+    expect(resolveClientCommandResult(result)).toBe(true);
+    await expect(pending).resolves.toEqual(result);
+  });
+
+  it("rejects a pending authoritative result when the backend rejects command ownership", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    registerWebSocketSender((command) => {
+      commands.push(command as unknown as Record<string, unknown>);
+      return true;
+    });
+
+    const pending = sendClientCommandAwaitResult(
+      { type: "permissions.content_rule.add", rule: "edit_file(src/**)", deny: false },
+      "permissions.content_rule.add",
+    );
+    const clientCommandId = String(commands[0]?.client_command_id || "");
+
+    expect(rejectClientCommandResult(clientCommandId, "command.persistence")).toBe(true);
+    await expect(pending).rejects.toThrow("command.persistence");
+  });
+
+  it("waits for a correlated semantic result for control responses", async () => {
+    const sender = vi.fn((_command: import("./events").ClientCommand) => true);
+    registerWebSocketSender(sender);
+
+    const pending = sendPromptResponseCommand({
+      type: "control_response",
+      request_id: "control-1",
+      conversation_id: "conversation-1",
+      response: {
+        subtype: "success",
+        response: { action: "approve" },
+      },
+    });
+    const observed = vi.fn();
+    void pending.then(observed);
+    await Promise.resolve();
+    expect(observed).not.toHaveBeenCalled();
+
+    expect(sender).toHaveBeenCalledWith(expect.objectContaining({
+      type: "control_response",
+      request_id: "control-1",
+      conversation_id: "conversation-1",
+      response: {
+        subtype: "success",
+        response: { action: "approve" },
+      },
+    }));
+    const command = sender.mock.calls[0]?.[0];
+    expect(command.client_command_id).toMatch(/^cmd_/);
+    const result = { type: "command.result" as const, command: "control_response", level: "success", message: "",
+      client_command_id: command.client_command_id };
+    expect(resolveClientCommandResult(result)).toBe(true);
+    await expect(pending).resolves.toEqual(result);
+  });
+
+  it("rejects control result waiters on a negative admission ACK", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    registerWebSocketSender((command) => { commands.push(command as unknown as Record<string, unknown>); return true; });
+    const pending = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "ask-negative" });
+    expect(rejectClientCommandResult(String(commands[0].client_command_id), "command.persistence")).toBe(true);
+    await expect(pending).rejects.toThrow("command.persistence");
+  });
+
+  it("withdraws only unconfirmed control results on disconnect", async () => {
+    registerWebSocketSender(() => true);
+    const response = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "ask-disconnect", client_command_id: "control-disconnect" });
+    const normal = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "normal-pending" }, "conversation.list");
+    expect(rejectPendingConnectionResults("connection lost")).toEqual(["control-disconnect"]);
+    await expect(response).rejects.toThrow("connection lost");
+    const result = { type: "command.result" as const, command: "conversation.list", level: "success", message: "", data: { client_command_id: "normal-pending" } };
+    expect(resolveClientCommandResult(result)).toBe(true);
+    await expect(normal).resolves.toEqual(result);
+  });
+
+  it("rejects control responses immediately when the websocket sender refuses them", async () => {
+    registerWebSocketSender(() => false);
+
+    await expect(sendPromptResponseCommand({
+      type: "control_cancel_request",
+      request_id: "control-2",
+      conversation_id: "conversation-1",
+    })).rejects.toThrow("连接已断开");
+  });
+
+  it("keeps waiting for authoritative command results for legacy prompt responses", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    registerWebSocketSender((command) => {
+      commands.push(command as unknown as Record<string, unknown>);
+      return true;
+    });
+
+    const pending = sendPromptResponseCommand({
+      type: "approval",
+      tool_call_id: "legacy-approval",
+      conversation_id: "conversation-1",
+      action: "approve",
+    });
+    const clientCommandId = String(commands[0]?.client_command_id || "");
+    const observed = vi.fn();
+    void pending.then(observed);
+    await Promise.resolve();
+
+    expect(clientCommandId).not.toBe("");
+    expect(observed).not.toHaveBeenCalled();
+
+    const result = {
+      type: "command.result" as const,
+      command: "approval",
+      level: "success",
+      message: "accepted",
+      data: { client_command_id: clientCommandId },
+    };
+    expect(resolveClientCommandResult(result)).toBe(true);
+    await expect(pending).resolves.toEqual(result);
+  });
+
+  it("requests backend-coordinated cleanup without closing local resources ahead of preflight", async () => {
+    const lifecycle: string[] = [];
+    vi.mocked(isDesktop).mockReturnValue(true);
+    registerWebSocketSender((command) => {
+      lifecycle.push("delete-command");
+      expect(command).toMatchObject({ client_resource_cleanup: true });
+      queueMicrotask(() => resolveClientCommandResult({
+        type: "command.result",
+        command: "conversation.delete",
+        level: "success",
+        message: "",
+        data: { client_command_id: command.client_command_id },
+      }));
+      return true;
+    });
+
+    const deletion = sendConversationDeleteCommand({
+      type: "conversation.delete",
+      conversation_id: "conv_delete_owner",
+    });
+
+    expect(lifecycle).toEqual(["delete-command"]);
+    await expect(deletion).resolves.toBe(true);
+
+    expect(ptyKillConversation).not.toHaveBeenCalled();
+    expect(embeddedBrowserCloseConversation).not.toHaveBeenCalled();
+  });
+
+  it("uses the long-operation deadline for authoritative conversation deletion", async () => {
+    vi.useFakeTimers();
+    try {
+      registerWebSocketSender(() => true);
+      let settled = false;
+      const deletion = sendConversationDeleteCommand({
+        type: "conversation.delete",
+        conversation_id: "conv-long-delete",
+      }).then((value) => {
+        settled = true;
+        return value;
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(LONG_COMMAND_RESULT_TIMEOUT_MS - 60_000);
+      await expect(deletion).resolves.toBe(false);
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.stringContaining("conversation.delete"),
+        "error",
+        6000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports authoritative cleanup rejection as a failed deletion", async () => {
+    vi.mocked(isDesktop).mockReturnValue(true);
+    const sender = vi.fn((command) => {
+      queueMicrotask(() => resolveClientCommandResult({
+        type: "command.result",
+        command: "conversation.delete",
+        level: "error",
+        message: "terminal still running",
+        data: { client_command_id: command.client_command_id },
+      }));
+      return true;
+    });
+    registerWebSocketSender(sender);
+
+    await expect(sendConversationDeleteCommand({
+      type: "conversation.delete",
+      conversation_id: "conv_delete_owner",
+    })).resolves.toBe(false);
+    await Promise.resolve();
+
+    expect(sender).toHaveBeenCalledOnce();
+    expect(pushToast).toHaveBeenCalledWith(
+      "terminal still running",
+      "error",
+      6000,
+    );
+  });
+
+  it("waits for the backend cleanup outcome instead of declaring deletion after 2.5 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(isDesktop).mockReturnValue(true);
+      let commandId = "";
+      registerWebSocketSender((command) => {
+        commandId = String(command.client_command_id);
+        return true;
+      });
+
+      const observed = vi.fn();
+      const deletion = sendConversationDeleteCommand({
+        type: "conversation.delete",
+        conversation_id: "conv_hanging_cleanup",
+      }).then(observed);
+
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(observed).not.toHaveBeenCalled();
+      expect(pushToast).not.toHaveBeenCalled();
+      resolveClientCommandResult({
+        type: "command.result", command: "conversation.delete", level: "error",
+        message: "cleanup timed out; conversation retained", data: { client_command_id: commandId },
+      });
+      await deletion;
+      expect(observed).toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

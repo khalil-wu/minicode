@@ -1,0 +1,124 @@
+import { formatHex, formatHex8 } from "culori";
+import type { editor } from "monaco-editor";
+import type { ResolvedTheme } from "../stores/types";
+import type * as Monaco from "monaco-editor";
+import type { CodeThemeId } from "../lib/code-themes";
+import { createDiffPalette, loadDiffCodeColors, monacoDiffPaletteColors } from "../lib/diff-palette";
+
+export const miniCodeMonacoThemeName = (theme: ResolvedTheme) => `minicode-${theme}`;
+
+export function defineMiniCodeMonacoTheme(monaco: { editor: { defineTheme: (name: string, theme: editor.IStandaloneThemeData) => void } }, theme: ResolvedTheme) {
+  const revision = (themeRequests.get(monaco) ?? 0) + 1;
+  themeRequests.set(monaco, revision);
+  const style = getComputedStyle(document.documentElement);
+  const color = (token: string) => formatHex8(style.getPropertyValue(token).trim())!;
+  const syntax = (token: string) => formatHex(style.getPropertyValue(token).trim())!.slice(1);
+  const data: editor.IStandaloneThemeData = {
+    base: theme === "light" ? "vs" : "vs-dark",
+    inherit: false,
+    rules: [
+      { token: "", foreground: syntax("--editor-foreground") },
+      { token: "identifier", foreground: syntax("--editor-foreground") },
+      { token: "variable", foreground: syntax("--editor-foreground") },
+      { token: "comment", foreground: syntax("--editor-syntax-comment") },
+      { token: "comment.doc", foreground: syntax("--editor-syntax-comment") },
+      { token: "keyword", foreground: syntax("--editor-syntax-keyword") },
+      { token: "keyword.control", foreground: syntax("--editor-syntax-keyword") },
+      { token: "keyword.operator", foreground: syntax("--editor-syntax-punctuation") },
+      { token: "operator", foreground: syntax("--editor-syntax-punctuation") },
+      { token: "string", foreground: syntax("--editor-syntax-string") },
+      { token: "string.escape", foreground: syntax("--editor-syntax-number") },
+      { token: "string.regexp", foreground: syntax("--editor-syntax-string") },
+      { token: "regexp", foreground: syntax("--editor-syntax-string") },
+      { token: "number", foreground: syntax("--editor-syntax-number") },
+      { token: "constant", foreground: syntax("--editor-syntax-number") },
+      { token: "type", foreground: syntax("--editor-syntax-type") },
+      { token: "type.identifier", foreground: syntax("--editor-syntax-type") },
+      { token: "class", foreground: syntax("--editor-syntax-type") },
+      { token: "namespace", foreground: syntax("--editor-syntax-type") },
+      { token: "function", foreground: syntax("--editor-syntax-function") },
+      { token: "function.predefined", foreground: syntax("--editor-syntax-function") },
+      { token: "variable.predefined", foreground: syntax("--editor-syntax-property") },
+      { token: "variable.parameter", foreground: syntax("--editor-foreground") },
+      { token: "tag", foreground: syntax("--editor-syntax-tag") },
+      { token: "attribute.name", foreground: syntax("--editor-syntax-attribute") },
+      { token: "attribute.value", foreground: syntax("--editor-syntax-string") },
+      { token: "attribute.value.number", foreground: syntax("--editor-syntax-number") },
+      { token: "metatag", foreground: syntax("--editor-syntax-comment") },
+      { token: "delimiter", foreground: syntax("--editor-syntax-punctuation") },
+      { token: "delimiter.tag", foreground: syntax("--editor-syntax-punctuation") },
+      { token: "delimiter.bracket", foreground: syntax("--editor-syntax-punctuation") },
+      { token: "invalid", foreground: syntax("--state-danger") },
+    ],
+    colors: {
+      "editor.background": color("--editor-background"),
+      "editor.foreground": color("--editor-foreground"),
+      "editorGhostText.foreground": color("--editor-ghost-foreground"),
+      "editorGutter.background": color("--editor-background"),
+      "editorLineNumber.foreground": color("--editor-line-number"),
+      "editorLineNumber.activeForeground": color("--editor-line-number-active"),
+      "editorCursor.foreground": color("--editor-foreground"),
+      "editor.selectionBackground": color("--editor-selection"),
+      "editor.inactiveSelectionBackground": color("--editor-selection-inactive"),
+      "editor.selectionHighlightBackground": color("--editor-selection-inactive"),
+      "editor.lineHighlightBackground": color("--editor-line-highlight"),
+      "editorIndentGuide.background1": color("--editor-indent-guide"),
+      "editorIndentGuide.activeBackground1": color("--editor-indent-guide-active"),
+      "editorBracketHighlight.foreground1": color("--editor-bracket-1"),
+      "editorBracketHighlight.foreground2": color("--editor-bracket-2"),
+      "editorBracketHighlight.foreground3": color("--editor-bracket-3"),
+      "editorBracketHighlight.foreground4": color("--editor-bracket-1"),
+      "editorBracketHighlight.foreground5": color("--editor-bracket-2"),
+      "editorBracketHighlight.foreground6": color("--editor-bracket-3"),
+      "editorBracketMatch.background": color("--editor-selection-inactive"),
+      "editorBracketMatch.border": color("--editor-indent-guide-active"),
+      "editor.findMatchBackground": color("--editor-find-match"),
+      "editor.findMatchHighlightBackground": color("--editor-find-range"),
+      "editorWidget.background": color("--editor-widget"),
+      "editorWidget.border": color("--editor-border"),
+      "editorHoverWidget.background": color("--editor-widget"),
+      "editorHoverWidget.border": color("--editor-border"),
+      "editorSuggestWidget.background": color("--editor-widget"),
+      "editorSuggestWidget.border": color("--editor-border"),
+      "editorSuggestWidget.foreground": color("--editor-foreground"),
+      "editorSuggestWidget.selectedBackground": color("--editor-widget-selection"),
+      "editorSuggestWidget.selectedForeground": color("--editor-foreground"),
+      "editorSuggestWidget.selectedIconForeground": color("--editor-foreground"),
+      "editorSuggestWidget.highlightForeground": color("--editor-foreground"),
+      "editorSuggestWidget.focusHighlightForeground": color("--editor-foreground"),
+      "editorStickyScroll.background": color("--editor-background"),
+      "editorStickyScrollHover.background": color("--editor-line-highlight"),
+      "editorOverviewRuler.border": color("--editor-border"),
+      "scrollbarSlider.background": color("--border-soft"),
+      "scrollbarSlider.hoverBackground": color("--border-strong"),
+      "scrollbarSlider.activeBackground": color("--border-strong"),
+      "minimap.background": color("--editor-background"),
+      "diffEditor.insertedLineBackground": color("--diff-added-background"),
+      "diffEditor.removedLineBackground": color("--diff-removed-background"),
+      "diffEditor.insertedTextBackground": color("--diff-added-word-background"),
+      "diffEditor.removedTextBackground": color("--diff-removed-word-background"),
+      "diffEditorGutter.insertedLineBackground": color("--diff-added-background"),
+      "diffEditorGutter.removedLineBackground": color("--diff-removed-background"),
+    },
+  };
+  const chrome = { accent: color("--accent-primary"), surface: color("--surface-base"), ink: color("--text-primary") };
+  const semantic = { diffAdded: color("--diff-added-foreground"), diffRemoved: color("--diff-removed-foreground") };
+  Object.assign(data.colors!, monacoDiffPaletteColors(createDiffPalette(theme,
+    { fg: color("--editor-foreground"), bg: color("--editor-background") }, chrome, semantic)));
+  monaco.editor.defineTheme(miniCodeMonacoThemeName(theme), data);
+  const codeThemeId = document.documentElement.dataset.codeTheme as CodeThemeId | undefined;
+  // The default path remains synchronous and does not load the grammar engine.
+  if (codeThemeId || textMateLoaded) {
+    return Promise.all([import("./monacoTextMate"), codeThemeId ? loadDiffCodeColors(codeThemeId, theme) : null]).then(([{ applyMonacoTextMate }, codeColors]) => {
+      if (themeRequests.get(monaco) !== revision) return;
+      if (codeColors) {
+        const palette = createDiffPalette(theme, codeColors, chrome, semantic);
+        Object.assign(data.colors!, monacoDiffPaletteColors(palette));
+      }
+      textMateLoaded = true;
+      return applyMonacoTextMate(monaco as typeof Monaco, theme, codeThemeId ?? null, data);
+    });
+  }
+}
+let textMateLoaded = false;
+const themeRequests = new WeakMap<object, number>();

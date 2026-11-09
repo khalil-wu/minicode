@@ -1,0 +1,853 @@
+/* @vitest-environment jsdom */
+
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AssistantMarkdownCell } from "./AssistantMarkdownCell";
+import type { AssistantMarkdownCellState } from "./cellTypes";
+import { useAppStore } from "../../stores";
+
+const { sendMock, openPathMock, revealPathMock, openArtifactPreviewMock, openWorkspaceFilePreviewMock, transport } = vi.hoisted(() => {
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: () => ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+  return {
+    sendMock: vi.fn(),
+    openPathMock: vi.fn(),
+    revealPathMock: vi.fn(),
+    openArtifactPreviewMock: vi.fn(() => true),
+    openWorkspaceFilePreviewMock: vi.fn(() => true),
+    transport: { sessionId: "session-image-test" },
+  };
+});
+
+vi.mock("../../hooks/useWebSocket", () => ({
+  getWebSocket: () => ({ send: sendMock, sessionId: transport.sessionId }),
+}));
+
+vi.mock("../../protocol/ws-outbox", () => ({
+  sendClientCommand: sendMock,
+  sendClientCommandAwaitResult: async (command: { type: string }) => {
+    sendMock(command);
+    return { type: "command.result", command: command.type, level: "success", message: "", data: {} };
+  },
+  commandResultSucceeded: (result: { level: string }) => result.level === "success",
+}));
+
+vi.mock("../../desktop/runtime", () => ({
+  openPath: openPathMock,
+  revealPath: revealPathMock,
+  isDesktop: () => false,
+  desktop: () => undefined,
+}));
+
+vi.mock("../openAttachmentPreview", () => ({
+  openArtifactPreview: openArtifactPreviewMock,
+  openWorkspaceFilePreview: openWorkspaceFilePreviewMock,
+}));
+
+vi.mock("../../overlays/DialogService", () => ({
+  showConfirm: vi.fn(async () => true),
+}));
+
+const originalOpenEditorFile = useAppStore.getState().openEditorFile;
+const originalSetRightStackTab = useAppStore.getState().setRightStackTab;
+beforeEach(() => { transport.sessionId = "session-image-test"; useAppStore.setState({ appMode: "chat" }); });
+
+afterEach(() => {
+  cleanup();
+  sendMock.mockClear();
+  openPathMock.mockClear();
+  revealPathMock.mockClear();
+  openArtifactPreviewMock.mockClear();
+  openWorkspaceFilePreviewMock.mockClear();
+  useAppStore.setState({
+    openEditorFile: originalOpenEditorFile,
+    setRightStackTab: originalSetRightStackTab,
+    conversationId: null,
+    messages: [],
+    conversationMessages: {},
+    conversationStreaming: {},
+    isStreaming: false,
+    isConnected: false,
+    draft: "",
+    quotedMessage: null,
+  });
+});
+
+const cell = (patch: Partial<AssistantMarkdownCellState>): AssistantMarkdownCellState => ({
+  kind: "assistant_markdown",
+  id: "assistant-final",
+  markdownSource: "",
+  phase: "final",
+  copyable: false,
+  createdAt: 1,
+  ...patch,
+});
+
+describe("AssistantMarkdownCell sources", () => {
+  it("renders streaming markdown immediately from the latest received content", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "北京今天多云。",
+          isStreaming: true,
+        })}
+      />,
+    );
+
+    expect(screen.getByText("北京今天多云。")).toBeTruthy();
+  });
+
+  it("preserves model-authored bare-domain source text without inventing source chips", () => {
+    const { container } = render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "北京今天阴。\n\n数据来源：中央气象台 nmc.cn",
+          citations: [{
+            source: "https://www.nmc.cn/publish/forecast/ABJ/beijing.html",
+            url: "https://www.nmc.cn/publish/forecast/ABJ/beijing.html",
+            label: "中央气象台",
+            range: [0, 0],
+          }],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("北京今天阴。")).toBeTruthy();
+    expect(document.body.textContent).toContain("数据来源：中央气象台 nmc.cn");
+    expect(container.querySelector(".assistant-cell-source-chip")).toBeNull();
+  });
+
+  it("renders citation sources in the footer strip", () => {
+    const { container } = render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "北京天气参考中央气象台 [1]。",
+          citations: [{
+            source: "https://www.nmc.cn/publish/forecast/ABJ/beijing.html",
+            url: "https://www.nmc.cn/publish/forecast/ABJ/beijing.html",
+            label: "中央气象台",
+            range: [0, 0],
+          }],
+        })}
+      />,
+    );
+
+    const link = screen.getByRole("link", { name: "中央气象台" });
+    expect(link.getAttribute("href")).toBe("https://www.nmc.cn/publish/forecast/ABJ/beijing.html");
+    expect(document.body.textContent).not.toContain("[1]");
+    expect(document.querySelector(".assistant-inline-source-chip")).toBeNull();
+    expect(document.querySelector(".assistant-cell-source-chip")).toBeTruthy();
+    expect(container.querySelector('.brand-icon-remote')?.getAttribute('src'))
+      .toBe('https://www.google.com/s2/favicons?domain=www.nmc.cn&sz=32');
+    expect(container.querySelector('.assistant-cell-source-favicon svg')).toBeTruthy();
+  });
+
+  it("renders provider-native sources even when the answer has no numeric markers", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "MiniCode returned a provider-cited answer.",
+          citations: [{
+            source: "https://provider.example/source",
+            url: "https://provider.example/source",
+            label: "Provider source",
+            range: [0, 0],
+            providerNative: true,
+          }],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "Provider source" })).toBeTruthy();
+    expect(document.querySelector(".assistant-cell-source-chip")).toBeTruthy();
+  });
+
+  it("renders provider-native document locations as informative non-link chips", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "MiniCode returned a document-cited answer.",
+          citations: [{
+            source: "anthropic:document:abc123",
+            title: "Architecture notes",
+            label: "Pages 2–3",
+            locationType: "page_location",
+            range: [2, 3],
+            providerNative: true,
+          }],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("note")).toBeTruthy();
+    expect(screen.getByText("Pages 2–3")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(document.body.textContent).not.toContain("anthropic:document:abc123");
+  });
+
+  it("keeps a local document icon when a citation title mentions a model publisher", () => {
+    const { container } = render(<AssistantMarkdownCell cell={cell({ markdownSource: "Document source.", citations: [{
+      source: "anthropic:document:example", title: "OpenAI report.pdf", label: "Pages 2–3", providerNative: true, range: [2, 3],
+    }] })} />);
+    expect(container.querySelector('.assistant-cell-source-file-icon[data-file-kind="pdf"]')).toBeTruthy();
+    expect(container.querySelector('.brand-icon')).toBeNull();
+  });
+
+  it("normalizes split host labels in citation source chips", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "北京天气参考中国天气网 [1]。",
+          citations: [{
+            source: "https://www.weather.com.cn/weather/101010100.shtml",
+            url: "https://www.weather.com.cn/weather/101010100.shtml",
+            label: "weather.com.c n",
+            range: [0, 0],
+          }],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "weather.com.cn" })).toBeTruthy();
+    expect(document.body.textContent).not.toContain("weather.com.c n");
+  });
+
+  it("opens source chips inside the Browser panel", () => {
+    useAppStore.setState({ conversationId: "conv-source-link" });
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "北京天气参考中央气象台 [1]。",
+          citations: [{
+            source: "https://www.nmc.cn/publish/forecast/ABJ/beijing.html",
+            url: "https://www.nmc.cn/publish/forecast/ABJ/beijing.html",
+            label: "中央气象台",
+            range: [0, 0],
+          }],
+        })}
+      />,
+    );
+
+    const link = screen.getByRole("link", { name: "中央气象台" });
+    expect(link.getAttribute("target")).toBeNull();
+    fireEvent.click(link);
+
+    expect(useAppStore.getState().livePreviewUrl).toBeNull();
+    expect(useAppStore.getState().rightStackTab).toBe("browser");
+    expect(sendMock).not.toHaveBeenCalledWith({
+      type: "preview.navigate",
+      url: "https://www.nmc.cn/publish/forecast/ABJ/beijing.html",
+    });
+  });
+
+  it("renders multiple citation sources in the footer strip", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "参考 [1] [2] [3] [4] [5]。",
+          citations: [
+            { source: "https://a.example/source", url: "https://a.example/source", label: "A", range: [0, 0] },
+            { source: "https://b.example/source", url: "https://b.example/source", label: "B", range: [0, 0] },
+            { source: "https://c.example/source", url: "https://c.example/source", label: "C", range: [0, 0] },
+            { source: "https://d.example/source", url: "https://d.example/source", label: "D", range: [0, 0] },
+            { source: "https://e.example/source", url: "https://e.example/source", label: "E", range: [0, 0] },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: /A/ })).toBeTruthy();
+    expect(document.body.textContent).not.toContain("[4]");
+    expect(document.querySelector(".assistant-inline-source-chip")).toBeNull();
+    expect(document.querySelectorAll(".assistant-cell-source-chip")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "再显示 2 个来源" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "再显示 2 个来源" }));
+
+    expect(screen.getByRole("link", { name: /D/ })).toBeTruthy();
+    expect(document.querySelectorAll(".assistant-cell-source-chip")).toHaveLength(5);
+  });
+});
+
+describe("AssistantMarkdownCell image generation", () => {
+  const imageProgress = {
+    type: "progress" as const,
+    id: "provider:image-generation-1",
+    stage: "image_generation" as const,
+    phase: "image_generation" as const,
+    status: "running" as const,
+    message: "正在生成图像",
+    detail: "Images API 请求已提交",
+    timestamp: 1,
+  };
+
+  it("renders a full image mask without a rotating spinner while generation is running", () => {
+    const { container } = render(
+      <AssistantMarkdownCell
+        cell={cell({ imageProgress: [imageProgress] })}
+      />,
+    );
+
+    const mask = screen.getByRole("status");
+    expect(mask.getAttribute("data-running")).toBe("true");
+    expect(screen.getByText("正在生成图像")).toBeTruthy();
+    expect(container.querySelector(".assistant-cell-image-spinner")).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "引用回复" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重新生成" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "从此处分支" })).toBeNull();
+  });
+
+  it("keeps the mask active after provider completion until the image artifact arrives", () => {
+    const { container } = render(
+      <AssistantMarkdownCell
+        cell={cell({
+          imageProgress: [{
+            ...imageProgress,
+            status: "completed",
+            message: "图像生成完成",
+          }],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("status").getAttribute("data-running")).toBe("true");
+    expect(screen.getByText("正在载入生成结果")).toBeTruthy();
+    expect(container.querySelector(".assistant-cell-image-spinner")).toBeNull();
+  });
+
+  it("reports a nonrecoverable image API error without requiring provider settings", () => {
+    render(<AssistantMarkdownCell cell={cell({ imageProgress: [{ ...imageProgress,
+      status: "failed", detail: "The supplied API returned unsupported_model" }], failureRecoverable: false })} />);
+    expect(screen.getByRole("alert").textContent).toContain("The supplied API returned unsupported_model");
+    expect(document.body.textContent).not.toContain("Provider 配置");
+    expect(document.body.textContent).not.toContain("可以重试");
+  });
+
+  it("settles only the selected call while another image is running, including late and repeated updates", () => {
+    const first = { ...imageProgress, id: "first", toolCallId: "call-first", status: "completed" as const };
+    const next = { ...imageProgress, id: "next", toolCallId: "call-next" };
+    const artifacts = [{ artifactId: "selected-first", kind: "image" as const, mediaType: "image/png", summary: "First", toolCallId: "call-first" }];
+    const view = render(<AssistantMarkdownCell cell={cell({ isStreaming: true, imageProgress: [first, next], artifacts })} />);
+    expect(document.querySelectorAll('.assistant-cell-image-placeholder[data-status="running"]')).toHaveLength(1);
+    expect(document.querySelectorAll('.assistant-cell-image-placeholder')).toHaveLength(1);
+    expect(document.querySelector('[data-artifact-id="selected-first"]')).toBeTruthy();
+    expect(document.querySelector('[data-artifact-id="selected-first"]')!.compareDocumentPosition(
+      document.querySelector('.assistant-cell-image-placeholder')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    view.rerender(<AssistantMarkdownCell cell={cell({ isStreaming: true,
+      imageProgress: [first, { ...next, status: "completed" }], artifacts })} />);
+    expect(screen.getByText("正在载入生成结果")).toBeTruthy();
+    artifacts.push({ ...artifacts[0], artifactId: "selected-next", toolCallId: "call-next" });
+    for (const status of ["completed", "running", "completed"] as const) {
+      view.rerender(<AssistantMarkdownCell cell={cell({ imageProgress: [first, { ...next, status }], artifacts: [...artifacts] })} />);
+      expect(document.querySelectorAll(".assistant-cell-image-card")).toHaveLength(2);
+      expect(document.querySelectorAll(".assistant-cell-image-placeholder")).toHaveLength(0);
+    }
+  });
+
+  it.each(["failed", "partial"] as const)("does not duplicate a tool-owned %s image call as an answer-position result", status => {
+    render(<AssistantMarkdownCell cell={cell({ imageProgress: [
+      { ...imageProgress, id: "first", toolCallId: "first" },
+      { ...imageProgress, id: "second", toolCallId: "second", status, detail: "actual second call evidence" },
+    ], artifacts: [{ artifactId: "first-image", kind: "image", mediaType: "image/png", summary: "First", toolCallId: "first" }] })} />);
+    expect(document.querySelectorAll(".assistant-cell-image-card")).toHaveLength(1);
+    expect(document.querySelectorAll(".assistant-cell-image-placeholder")).toHaveLength(0);
+    expect(screen.queryByText("actual second call evidence")).toBeNull();
+    expect(document.querySelector(".assistant-cell-image-error")).toBeNull();
+  });
+
+  it("removes unselected completed tool output only after the real turn completes and accepts late output", () => {
+    const progress = { ...imageProgress, status: "completed" as const, toolCallId: "inspected-call" };
+    const view = render(<AssistantMarkdownCell cell={cell({ isStreaming: false, imageProgress: [progress] })} />);
+    expect(screen.getByText("正在载入生成结果")).toBeTruthy();
+    view.rerender(<AssistantMarkdownCell cell={cell({ copyable: true, terminalStatus: "completed", imageProgress: [progress] })} />);
+    expect(document.querySelector(".assistant-cell-image-placeholder")).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+    view.rerender(<AssistantMarkdownCell cell={cell({ terminalStatus: "completed", imageProgress: [progress],
+      artifacts: [{ artifactId: "late-image", kind: "image", mediaType: "image/png", summary: "Late", toolCallId: "inspected-call" }] })} />);
+    expect(document.querySelectorAll(".assistant-cell-image-card")).toHaveLength(1);
+    expect(document.querySelector(".assistant-cell-image-placeholder")).toBeNull();
+  });
+
+  it("does not let a tool-selected image settle a provider-native image lifecycle", () => {
+    render(<AssistantMarkdownCell cell={cell({ imageProgress: [imageProgress],
+      artifacts: [{ artifactId: "tool-image", kind: "image", mediaType: "image/png", summary: "Tool", toolCallId: "tool-call" }] })} />);
+    expect(document.querySelectorAll(".assistant-cell-image-placeholder")).toHaveLength(1);
+  });
+
+  it.each(["failed", "partial", "interrupted"] as const)("retains inspected image evidence without a loader after a %s turn", terminalStatus => {
+    render(<AssistantMarkdownCell cell={cell({ copyable: true, terminalStatus, imageProgress: [{ ...imageProgress,
+      status: "completed", toolCallId: "inspected-before-failure", detail: "real completed image call" }] })} />);
+    expect(screen.getByText("图像生成完成")).toBeTruthy();
+    expect(screen.getByText("real completed image call")).toBeTruthy();
+    expect(document.querySelector(".assistant-cell-image-placeholder")?.getAttribute("data-running")).toBe("false");
+    expect(screen.queryByText("正在载入生成结果")).toBeNull();
+    expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
+  });
+
+  it("keeps the retried image URL in the lightbox and renews it after reconnect", () => {
+    useAppStore.setState({ conversationId: "image-retry-owner", isConnected: true });
+    render(<AssistantMarkdownCell conversationId="image-retry-owner" cell={cell({ artifacts: [{
+      artifactId: "image-retry", kind: "image", mediaType: "image/png", summary: "Image" }], })} />);
+    fireEvent.error(screen.getByRole("img", { name: "图片" }));
+    fireEvent.click(screen.getByRole("button", { name: /图片载入失败，点击重试/ }));
+    const image = screen.getByRole("img", { name: "图片" });
+    expect(image.getAttribute("src")).toContain("preview_retry=1");
+    fireEvent.load(image); fireEvent.click(screen.getByRole("button", { name: "查看图片大图" }));
+    expect(screen.getByRole("dialog", { name: "图片大图" }).querySelector("img")?.getAttribute("src")).toBe(image.getAttribute("src"));
+    act(() => useAppStore.setState({ isConnected: false }));
+    expect(screen.queryByRole("dialog", { name: "图片大图" })).toBeNull();
+    transport.sessionId = "session-image-restored";
+    act(() => useAppStore.setState({ isConnected: true }));
+    const restored = screen.getByRole("dialog", { name: "图片大图" }).querySelector("img")?.getAttribute("src");
+    expect(restored).toContain("preview_retry=1");
+    expect(restored).toContain("session_id=session-image-restored");
+    expect(restored).not.toContain("session_id=session-image-test");
+    fireEvent.click(screen.getByRole("button", { name: "关闭大图" }));
+  });
+
+  it("renders an embedded artifact once while preserving another unreferenced image", () => {
+    useAppStore.setState({ conversationId: "owner", isConnected: true });
+    const { container } = render(<AssistantMarkdownCell conversationId="owner" cell={cell({
+      markdownSource: "实际截图：\n\n![订单页面](artifact://art_embedded)",
+      artifacts: [
+        { artifactId: "art_embedded", kind: "image", summary: "浏览器截图", mediaType: "image/png" },
+        { artifactId: "art_other", kind: "image", summary: "另一个产物", mediaType: "image/png" },
+      ],
+    })} />);
+    expect(screen.getAllByRole("img")).toHaveLength(2);
+    expect(new URL(screen.getByRole("img", { name: "订单页面" }).getAttribute("src")!).searchParams.get("artifact_id")).toBe("art_embedded");
+    expect(container.querySelector('[data-artifact-id="art_embedded"]')).toBeNull();
+    expect(container.querySelector('[data-artifact-id="art_other"]')).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "模型生成的图片" })).toBeNull();
+  });
+
+  it("deduplicates reference-style images in the rendered completion without reviving generation progress", () => {
+    useAppStore.setState({ conversationId: "owner", isConnected: true });
+    const { container } = render(<AssistantMarkdownCell conversationId="owner" cell={cell({
+      markdownSource: "intro\n\n![截图][capture]\n\n[capture]: artifact://art_ref",
+      markdownBeforeArtifacts: "intro", markdownAfterArtifacts: "![截图][capture]\n\n[capture]: artifact://art_ref",
+      imageProgress: [{ ...imageProgress, status: "completed", message: "图像生成完成" }],
+      artifacts: [{ artifactId: "art_ref", kind: "image", summary: "浏览器截图", mediaType: "image/png" }],
+    })} />);
+    expect(screen.getAllByRole("img")).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "截图" })).toBeTruthy();
+    expect(container.querySelector('.assistant-cell-image-progress')).toBeNull();
+    expect(container.querySelector('.assistant-cell-generated')).toBeNull();
+  });
+
+  it.each([
+    "`![sample](artifact://art_image)`",
+    "```md\n![sample](artifact://art_image)\n```",
+    "[ordinary link](artifact://art_image)",
+    "![incomplete](artifact://art_image",
+    "![unresolved][capture]",
+    "![invalid](artifact://art_image?owner=other)",
+  ])("preserves the automatic artifact when Markdown does not render its image: %s", (markdownSource) => {
+    useAppStore.setState({ conversationId: "owner", isConnected: true });
+    const { container } = render(<AssistantMarkdownCell conversationId="owner" cell={cell({ markdownSource,
+      artifacts: [{ artifactId: "art_image", kind: "image", summary: "浏览器截图", mediaType: "image/png" }],
+    })} />);
+    expect(container.querySelector('[data-artifact-id="art_image"]')).toBeTruthy();
+    expect(screen.getByRole("img", { name: "图片" })).toBeTruthy();
+  });
+
+  it("replaces the mask with the complete live image artifact", () => {
+    const dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          imageProgress: [imageProgress],
+          artifacts: [{
+            artifactId: "artifact-image-1",
+            kind: "image",
+            summary: "Generated PNG image",
+            mediaType: "image/png",
+            bytes: 68,
+            url: dataUrl,
+          }],
+        })}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "图片" });
+    expect(image.getAttribute("src")).toBe(dataUrl);
+    expect(document.body.textContent).not.toContain("Generated PNG image");
+    expect(screen.queryByText("正在生成图像")).toBeNull();
+    expect(screen.getByRole("status", { name: "正在载入图片" })).toBeTruthy();
+    fireEvent.load(image);
+    expect(screen.queryByRole("status", { name: "正在载入图片" })).toBeNull();
+    expect(screen.getByRole("button", { name: "查看大图" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "复制图片" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "保存图片" })).toBeTruthy();
+    expect(openArtifactPreviewMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看图片大图" }));
+    expect(screen.getByRole("dialog", { name: "图片大图" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭大图" }));
+    expect(screen.queryByRole("dialog", { name: "图片大图" })).toBeNull();
+  });
+
+  it("loads a cold-history generated image inline through the owner-scoped HTTP resource", () => {
+    useAppStore.setState({ conversationId: "conv-history-image", isConnected: true });
+    render(
+      <AssistantMarkdownCell
+        conversationId="conv-history-image"
+        cell={cell({
+          artifacts: [{
+            artifactId: "artifact-history-image",
+            kind: "image",
+            summary: "历史生成图片",
+            mediaType: "image/png",
+          }],
+        })}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "图片" });
+    const src = image.getAttribute("src") || "";
+    expect(src).toContain("/api/artifacts/raw");
+    expect(src).toContain("artifact_id=artifact-history-image");
+    expect(src).toContain("session_id=session-image-test");
+    expect(src).toContain("conversation_id=conv-history-image");
+    expect(openArtifactPreviewMock).not.toHaveBeenCalled();
+
+    fireEvent.load(image);
+    expect(screen.getByRole("button", { name: "查看大图" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看图片大图" }));
+    expect(screen.getByRole("dialog", { name: "图片大图" })).toBeTruthy();
+  });
+
+  it("renders the generated image between the provider intro and completion text", () => {
+    const dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const { container } = render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "好的，我来生成这张图片。\n\n图像已经为你生成好了。",
+          markdownBeforeArtifacts: "好的，我来生成这张图片。",
+          markdownAfterArtifacts: "图像已经为你生成好了。",
+          imageProgress: [imageProgress],
+          artifacts: [{
+            artifactId: "artifact-image-order",
+            kind: "image",
+            summary: "生成图片",
+            mediaType: "image/png",
+            url: dataUrl,
+          }],
+        })}
+      />,
+    );
+
+    const intro = screen.getByText("好的，我来生成这张图片。");
+    const image = screen.getByRole("img", { name: "图片" });
+    const completion = screen.getByText("图像已经为你生成好了。");
+    expect(intro.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(image.compareDocumentPosition(completion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector('[data-artifact-id="artifact-image-order"]')).toBeTruthy();
+  });
+});
+
+describe("AssistantMarkdownCell generated files", () => {
+  it("renders a file link per generated output with semantic icons and size", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "See the artifacts.",
+          attachments: [
+            { path: "/tmp/shot.png", size: 2048, isImage: true },
+            { path: "/tmp/build.log", size: 512, isImage: false },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByLabelText("生成文件")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /shot\.png/ }).querySelector('svg.assistant-cell-output-file-icon-svg[data-file-kind="image"]')).toBeTruthy();
+    expect(screen.getByRole("button", { name: /build\.log/ }).querySelector('svg.assistant-cell-output-file-icon-svg[data-file-kind="document"]')).toBeTruthy();
+    expect(screen.getByText("shot.png")).toBeTruthy();
+    expect(screen.getByText("build.log")).toBeTruthy();
+    // Sizes formatted human-readably.
+    expect(document.body.textContent).toContain("2.0 KB");
+    expect(document.body.textContent).toContain("512 B");
+  });
+
+  it("omits the generated-file block when there are none", () => {
+    render(<AssistantMarkdownCell cell={cell({ markdownSource: "No files." })} />);
+
+    expect(screen.queryByLabelText("生成文件")).toBeNull();
+  });
+
+  it("opens image attachments in the unified Preview panel", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "See the image.",
+          attachments: [
+            { path: "C:/tmp/shot.png", size: 2048, isImage: true },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /shot\.png/ }));
+
+    expect(openWorkspaceFilePreviewMock).toHaveBeenCalledWith(expect.objectContaining({
+      path: "C:/tmp/shot.png",
+      name: "shot.png",
+      mediaType: "image/png",
+      kind: "image",
+    }));
+  });
+
+  it("opens non-image deliverables in the unified Preview panel", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "See the file.",
+          attachments: [
+            { path: "C:/tmp/build.log", size: 512, isImage: false },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /build\.log/ }));
+
+    expect(openWorkspaceFilePreviewMock).toHaveBeenCalledWith(expect.objectContaining({
+      path: "C:/tmp/build.log",
+      name: "build.log",
+      kind: "file",
+    }));
+    expect(openPathMock).not.toHaveBeenCalled();
+  });
+
+  it("opens transcript attachments with the transcript owner instead of the active workspace", () => {
+    useAppStore.setState({
+      conversationId: "conv-active",
+      workingDirectory: "C:/workspace/active",
+    });
+    render(
+      <AssistantMarkdownCell
+        conversationId="conv-transcript-owner"
+        workspaceRoot="C:/workspace/transcript-owner"
+        cell={cell({
+          markdownSource: "See the transcript file.",
+          attachments: [
+            { path: "reports/result.md", size: 512, isImage: false },
+          ],
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /result\.md/ }));
+
+    expect(openWorkspaceFilePreviewMock).toHaveBeenCalledWith({
+      path: "reports/result.md",
+      name: "result.md",
+      mediaType: "text/markdown",
+      kind: "file",
+      workspaceRoot: "C:/workspace/transcript-owner",
+      conversationId: "conv-transcript-owner",
+    });
+  });
+
+  it("does not duplicate an attachment already linked in the model answer", () => {
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          markdownSource: "文档已创建：[test.docx](C:/Desktop/test.docx)",
+          attachments: [
+            { path: "C:\\Desktop\\test.docx", size: 1024, isImage: false },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "test.docx" })).toBeTruthy();
+    expect(screen.queryByLabelText("生成文件")).toBeNull();
+  });
+});
+
+describe("AssistantMarkdownCell run cancellation", () => {
+  it("forks from the stable assistant message id with explicit source ownership", () => {
+    useAppStore.setState({
+      conversationId: "conv-fork",
+      workingDirectory: "",
+      messages: [
+        { id: "user-1", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+        { id: "assistant-other", role: "assistant", content: "earlier", artifacts: [], timestamp: 2 },
+        { id: "assistant-target", role: "assistant", content: "target", artifacts: [], timestamp: 3 },
+      ],
+      conversationMessages: {
+        "conv-fork": [
+          { id: "user-1", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+          { id: "assistant-other", role: "assistant", content: "earlier", artifacts: [], timestamp: 2 },
+          { id: "assistant-target", role: "assistant", content: "target", artifacts: [], timestamp: 3 },
+        ],
+      },
+    });
+
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          id: "assistant-fork-cell",
+          messageId: "assistant-target",
+          markdownSource: "target",
+        })}
+        conversationId="conv-fork"
+        workspaceRoot=""
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "从此处分支" }));
+
+    expect(sendMock).toHaveBeenCalledWith({
+      type: "context.fork",
+      conversation_id: "conv-fork",
+      message_id: "assistant-target",
+      create_branch: true,
+      activate: true,
+    });
+  });
+
+  it("stores quoted replies as composer context without inserting text into the draft", () => {
+    useAppStore.setState({ conversationId: "conv-quote", workingDirectory: "", draft: "follow-up", quotedMessage: null });
+
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          id: "assistant-quote-cell",
+          messageId: "assistant-quote",
+          markdownSource: "这里是需要引用的回复。",
+        })}
+        conversationId="conv-quote"
+        workspaceRoot=""
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "引用回复" }));
+
+    expect(useAppStore.getState().draft).toBe("follow-up");
+    expect(useAppStore.getState().quotedMessage).toMatchObject({
+      id: "assistant-quote",
+      role: "assistant",
+      content: "这里是需要引用的回复。",
+    });
+  });
+
+  it("does not offer recall on an assistant reply", () => {
+    useAppStore.setState({
+      conversationId: "conv-assistant-recall",
+      messages: [
+        { id: "user-1", role: "user", content: "old prompt", artifacts: [], timestamp: 1 },
+        { id: "assistant-1", role: "assistant", content: "reply", artifacts: [], timestamp: 2, isStreaming: true },
+      ],
+      conversationMessages: {
+        "conv-assistant-recall": [
+          { id: "user-1", role: "user", content: "old prompt", artifacts: [], timestamp: 1 },
+          { id: "assistant-1", role: "assistant", content: "reply", artifacts: [], timestamp: 2, isStreaming: true },
+        ],
+      },
+      conversationStreaming: { "conv-assistant-recall": true },
+      isStreaming: true,
+    });
+
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          id: "assistant-cell-1",
+          messageId: "assistant-1",
+          markdownSource: "reply",
+        })}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "召回到输入框" })).toBeNull();
+  });
+
+  it("sends one atomic retry command while the conversation is streaming", async () => {
+    sendMock.mockReturnValue(true);
+    useAppStore.setState({
+      conversationId: "conv-assistant-regenerate",
+      workingDirectory: "",
+      messages: [
+        { id: "user-2", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+        { id: "assistant-2", role: "assistant", content: "reply", artifacts: [], timestamp: 2, isStreaming: true },
+      ],
+      conversationMessages: {
+        "conv-assistant-regenerate": [
+          { id: "user-2", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+          { id: "assistant-2", role: "assistant", content: "reply", artifacts: [], timestamp: 2, isStreaming: true },
+        ],
+      },
+      conversationStreaming: { "conv-assistant-regenerate": true },
+      isStreaming: true,
+    });
+
+    render(
+      <AssistantMarkdownCell
+        cell={cell({
+          id: "assistant-cell-2",
+          messageId: "assistant-2",
+          markdownSource: "reply",
+        })}
+        conversationId="conv-assistant-regenerate"
+        workspaceRoot=""
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
+
+    await waitFor(() => expect(sendMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: "user_message",
+      content: "prompt",
+      conversation_id: "conv-assistant-regenerate",
+      retry_from_message_id: "user-2",
+    })));
+    expect(sendMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "interrupt" }));
+  });
+});
+
+describe("AssistantMarkdownCell fork workspace owner", () => {
+  it("sends the conversation's own execution root, not the browsing directory", () => {
+    useAppStore.setState({
+      conversationId: "conv-fork",
+      workingDirectory: "C:/proj",
+      conversations: [{ id: "conv-fork", title: "fork", updatedAt: "", workspaceRoot: "C:/proj" }],
+      messages: [
+        { id: "user-1", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+        { id: "assistant-target", role: "assistant", content: "target", artifacts: [], timestamp: 2 },
+      ],
+      conversationMessages: {
+        "conv-fork": [
+          { id: "user-1", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
+          { id: "assistant-target", role: "assistant", content: "target", artifacts: [], timestamp: 2 },
+        ],
+      },
+    });
+    sendMock.mockClear();
+
+    render(
+      <AssistantMarkdownCell
+        cell={cell({ id: "assistant-fork-cell", messageId: "assistant-target", markdownSource: "target" })}
+        conversationId="conv-fork"
+        workspaceRoot="C:/proj"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "从此处分支" }));
+
+    expect(sendMock).toHaveBeenCalledWith(expect.objectContaining({ type: "context.fork", conversation_id: "conv-fork", workspace_root: "C:/proj" }));
+  });
+});

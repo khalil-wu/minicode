@@ -1,0 +1,154 @@
+import { useAppStore } from "../stores";
+import type {
+  ConversationCompactionUpdatedEvent,
+  ConversationSummaryUpdatedEvent,
+  ServerEvent,
+  SystemNoticeEvent,
+} from "../protocol/events";
+import { isReplayedEvent } from "../protocol/events";
+import { pushToast } from "../overlays/ToastContainer";
+import { isControlPlaneNotice } from "./controlPlaneNotices";
+import { addInspectorPayload } from "./inspectorEntries";
+import { stableTextHash } from "../lib/identity";
+import { incomingConversationMetaIsStale, normalizedConversationRevision } from "./activeConversation";
+import { applyThreadReadState } from "./threadReadState";
+
+const noticeText = (event: SystemNoticeEvent): string => {
+  const title = String(event.title || "").trim();
+  const body = String(event.content || event.message || "").trim();
+  if (title && body && title !== body) return `${title} — ${body}`;
+  return body || title;
+};
+
+const conversationIdFor = (e: ServerEvent, fallback?: string): string | undefined => {
+  const cid = (e as unknown as { conversation_id?: unknown }).conversation_id;
+  return typeof cid === "string" && cid ? cid : fallback;
+};
+
+const eventTimestampMs = (event: ServerEvent): number => {
+  const parsed = Date.parse(String(event.timestamp || ""));
+  return Number.isFinite(parsed) ? parsed : Date.now();
+};
+
+const systemNoticeId = (
+  event: ServerEvent,
+  conversationId: string,
+  content: string,
+): string => {
+  if (event.event_id) return `system-notice-${event.event_id}`;
+  if (Number.isSafeInteger(event.seq)) return `system-notice-seq-${event.seq}`;
+  if (event.timestamp) return `system-notice-time-${stableTextHash(`${event.timestamp}:${content}`)}`;
+  if (isReplayedEvent(event)) {
+    return `system-notice-replay-${stableTextHash(`${conversationId}:${content}`)}`;
+  }
+  return `system-notice-${Date.now().toString(36)}-${stableTextHash(content)}`;
+};
+
+export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): boolean => {
+  const s = useAppStore.getState();
+  switch (e.type) {
+    case "system_notice": {
+      const ev = e as SystemNoticeEvent;
+      const owner = conversationIdFor(e, conversationId);
+      const content = noticeText(ev);
+      if (content) {
+        if (isControlPlaneNotice(content)) {
+          if (
+            owner
+            && owner === useAppStore.getState().conversationId
+            && !isReplayedEvent(e)
+          ) {
+            pushToast(content, "info", 3000);
+          }
+          return true;
+        }
+        if (!owner) return true;
+        const messageId = systemNoticeId(e, owner, content);
+        s.upsertSystemMessage(
+          messageId,
+          content,
+          { conversationId: owner },
+        );
+        if (
+          owner === useAppStore.getState().conversationId
+          && (ev.data || ev.checkpoint_origin)
+        ) {
+          addInspectorPayload("message", messageId, {
+            event: ev.type,
+            conversation_id: owner,
+            title: ev.title,
+            message: ev.message,
+            data: ev.data,
+            checkpoint_origin: ev.checkpoint_origin,
+            replayed: isReplayedEvent(e),
+          });
+        }
+      }
+      return true;
+    }
+    case "conversation.compaction.updated": {
+      const ev = e as ConversationCompactionUpdatedEvent;
+      const targetId = ev.conversation_id;
+      if (!ev.compaction_item_id) {
+      s.upsertSystemMessage("system-compact-status", ev.state === "failed" ? ev.summary : "", {
+        conversationId: targetId,
+        title: ev.state === "compacting" ? "正在压缩上下文" : ev.state === "failed" ? "压缩失败" : "上下文已压缩",
+        processing: ev.state === "compacting",
+        failureMessage: ev.state === "failed" ? ev.summary : undefined,
+      });
+      }
+      useAppStore.setState((state) => ({
+        conversations: state.conversations.map((conversation) =>
+          conversation.id === targetId
+            ? {
+                ...conversation,
+                compactionState: ev.state,
+                compactionSummary: ev.summary,
+              }
+            : conversation,
+        ),
+      }));
+      if (ev.state !== "compacted" || targetId !== useAppStore.getState().conversationId) return true;
+      const currentUsage = useAppStore.getState().contextUsage;
+      s.setContextUsage({
+        used: currentUsage?.used ?? 0,
+        limit: currentUsage?.limit ?? 0,
+        compactedAt: eventTimestampMs(e),
+        compactSummary: ev.summary,
+      });
+      return true;
+    }
+    case "thread/readState/changed": {
+      applyThreadReadState(e.threadId, e.readState, undefined, e.revision);
+      return true;
+    }
+    case "conversation.summary.updated": {
+      const ev = e as ConversationSummaryUpdatedEvent;
+      const incomingRevision = normalizedConversationRevision(ev.revision);
+      useAppStore.setState((state) => ({
+        conversations: state.conversations.map((conversation) =>
+          conversation.id === ev.conversation_id && !incomingConversationMetaIsStale({
+            revision: incomingRevision, updatedAt: ev.updated_at,
+          }, conversation)
+            ? {
+                ...conversation,
+                summary: ev.summary,
+                title: ev.title,
+                updatedAt: ev.updated_at,
+                ...(ev.has_unread_turn !== undefined ? { hasUnreadTurn: ev.has_unread_turn } : {}),
+                ...(ev.read_state !== undefined ? { readState: ev.read_state } : {}),
+                ...(ev.thread_source !== undefined ? { threadSource: ev.thread_source } : {}),
+                ...(incomingRevision !== undefined ? { revision: incomingRevision } : {}),
+                memoryMode: ev.memory_mode,
+                memoryPolluted: ev.memory_polluted,
+                memoryPollutionSources: [...ev.memory_pollution_sources],
+              }
+            : conversation,
+        ),
+      }));
+      return true;
+    }
+    default:
+      return false;
+  }
+};

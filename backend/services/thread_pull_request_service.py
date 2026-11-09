@@ -56,7 +56,10 @@ async def _local_status(program, arguments, cwd):
 
 async def linked_pull_request_status(session, conversation_id, resource_id):
     repository = session.conversation_repo
-    conversation = await to_thread_cancel_safe(repository.get_conversation_summary, conversation_id)
+    try:
+        conversation = await to_thread_cancel_safe(repository.get_conversation_summary, conversation_id)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
     if conversation is None:
         raise HTTPException(404, "Conversation not found")
     reference = next((item for item in conversation.resource_references

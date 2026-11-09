@@ -1,0 +1,91 @@
+/* @vitest-environment jsdom */
+import { afterEach, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { ProviderTab } from "./ProviderTab";
+import { fetchWithTimeout } from "../protocol/api";
+import type { LLMSettingsPayload } from "./settingsShared";
+
+vi.mock("../protocol/api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../protocol/api")>(),
+  fetchWithTimeout: vi.fn(),
+}));
+vi.mock("./ToastContainer", () => ({ pushToast: vi.fn() }));
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+it("shows and edits the actual configured provider when it has no saved history entry", () => {
+  const payload: LLMSettingsPayload = { provider: "custom", active_model: "local-model", provider_history: [], custom: {
+    display_name: "Local gateway", base_url: "http://127.0.0.1:9123/v1", model: "local-model",
+    available_models: ["local-model"], wire_api: "chat", has_api_key: false, auth_header: false,
+  }};
+  render(<ProviderTab selectedProvider="custom" settingsPayload={payload} settingsPayloadRef={{ current: payload }} onProviderChange={vi.fn()} />);
+
+  expect(screen.queryByText("尚未配置提供商")).toBeNull();
+  expect((screen.getByRole("button", { name: "Local gateway 已启用" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "编辑 Local gateway" }));
+  expect(screen.getByDisplayValue("http://127.0.0.1:9123/v1")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "默认模型，当前：local-model" })).toBeTruthy();
+});
+
+it("keeps one provider card for a configured endpoint already present in saved history", () => {
+  const section = { display_name: "Configured gateway", base_url: "https://fixture.invalid/v1", model: "alpha", wire_api: "responses" as const };
+  const payload: LLMSettingsPayload = { provider: "openai", active_model: "alpha", openai: section,
+    provider_history: [{ ...section, display_name: "Saved gateway", provider: "openai", provider_id: "openai" }] };
+  render(<ProviderTab selectedProvider="openai" settingsPayload={payload} settingsPayloadRef={{ current: payload }} onProviderChange={vi.fn()} />);
+
+  expect(screen.getAllByRole("button", { name: /^编辑 / })).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "编辑 Saved gateway" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "编辑 Configured gateway" })).toBeNull();
+});
+
+it("edits each model independently and submits native tools and prompt settings in the saved profile", async () => {
+  const payload: LLMSettingsPayload = { provider: "openai", openai: {
+    base_url: "https://fixture.invalid/v1", api_key: "fixture", model: "alpha", wire_api: "responses",
+    available_models: ["alpha", "beta"], model_metadata: {
+      alpha: { context_window: 128000, model_instructions: "Alpha guidance" },
+      beta: { model_instructions: "Beta guidance" },
+    },
+  }};
+  payload.provider_history = [{ ...payload.openai, provider: "openai", provider_id: "openai" }];
+  const saved = vi.fn();
+  vi.mocked(fetchWithTimeout).mockImplementation(async (_url, options) => {
+    const request = JSON.parse(String(options?.body));
+    saved(request);
+    return new Response(JSON.stringify({ provider: "openai", openai: request.openai }), { status: 200 });
+  });
+  render(<ProviderTab selectedProvider="openai" settingsPayload={payload} settingsPayloadRef={{ current: payload }} onProviderChange={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: /^编辑 / }));
+  fireEvent.click(screen.getByText("高级设置"));
+  const instructions = screen.getByLabelText("模型附加指令") as HTMLTextAreaElement;
+  expect(instructions.value).toBe("Alpha guidance");
+  fireEvent.change(instructions, { target: { value: "Edited alpha guidance" } });
+  fireEvent.click(screen.getByLabelText(/原生补丁输入/));
+  fireEvent.click(screen.getByLabelText(/WebSocket 增量传输/));
+  fireEvent.click(screen.getByRole("button", { name: "上下文压缩方式，当前：自动选择" }));
+  fireEvent.click(screen.getByRole("option", { name: "提供商原生压缩" }));
+  fireEvent.click(screen.getByRole("button", { name: "工具调用模式，当前：跟随 MiniCode 默认" }));
+  fireEvent.click(screen.getByRole("option", { name: "直接工具" }));
+  fireEvent.click(screen.getByRole("button", { name: "提供商联网搜索，当前：自动识别官方接口" }));
+  fireEvent.click(screen.getByRole("option", { name: "该接口支持联网搜索" }));
+  fireEvent.click(screen.getByRole("button", { name: "默认模型，当前：alpha" }));
+  fireEvent.click(screen.getByRole("option", { name: "beta" }));
+  expect(instructions.value).toBe("Beta guidance");
+  expect(screen.getByRole("button", { name: "提供商联网搜索，当前：自动识别官方接口" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "提供商联网搜索，当前：自动识别官方接口" }));
+  fireEvent.click(screen.getByRole("option", { name: "禁用", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "工具调用模式，当前：跟随 MiniCode 默认" }));
+  fireEvent.click(screen.getByRole("option", { name: "仅代码编排" }));
+  expect(screen.getByRole("button", { name: "上下文压缩方式，当前：自动选择" })).toBeTruthy();
+  expect((screen.getByLabelText(/原生补丁输入/) as HTMLInputElement).checked).toBe(false);
+  expect((screen.getByLabelText(/WebSocket 增量传输/) as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "默认模型，当前：beta" }));
+  fireEvent.click(screen.getByRole("option", { name: "alpha" }));
+  expect(instructions.value).toBe("Edited alpha guidance");
+  expect(screen.getByRole("button", { name: "提供商联网搜索，当前：该接口支持联网搜索" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "工具调用模式，当前：直接工具" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "保存", exact: true }));
+  await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+  expect(saved.mock.calls[0][0].openai.model_metadata).toEqual({
+    alpha: { context_window: 128000, model_instructions: "Edited alpha guidance", supports_custom_tools: true, responses_websocket: true, native_compaction: true, tool_mode: "direct", supports_hosted_web_search: true },
+    beta: { model_instructions: "Beta guidance", tool_mode: "code_mode_only", supports_hosted_web_search: false },
+  });
+});

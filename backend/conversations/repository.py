@@ -360,6 +360,20 @@ class ConversationRepository:
             return copy.deepcopy(record) if record is not None else None
 
     def get_conversation_summary(self, conversation_id: str) -> ConversationSummary | None:
+        # Lock-free cache hit: writers publish the index entry before its stamp,
+        # so a matching stamp read before the entry proves the entry is current.
+        # The cross-process lock costs ~4ms on Windows and runtime snapshots
+        # read the active summary many times per navigation.
+        if self._summary_index is not None:
+            cached_stamp = self._summary_index_stamps.get(conversation_id)
+            cached = self._summary_index.get(conversation_id)
+            if cached is not None and cached_stamp is not None:
+                try:
+                    current = cached_stamp == self._summary_disk_stamp(conversation_id)
+                except Exception:
+                    current = False
+                if current:
+                    return copy.deepcopy(cached)
         with self._store_lock(conversation_id):
             stamp = self._summary_disk_stamp(conversation_id)
             cached = (self._summary_index or {}).get(conversation_id)
