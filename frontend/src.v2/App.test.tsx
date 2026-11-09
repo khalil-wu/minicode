@@ -3,13 +3,16 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useEffect, useState } from "react";
 
-const lifecycle = vi.hoisted(() => ({ close: vi.fn(), failSettings: false, pendingSettings: null as Promise<void> | null }));
+const lifecycle = vi.hoisted(() => ({ close: vi.fn(), failSettings: false, failQuickOpen: false, pendingSettings: null as Promise<void> | null }));
 vi.mock("./hooks/useWebSocket", () => ({ useWebSocketConnection: () => {} }));
 vi.mock("./hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: () => {} }));
 vi.mock("./hooks/useDesktopEvents", () => ({ useDesktopEvents: () => {} }));
 vi.mock("./hooks/useWorkspaceGit", () => ({ useWorkspaceGit: () => {} }));
 vi.mock("./desktop/DeferredDesktopEffects", () => ({ DeferredDesktopEffects: () => null }));
-vi.mock("./overlays/QuickOpen", () => ({ QuickOpen: () => null }));
+vi.mock("./overlays/QuickOpen", () => ({ QuickOpen: () => {
+  if (lifecycle.failQuickOpen) throw new Error("fixture quick-open error");
+  return <div>Quick open page</div>;
+} }));
 vi.mock("./overlays/ToastContainer", () => ({ ToastContainer: () => null, pushToast: vi.fn() }));
 vi.mock("./overlays/SettingsCenter", () => ({ SettingsCenter: () => {
   const [draft, setDraft] = useState("");
@@ -37,7 +40,21 @@ import { useAppStore } from "./stores";
 import { App } from "./App";
 
 beforeEach(() => { vi.spyOn(navigator, "language", "get").mockReturnValue("zh-CN"); });
-afterEach(() => { cleanup(); lifecycle.failSettings = false; lifecycle.pendingSettings = null; vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); lifecycle.failSettings = false; lifecycle.failQuickOpen = false; lifecycle.pendingSettings = null; vi.restoreAllMocks(); });
+
+it("retires a failed quick-open route and lets the next explicit opening retry", async () => {
+  useAppStore.setState({ quickOpenVisible: true, settingsOpen: false, commandPaletteOpen: false,
+    shortcutsHelpOpen: false, liveArtifactsOpen: false, agentEditorOpen: false, projectEditTarget: null });
+  lifecycle.failQuickOpen = true;
+  render(<App />);
+  expect(await screen.findByText("fixture quick-open error")).toBeTruthy();
+  act(() => useAppStore.getState().toggleQuickOpen());
+  expect(screen.queryByText("fixture quick-open error")).toBeNull();
+  lifecycle.failQuickOpen = false;
+  act(() => useAppStore.getState().toggleQuickOpen());
+  expect(await screen.findByText("Quick open page")).toBeTruthy();
+  act(() => useAppStore.getState().toggleQuickOpen());
+});
 
 it("lets a different overlay open after a previous route's rendering failure", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});

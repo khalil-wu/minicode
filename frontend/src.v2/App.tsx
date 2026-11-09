@@ -1,7 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { WorkbenchShell } from "./shell/WorkbenchShell";
-import { QuickOpen } from "./overlays/QuickOpen";
 import { ToastContainer } from "./overlays/ToastContainer";
 import { useWebSocketConnection } from "./hooks/useWebSocket";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -14,6 +13,7 @@ import { DesktopLanguageProvider, useI18n } from "./i18n";
 import { McpAppSurfaces } from "./chat/mcp-apps/app-surfaces";
 
 const CommandPalette = lazy(() => import("./overlays/CommandPalette").then((m) => ({ default: m.CommandPalette })));
+const QuickOpen = lazy(() => import("./overlays/QuickOpen").then((m) => ({ default: m.QuickOpen })));
 const SettingsCenter = lazy(() => import("./overlays/SettingsCenter").then((m) => ({ default: m.SettingsCenter })));
 const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHelp").then((m) => ({ default: m.KeyboardShortcutsHelp })));
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
@@ -69,7 +69,7 @@ const AppContent = () => {
   useEffect(() => { if (settingsOpen) setSettingsVisited(true); }, [settingsOpen]);
   useEffect(() => { if (agentEditorOpen && agentEditorEnabled) setAgentEditorVisited(true); }, [agentEditorOpen, agentEditorEnabled]);
   const overlayRoute = [
-    commandPaletteOpen, settingsOpen, shortcutsHelpOpen,
+    commandPaletteOpen, quickOpenVisible, settingsOpen, shortcutsHelpOpen,
     liveArtifactsOpen, agentEditorOpen && agentEditorEnabled, projectEditTarget,
   ].join(":");
 
@@ -83,6 +83,7 @@ const AppContent = () => {
       <ChunkErrorBoundary key={overlayRoute}>
         <Suspense fallback={<RouteLoading />}>
           {commandPaletteOpen && <CommandPalette />}
+          {quickOpenVisible && <QuickOpen />}
           {shortcutsHelpOpen && <KeyboardShortcutsHelp />}
           {liveArtifactsOpen && <LiveArtifacts />}
           {projectEditTarget && <ProjectDialogHost />}
@@ -102,7 +103,6 @@ const AppContent = () => {
           </Suspense>
         </ChunkErrorBoundary>
       </div>
-      <QuickOpen />
       <ToastContainer placement={commandPaletteOpen || quickOpenVisible ? "bottom" : "top"} />
     </>
   );
