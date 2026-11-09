@@ -389,16 +389,13 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
     viewRef.current = view;
     const unregisterHistory = registerComposerEditHistory(view.dom, { hasText: () => !!view.state.doc.textContent,
       undo: () => undo(view.state, view.dispatch), redo: () => redo(view.state, view.dispatch) });
-    const initialState = richDocumentState(view.state.doc, plainTextMode.current);
     // The constructor already restored this exact input. Its canonical store
     // echo is published below; restoring it again would reset the selection.
     committed.current = props.value;
     committedDocument.current = props.document;
     synchronizeView();
     if ((props.value || props.document) && view.state.doc === initial) {
-      committed.current = initialState.markdown;
-      committedDocument.current = initialState;
-      latest.current.onChange(initialState.markdown, readSelection(), initialState);
+      publishDocument();
     }
     if (props.initialFocus && !view.dom.closest('[hidden], [aria-hidden="true"]')) view.focus();
     return () => { disposed = true; unregisterHistory(); clearTimeout(compositionEndTimer.current); view.destroy(); viewRef.current = undefined; };
