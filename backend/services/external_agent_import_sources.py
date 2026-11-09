@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -221,6 +222,9 @@ def read_session(path: Path, provider: str, fallback_cwd: str = "", *, summary_o
     ai_title = ""
     latest = 0.0
     with path.open(encoding="utf-8-sig") as stream:
+        # Source captures the opened transcript's fallback timestamp once.
+        # A pathname lookup per message also observes a replacement file.
+        fallback_timestamp_ms = os.fstat(stream.fileno()).st_mtime * 1000 if provider == "cursor" else 0
         for line in stream:
             if not line.strip():
                 continue
@@ -249,7 +253,7 @@ def read_session(path: Path, provider: str, fallback_cwd: str = "", *, summary_o
                 if wrapped:
                     text = wrapped[1].strip()
             stamp = record.get("timestamp")
-            seconds = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() if isinstance(stamp, str) else float(record.get("timestamp_ms", path.stat().st_mtime * 1000 if provider == "cursor" else 0)) / 1000
+            seconds = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() if isinstance(stamp, str) else float(record.get("timestamp_ms", fallback_timestamp_ms)) / 1000
             latest = max(latest, seconds)
             count += 1
             if role == "user" and not fallback_title:

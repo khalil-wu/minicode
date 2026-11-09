@@ -14,7 +14,7 @@ import pytest
 from fastapi import FastAPI
 
 from backend.services.external_agent_import import ExternalAgentImportService
-from backend.services.external_agent_import_sources import read_json
+from backend.services.external_agent_import_sources import read_json, read_session
 
 
 def write(path: Path, content: str | dict) -> Path:
@@ -33,6 +33,33 @@ def transcript(path: Path, cwd: Path, *, provider="claude", age=0, text="A real 
     modified = (datetime.now(timezone.utc) - timedelta(days=age)).timestamp()
     os.utime(path, (modified, modified))
     return path
+
+
+def test_cursor_transcript_timestamps_belong_to_the_opened_file_snapshot(tmp_path, monkeypatch):
+    path = tmp_path / "chat.jsonl"
+    records = [
+        {"role": "user", "message": {"content": "Question"}},
+        {"role": "assistant", "timestamp_ms": 200_000, "message": {"content": "Milliseconds"}},
+        {"role": "assistant", "timestamp": "1970-01-01T00:05:00Z", "message": {"content": "ISO"}},
+        {"role": "assistant", "message": {"content": "Still the original file"}},
+    ]
+    write(path, "\n".join(map(json.dumps, records)))
+    os.utime(path, (100, 100))
+    from backend.services import external_agent_import_sources as sources
+    original = sources._content_text
+
+    def content(value):
+        # The file changes during parsing. Undated messages must retain the
+        # same captured timestamp, while explicit source dates take priority.
+        os.utime(path, (900, 900))
+        return original(value)
+
+    monkeypatch.setattr(sources, "_content_text", content)
+    result = read_session(path, "cursor", str(tmp_path))
+    assert [message["timestamp"] for message in result["messages"]] == [100_000, 200_000, 300_000, 100_000]
+    assert result["latest_timestamp"] == 300
+    assert result["workspace_root"] == str(tmp_path)
+    assert result["title"] == "Question"
 
 
 @pytest.fixture
