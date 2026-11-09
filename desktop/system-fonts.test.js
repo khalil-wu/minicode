@@ -1,7 +1,10 @@
 "use strict";
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { parseFontFaces, groupFontFamilies } = require("./system-fonts");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { tmpdir } = require("node:os");
+const { parseFontFaces, groupFontFamilies, readFontFaces } = require("./system-fonts");
 
 function sfnt({ family = "Fixture Family", style = "Regular", postscriptName = "Fixture-Regular", weight = 400, italic = false, fixed = false, widths = [600, 300] } = {}, base = 0) {
   const values = new Map([[1, family], [2, style], [4, `${family} ${style}`], [6, postscriptName], [16, family], [17, style]]);
@@ -57,4 +60,39 @@ test("unsupported bitmap files are omitted and corrupt SFNT offsets retain a rea
   assert.deepEqual(parseFontFaces(Buffer.from("MZ old bitmap font")), []);
   const corrupt = sfnt(); corrupt.writeUInt32BE(corrupt.length + 1, 20);
   assert.throws(() => parseFontFaces(corrupt), /Invalid name font table/);
+});
+
+test("disk catalog reads retain collection faces without reading glyph data and close on invalid tables", async t => {
+  const directory = await fs.mkdtemp(path.join(tmpdir(), "minicode-font-catalog-"));
+  const file = path.join(directory, "fixture.ttc");
+  t.after(async () => { await fs.unlink(file); await fs.rmdir(directory); });
+  const first = sfnt({ style: "Narrow", postscriptName: "Fixture-Narrow" }, 20);
+  const second = sfnt({ style: "Regular", postscriptName: "Fixture-Regular" }, 20 + first.length);
+  const header = Buffer.alloc(20); header.write("ttcf"); header.writeUInt32BE(0x10000, 4); header.writeUInt32BE(2, 8);
+  header.writeUInt32BE(20, 12); header.writeUInt32BE(20 + first.length, 16);
+  // Reclassify the unused head table as glyph data, then point it at a large
+  // real tail. Face names, OS/2 styles and horizontal metrics remain intact.
+  first.write("glyf", 12 + 5 * 16, "ascii");
+  first.writeUInt32BE(header.length + first.length + second.length, 12 + 5 * 16 + 8);
+  first.writeUInt32BE(8 * 1024 * 1024, 12 + 5 * 16 + 12);
+  const buffer = Buffer.concat([header, first, second, Buffer.alloc(8 * 1024 * 1024)]);
+  await fs.writeFile(file, buffer);
+  const originalOpen = fs.open;
+  let bytesRead = 0, closed = 0;
+  t.mock.method(fs, "open", async (...args) => {
+    const handle = await originalOpen(...args), read = handle.read.bind(handle), close = handle.close.bind(handle);
+    handle.read = async (...readArgs) => { const result = await read(...readArgs); bytesRead += result.bytesRead; return result; };
+    handle.close = async () => { await close(); closed++; };
+    return handle;
+  });
+  assert.deepEqual(await readFontFaces(file), parseFontFaces(buffer));
+  assert(bytesRead < 4096, `Read ${bytesRead} bytes for catalog metadata`);
+  assert.equal(closed, 1);
+  const corrupt = sfnt(); corrupt.writeUInt32BE(corrupt.length + 1, 20);
+  await fs.writeFile(file, corrupt);
+  await assert.rejects(readFontFaces(file), /Invalid name font table/);
+  assert.equal(closed, 2);
+  await fs.writeFile(file, "MZ old bitmap font");
+  assert.deepEqual(await readFontFaces(file), []);
+  assert.equal(closed, 3);
 });

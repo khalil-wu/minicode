@@ -12,8 +12,8 @@ $paths = foreach ($key in @('HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVers
     foreach ($name in $registry.GetValueNames()) {
       $value = $registry.GetValue($name)
       if ($value -is [string]) {
-        $fontPath = if ([IO.Path]::IsPathRooted($value)) { $value } else { Join-Path $env:WINDIR ('Fonts\\' + $value) }
-        if (Test-Path -LiteralPath $fontPath -PathType Leaf) { $fontPath }
+        $fontPath = if ([IO.Path]::IsPathRooted($value)) { $value } else { [IO.Path]::Combine($env:WINDIR, 'Fonts', $value) }
+        if ([IO.File]::Exists($fontPath)) { $fontPath }
       }
     }
   }
@@ -21,16 +21,16 @@ $paths = foreach ($key in @('HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVers
 ConvertTo-Json -Compress -InputObject @($paths | Sort-Object -Unique)
 `;
 
-function fontTables(buffer, offset) {
-  const count = buffer.readUInt16BE(offset + 4);
+function fontTableRecords(buffer, fileSize) {
+  const count = buffer.readUInt16BE(4);
   const tables = new Map();
-  if (offset + 12 + count * 16 > buffer.length) throw new Error("Invalid font table directory");
+  if (12 + count * 16 > buffer.length) throw new Error("Invalid font table directory");
   for (let index = 0; index < count; index++) {
-    const entry = offset + 12 + index * 16;
+    const entry = 12 + index * 16;
     const name = buffer.toString("ascii", entry, entry + 4);
     const start = buffer.readUInt32BE(entry + 8), length = buffer.readUInt32BE(entry + 12);
-    if (start + length > buffer.length) throw new Error(`Invalid ${name} font table`);
-    tables.set(name, buffer.subarray(start, start + length));
+    if (start + length > fileSize) throw new Error(`Invalid ${name} font table`);
+    tables.set(name, { start, length });
   }
   return tables;
 }
@@ -75,7 +75,7 @@ function fixedWidths(tables) {
   return widths.size === 1;
 }
 
-function parseFontFaces(buffer) {
+function fontOffsets(buffer) {
   const signature = buffer.toString("ascii", 0, 4);
   let offsets;
   if (signature === "ttcf") {
@@ -84,18 +84,67 @@ function parseFontFaces(buffer) {
     offsets = Array.from({ length: count }, (_, index) => buffer.readUInt32BE(12 + index * 4));
   } else if (buffer.readUInt32BE(0) === 0x00010000 || ["OTTO", "true", "typ1"].includes(signature)) offsets = [0];
   else return [];
-  return offsets.map(offset => {
-    const tables = fontTables(buffer, offset), names = namesFromTable(tables.get("name"));
-    const family = names.get(16) || names.get(1), styleName = names.get(17) || names.get(2);
-    const fullName = names.get(4), postscriptName = names.get(6);
-    if (!family || !styleName || !fullName || !postscriptName) throw new Error("Font face is missing its registered names");
-    const os2 = tables.get("OS/2"), head = tables.get("head");
-    const selection = os2 ? os2.readUInt16BE(62) : 0;
-    return { family, fullName, postscriptName, styleName,
-      weight: os2 ? os2.readUInt16BE(4) : head && (head.readUInt16BE(44) & 1) ? 700 : 400,
-      style: selection & 0x200 ? "oblique" : selection & 1 || head && (head.readUInt16BE(44) & 2) ? "italic" : "normal",
-      isMonospaced: fixedWidths(tables) };
-  });
+  return offsets;
+}
+
+function faceFromTables(tables) {
+  const names = namesFromTable(tables.get("name"));
+  const family = names.get(16) || names.get(1), styleName = names.get(17) || names.get(2);
+  const fullName = names.get(4), postscriptName = names.get(6);
+  if (!family || !styleName || !fullName || !postscriptName) throw new Error("Font face is missing its registered names");
+  const os2 = tables.get("OS/2"), head = tables.get("head");
+  const selection = os2 ? os2.readUInt16BE(62) : 0;
+  return { family, fullName, postscriptName, styleName,
+    weight: os2 ? os2.readUInt16BE(4) : head && (head.readUInt16BE(44) & 1) ? 700 : 400,
+    style: selection & 0x200 ? "oblique" : selection & 1 || head && (head.readUInt16BE(44) & 2) ? "italic" : "normal",
+    isMonospaced: fixedWidths(tables) };
+}
+
+function parseFontFaces(buffer) {
+  return fontOffsets(buffer).map(offset => faceFromTables(new Map(
+    [...fontTableRecords(buffer.subarray(offset), buffer.length)].map(([name, { start, length }]) => [name, buffer.subarray(start, start + length)]),
+  )));
+}
+
+async function readFontFaces(file) {
+  const handle = await fs.open(file, "r");
+  try {
+    const { size } = await handle.stat();
+    const read = async (start, length) => {
+      if (start + length > size) throw new Error("Invalid font table directory");
+      const buffer = Buffer.alloc(length);
+      let offset = 0;
+      while (offset < length) {
+        const { bytesRead } = await handle.read(buffer, offset, length - offset, start + offset);
+        if (!bytesRead) throw new Error("Font file ended before its declared table boundary");
+        offset += bytesRead;
+      }
+      return buffer;
+    };
+    let header = await read(0, Math.min(size, 12));
+    if (header.toString("ascii", 0, 4) === "ttcf") {
+      const length = 12 + header.readUInt32BE(8) * 4;
+      if (length > size) throw new Error("Invalid font collection");
+      header = await read(0, length);
+    }
+    const faces = [];
+    for (const offset of fontOffsets(header)) {
+      const faceHeader = await read(offset, 12);
+      const directory = await read(offset, 12 + faceHeader.readUInt16BE(4) * 16);
+      const records = fontTableRecords(directory, size);
+      // Catalog names and metrics require these tables only. Glyph outlines,
+      // embedded bitmaps and other rendering data can be hundreds of MB.
+      const tables = new Map();
+      for (const name of ["name", "OS/2", "head", "post", "hhea", "hmtx"]) {
+        const record = records.get(name);
+        if (record) tables.set(name, await read(record.start, record.length));
+      }
+      faces.push(faceFromTables(tables));
+    }
+    return faces;
+  } finally {
+    await handle.close();
+  }
 }
 
 function groupFontFamilies(faces) {
@@ -119,8 +168,8 @@ async function listFontFamilies() {
   const files = await new Promise((resolve, reject) => execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", registeredFilesScript],
     { windowsHide: true, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => error ? reject(error) : resolve(JSON.parse(stdout))));
   const faces = [];
-  for (const file of files) faces.push(...parseFontFaces(await fs.readFile(file)));
+  for (const file of files) faces.push(...await readFontFaces(file));
   return groupFontFamilies(faces);
 }
 
-module.exports = { listFontFamilies, parseFontFaces, groupFontFamilies };
+module.exports = { listFontFamilies, parseFontFaces, groupFontFamilies, readFontFaces };
