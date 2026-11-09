@@ -73,6 +73,49 @@ async def test_bounded_native_read_checks_growth_and_closes_original_file(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("initial", "contents"), [
+    (b"", b"grown" * 500_000),
+    (b"small", b"grown" * 500_000),
+    (b"before" * 500_000, b"short"),
+], ids=["empty-grows", "small-grows", "large-shrinks"])
+async def test_native_read_tracks_growth_and_shrink_after_descriptor_metadata(tmp_path, monkeypatch, initial, contents):
+    from backend.workspace import executor_fs_helper as helper
+
+    path = tmp_path / "changing.bin"
+    path.write_bytes(initial)
+    original_open, original_read = helper.open_regular, os.read
+    descriptors = []
+    changed = False
+
+    def opened(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        descriptors.append(descriptor)
+        return descriptor
+
+    def read(descriptor, length):
+        nonlocal changed
+        if descriptor in descriptors and not changed:
+            changed = True
+            path.write_bytes(contents)
+            # A short read also must not be mistaken for EOF.
+            length = min(length, 2)
+        return original_read(descriptor, length)
+
+    monkeypatch.setattr(helper, "open_regular", opened)
+    monkeypatch.setattr(helper.os, "read", read)
+    fs = LocalExecutorFileSystem()
+    try:
+        assert await fs.read_bytes(path.as_uri(), sandbox=None, limit=max(len(initial), len(contents))) == contents
+        assert changed
+        assert len(descriptors) == 1
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+        assert not fs.operations
+    finally:
+        await fs.close()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_native_read_waits_for_block_and_releases_the_original_descriptor(tmp_path, monkeypatch):
     from backend.workspace import executor_fs_helper as helper
 

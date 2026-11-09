@@ -59,15 +59,20 @@ def metadata(value, *, is_symlink: bool = False) -> dict:
 def _read_file(path: Path, follow: bool, cancelled, max_bytes: int = MAX_READ_FILE_BYTES) -> bytes:
     descriptor = open_regular(path, "read", follow=follow)
     try:
-        if os.fstat(descriptor).st_size > max_bytes:
+        file_size = os.fstat(descriptor).st_size
+        if file_size > max_bytes:
             raise OSError(errno.EINVAL, f"file is too large to read: limit is {max_bytes} bytes", str(path))
         result = bytearray()
+        # Source read_to_end starts with the descriptor's size and grows its
+        # buffer. Avoid allocating a full 1 MiB for every small file and EOF.
+        block_size = min(FILE_CHUNK_SIZE, file_size + 1)
         while True:
             _cancelled(cancelled)
-            block = os.read(descriptor, min(FILE_CHUNK_SIZE, max_bytes + 1 - len(result)))
+            block = os.read(descriptor, min(block_size, max_bytes + 1 - len(result)))
             if not block:
                 return bytes(result)
             result.extend(block)
+            block_size = min(FILE_CHUNK_SIZE, block_size * 2)
             if len(result) > max_bytes:
                 raise OSError(errno.EINVAL, f"file is too large to read: limit is {max_bytes} bytes", str(path))
     finally:
