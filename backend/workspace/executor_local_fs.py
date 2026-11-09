@@ -218,6 +218,7 @@ class LocalExecutorFileSystem:
         self.operations: dict[asyncio.Task, threading.Event] = {}
         self.closed = False
         self.close_task = None
+        self._prepared_sandbox: tuple[dict, bool, bool] | None = None
 
     async def _direct(self, request: dict, handles: dict | None = None):
         cancelled = threading.Event()
@@ -239,10 +240,17 @@ class LocalExecutorFileSystem:
         for key in ("path", "sourcePath", "destinationPath"):
             if key in request:
                 request[key] = str(local_path(request[key]))
-        if sandbox is not None:
-            local_sandbox_policy(sandbox)
         write = operation in {"writeFile", "createDirectory", "remove", "copy"} or operation == "open" and options["mode"] == "replace"
-        return request, requires_filesystem_sandbox(sandbox, write=write)
+        if sandbox is None:
+            return request, False
+        if self._prepared_sandbox is None or self._prepared_sandbox[0] != sandbox:
+            captured = deepcopy(sandbox)
+            local_sandbox_policy(captured)
+            self._prepared_sandbox = (captured, requires_filesystem_sandbox(captured, write=False),
+                requires_filesystem_sandbox(captured, write=True))
+        # Only the captured policy's choice of native sandbox is reusable.
+        # Helpers still capture their actual process environment at launch.
+        return request, self._prepared_sandbox[2 if write else 1]
 
     async def _request(self, operation: str, sandbox: dict | None, **options):
         request, sandboxed = self._prepare(operation, sandbox, **options)

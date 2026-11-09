@@ -58,6 +58,60 @@ async def test_local_filesystem_direct_full_crud_binary_copy_and_source_shapes(t
 
 
 @pytest.mark.asyncio
+async def test_walk_retains_native_uri_and_metadata_for_escaped_names_and_directories(tmp_path):
+    from backend.workspace.executor_fs_helper import native_uri
+
+    root = tmp_path / "百分%#中文"
+    nested = root / "nested [one]"
+    nested.mkdir(parents=True)
+    for name in ("space file.txt", "percent%20.txt", "hash#file.txt", "中文.txt", "quote'file.txt"):
+        (nested / name).write_bytes(name.encode("utf-8"))
+    fs = LocalExecutorFileSystem()
+    try:
+        outcome = await fs.walk(root.as_uri(), {"maxDepth": 2, "maxDirectories": 10, "maxEntries": 20,
+            "followDirectorySymlinks": False}, sandbox=None)
+        expected = []
+        for path in [nested, *sorted(nested.iterdir())]:
+            metadata = path.stat()
+            expected.append({"path": native_uri(path), "kind": "directory" if path.is_dir() else "file",
+                "size": metadata.st_size, "modifiedAtMs": metadata.st_mtime_ns // 1_000_000})
+        assert outcome == {"entries": expected, "errors": [], "truncated": False}
+    finally:
+        await fs.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_rechecks_changed_policy_after_direct_read_and_preserves_denial(tmp_path, monkeypatch):
+    from backend.workspace.executor_local_fs import _SandboxHelper
+
+    fs = LocalExecutorFileSystem()
+    target = tmp_path / "owned.txt"
+    target.write_bytes(b"retained")
+    policy = sandbox_for(tmp_path)
+    helper_starts = []
+
+    async def denied(helper):
+        helper_starts.append(helper.sandbox)
+        raise PermissionError("actual sandbox could not be acquired")
+
+    monkeypatch.setattr(_SandboxHelper, "start", denied)
+    try:
+        assert await fs.read_file(target.as_uri(), sandbox=policy) == b"retained"
+        target.write_bytes(b"new bytes")
+        assert await fs.read_file(target.as_uri(), sandbox=policy) == b"new bytes"
+        policy["permissions"]["file_system"]["entries"].append({
+            "path": {"type": "path", "path": target.as_uri()}, "access": "deny"})
+        with pytest.raises(PermissionError, match="could not be acquired"):
+            await fs.read_file(target.as_uri(), sandbox=policy)
+        assert len(helper_starts) == 1
+        policy["permissions"]["file_system"]["entries"].pop()
+        assert await fs.read_file(target.as_uri(), sandbox=policy) == b"new bytes"
+        assert target.read_bytes() == b"new bytes"
+    finally:
+        await fs.close()
+
+
+@pytest.mark.asyncio
 async def test_local_stream_offset_binary_chunks_terminal_close_and_owner_close(tmp_path):
     fs = LocalExecutorFileSystem()
     path = tmp_path / "stream.bin"

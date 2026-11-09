@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from functools import cache
 import re
@@ -305,6 +305,7 @@ class EnvironmentPermissionScope:
     temporary_directory_uris: tuple[str, ...] | None = None
     windows_sandbox_level: str = "disabled"
     use_legacy_landlock: bool = False
+    _entries_cache: tuple[tuple[ExecutorPath, FileSystemAccessMode], ...] | None = field(default=None, init=False, repr=False, compare=False)
 
     def resolve_path(self, value: str) -> ExecutorPath:
         return ExecutorPath.resolve(value, cwd_uri=self.cwd_uri, platform_os=self.platform_os,
@@ -386,6 +387,10 @@ class EnvironmentPermissionScope:
             and entry.access is FileSystemAccessMode.WRITE for entry in entries) and not any(map(narrows, entries))
 
     def _resolved_entries(self) -> tuple[tuple[ExecutorPath, FileSystemAccessMode], ...]:
+        # Every input belongs to this immutable admitted scope. Replacements
+        # create a fresh scope; repeated file checks reuse only its URI rules.
+        if self._entries_cache is not None:
+            return self._entries_cache
         cwd = ExecutorPath.parse(self.cwd_uri, platform_os=self.platform_os)
         root = cwd
         while root.parent != root:
@@ -411,7 +416,9 @@ class EnvironmentPermissionScope:
             else:
                 continue
             resolved.extend((path, entry.access) for path in paths if path.convention == cwd.convention)
-        return tuple(resolved)
+        entries = tuple(resolved)
+        object.__setattr__(self, "_entries_cache", entries)
+        return entries
 
     def instruction_paths(self):
         entries = self._resolved_entries()

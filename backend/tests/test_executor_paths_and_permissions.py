@@ -23,6 +23,26 @@ from backend.sandbox.policy import (
 from backend.workspace.executor_paths import ExecutorPath
 
 
+def test_resolved_permissions_stay_with_each_immutable_scope_after_workspace_or_grant_change():
+    from dataclasses import replace
+    from backend.sandbox.policy import AdditionalPermissionProfile, FileSystemPermissions
+
+    original = EnvironmentPermissionScope("target", PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+        Entry(FileSystemPath.special(Special.ROOT), Access.READ),
+        Entry(FileSystemPath.special(Special.PROJECT_ROOTS), Access.WRITE),
+    ])), "file:///C:/first", ("file:///C:/first",), "windows")
+    assert original.resolve_access("file:///C:/first/a") is Access.WRITE
+    changed = replace(original, cwd_uri="file:///C:/second", workspace_root_uris=("file:///C:/second",))
+    assert changed.resolve_access("file:///C:/first/a") is Access.READ
+    assert changed.resolve_access("file:///C:/second/a") is Access.WRITE
+    denied = changed.with_additional_permissions(AdditionalPermissionProfile(file_system=FileSystemPermissions((
+        Entry(FileSystemPath("path", "file:///C:/second/private"), Access.DENY),
+    ))))
+    assert denied.resolve_access("file:///c:/second/private/a") is Access.DENY
+    assert changed.resolve_access("file:///C:/second/private/a") is Access.WRITE
+    assert original.resolve_access("file:///C:/first/a") is Access.WRITE
+
+
 @pytest.mark.parametrize("base,value,expected", [
     ("file:///workspace/src", "../tests/test.rs", "file:///workspace/tests/test.rs"),
     ("file:///workspace/src", "/", "file:///"),

@@ -16,14 +16,15 @@ import shutil
 import stat
 import struct
 import sys
+from urllib.parse import quote
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).parent))
     from executor_fs_native import nofollow_mkdir, nofollow_remove, nofollow_stat, open_regular, remove_file
-    from executor_paths import ExecutorPath
+    from executor_paths import ExecutorPath, _opaque_bytes
 else:
     from .executor_fs_native import nofollow_mkdir, nofollow_remove, nofollow_stat, open_regular, remove_file
-    from .executor_paths import ExecutorPath
+    from .executor_paths import ExecutorPath, _opaque_bytes
 
 
 FILE_CHUNK_SIZE = 1024 * 1024
@@ -125,16 +126,20 @@ def _walk(root: Path, options: dict, cancelled) -> dict:
     hidden = options.get("pruneHiddenDirectories", False)
     outcome = {"entries": [], "errors": [], "truncated": False}
     _cancelled(cancelled)
-    value, symlink = root.stat(), _is_link(root.lstat())
+    value = root.lstat()
+    symlink = _is_link(value)
+    if symlink:
+        value = root.stat()
     if not stat.S_ISDIR(value.st_mode) or symlink and not follow:
         return outcome
-    queue = deque([(root, 0)])
+    root_uri = native_uri(root)
+    queue = deque([(root, 0, None if _opaque_bytes(root_uri) is not None else root_uri)])
     visited = {root.resolve(strict=True) if follow else root}
     directory_count, entry_count, response_bytes = 1, 0, 0
 
-    def append(collection: str, path: Path, **extra) -> bool:
+    def append(collection: str, path: Path, *, uri=None, **extra) -> bool:
         nonlocal response_bytes
-        uri = native_uri(path)
+        uri = native_uri(path) if uri is None else uri
         item_bytes = len(uri.encode()) + len(extra.get("message", "").encode()) + 64
         if response_bytes + item_bytes > 4 * 1024 * 1024:
             outcome["truncated"] = True
@@ -145,32 +150,58 @@ def _walk(root: Path, options: dict, cancelled) -> dict:
 
     while queue:
         _cancelled(cancelled)
-        directory, depth = queue.popleft()
+        directory, depth, directory_uri = queue.popleft()
         try:
-            names = sorted(entry["fileName"] for entry in _directory(directory, cancelled))
+            with os.scandir(directory) as scan:
+                entries = []
+                for entry in scan:
+                    _cancelled(cancelled)
+                    name = (entry.name.encode("utf-16-le", errors="surrogatepass").decode("utf-16-le", errors="replace")
+                            if os.name == "nt" else os.fsencode(entry.name).decode("utf-8", errors="replace"))
+                    entries.append((name, entry))
+            entries.sort(key=lambda item: item[0])
         except OSError as error:
             if not append("errors", directory, message=str(error)):
                 return outcome
             continue
-        for name in names:
+        for name, entry in entries:
             _cancelled(cancelled)
+            try:
+                value = entry.stat(follow_symlinks=False)
+                symlink = _is_link(value)
+                if symlink:
+                    value = entry.stat(follow_symlinks=True)
+            except OSError:
+                # As in read_directory, omit broken or inaccessible entries.
+                continue
             if entry_count == entry_limit:
                 outcome["truncated"] = True
                 return outcome
             entry_count += 1
             path = directory / name
-            try:
-                value, symlink = path.stat(), _is_link(path.lstat())
-            except OSError as error:
-                if not append("errors", path, message=str(error)):
-                    return outcome
-                continue
+            # FindFirstFile caches file size but reports zero for directories;
+            # preserve the metadata size returned by the existing Windows API.
+            if name != entry.name or os.name == "nt" and stat.S_ISDIR(value.st_mode) and not symlink:
+                try:
+                    value = path.lstat()
+                    symlink = _is_link(value)
+                    if symlink:
+                        value = path.stat()
+                except OSError as error:
+                    if not append("errors", path, message=str(error)):
+                        return outcome
+                    continue
             is_directory = stat.S_ISDIR(value.st_mode)
             if symlink and (not follow or not is_directory):
                 continue
             if not is_directory and not stat.S_ISREG(value.st_mode):
                 continue
-            if not append("entries", path, kind="directory" if is_directory else "file",
+            # The directory URI is already normalized. A native entry name is
+            # one component, so preserve its bytes by escaping it once rather
+            # than resolving and decoding the whole absolute path per file.
+            uri = (directory_uri.rstrip("/") + "/" + quote(name, safe="!$&'()*+,-.:;=@_~[]")
+                   if directory_uri is not None else native_uri(path))
+            if not append("entries", path, uri=uri, kind="directory" if is_directory else "file",
                     size=value.st_size, modifiedAtMs=max(0, value.st_mtime_ns // 1_000_000)):
                 return outcome
             if is_directory and depth < depth_limit and not (hidden and name.startswith(".")):
@@ -187,7 +218,7 @@ def _walk(root: Path, options: dict, cancelled) -> dict:
                     outcome["truncated"] = True
                 else:
                     directory_count += 1
-                    queue.append((path, depth + 1))
+                    queue.append((path, depth + 1, uri if directory_uri is not None else None))
     return outcome
 
 

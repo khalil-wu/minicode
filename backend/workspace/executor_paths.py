@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from functools import cached_property
 import os
 from pathlib import PurePosixPath, PureWindowsPath
 import re
@@ -47,7 +48,7 @@ def _component(value: str) -> str:
     return quote(value, safe="!$&'()*+,-.:;=@_~[]")
 
 
-@dataclass(frozen=True, slots=True, eq=False)
+@dataclass(frozen=True, eq=False)
 class ExecutorPath:
     uri: str
     platform_os: str | None
@@ -110,7 +111,7 @@ class ExecutorPath:
             return cls.parse(_opaque(value, convention), platform_os=platform_os)
         return candidate
 
-    @property
+    @cached_property
     def convention(self) -> str | None:
         opaque = _opaque_bytes(self.uri)
         if opaque is not None:
@@ -189,10 +190,18 @@ class ExecutorPath:
             return cls.parse(_opaque(value, convention), platform_os=platform_os)
         return result
 
-    def _segments(self) -> list[str]:
-        return [part for part in urlsplit(self.uri).path.split("/") if part]
+    @cached_property
+    def _path_segments(self) -> tuple[str, ...]:
+        return tuple(part for part in urlsplit(self.uri).path.split("/") if part)
+
+    def _segments(self) -> tuple[str, ...]:
+        return self._path_segments
 
     def _identity(self):
+        return self._path_identity
+
+    @cached_property
+    def _path_identity(self):
         if self.convention == "windows" and _opaque_bytes(self.uri) is None:
             parts = self._segments()
             if not any(b"/" in unquote_to_bytes(part) or b"\\" in unquote_to_bytes(part) for part in parts):
@@ -205,7 +214,7 @@ class ExecutorPath:
     def __hash__(self) -> int:
         return hash(self._identity())
 
-    @property
+    @cached_property
     def native(self) -> str:
         opaque = _opaque_bytes(self.uri)
         if opaque is not None:
@@ -252,15 +261,20 @@ class ExecutorPath:
         parts = self._segments()
         return _decode(parts[-1]) if parts and _opaque_bytes(self.uri) is None else ""
 
-    @property
+    @cached_property
     def lexical_depth(self) -> int | None:
+        parts = self._containment_segments
+        return len(parts) - int(self.convention == "windows") if parts is not None else None
+
+    @cached_property
+    def _containment_segments(self) -> tuple[str | bytes, ...] | None:
         if _opaque_bytes(self.uri) is not None:
             return None
         parts = self._segments()
-        if any(b"/" in unquote_to_bytes(part) or self.convention == "windows" and b"\\" in unquote_to_bytes(part)
-                for part in parts):
+        decoded = tuple(unquote_to_bytes(part) for part in parts)
+        if any(b"/" in part or self.convention == "windows" and b"\\" in part for part in decoded):
             return None
-        return len(parts) - int(self.convention == "windows")
+        return tuple(_decode(part).translate(_ASCII_FOLD) for part in parts) if self.convention == "windows" else decoded
 
     @property
     def suffix(self) -> str:
@@ -284,14 +298,10 @@ class ExecutorPath:
         if (_opaque_bytes(self.uri) is not None or _opaque_bytes(root.uri) is not None
                 or urlsplit(self.uri).netloc != urlsplit(root.uri).netloc or self.convention != root.convention):
             return False
-        parts, roots = self._segments(), root._segments()
-        decoded = [unquote_to_bytes(part) for part in (*parts, *roots)]
-        if any(b"/" in part or self.convention == "windows" and b"\\" in part for part in decoded):
+        parts, roots = self._containment_segments, root._containment_segments
+        if parts is None or roots is None:
             return False
-        if self.convention == "windows":
-            return len(parts) >= len(roots) and all(a.translate(_ASCII_FOLD) == b.translate(_ASCII_FOLD)
-                or _decode(a).translate(_ASCII_FOLD) == _decode(b).translate(_ASCII_FOLD) for a, b in zip(parts, roots))
-        return len(parts) >= len(roots) and all(unquote_to_bytes(a) == unquote_to_bytes(b) for a, b in zip(parts, roots))
+        return parts[:len(roots)] == roots
 
     def relative_to(self, root: ExecutorPath) -> PurePosixPath | PureWindowsPath:
         if not self.is_relative_to(root):
