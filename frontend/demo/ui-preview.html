@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MiniCode UI 优化预览</title>
+  <style>
+    /* 引入核心token */
+    @import url('../src.v2/styles/tokens.css');
+    @import url('../src.v2/styles/tokens-anthropic.css');
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: var(--font-ui);
+      background: var(--surface-base);
+      color: var(--text-primary);
+      padding: 40px;
+      line-height: 1.6;
+    }
+
+    .preview-container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 32px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .anthropic-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      background: var(--anthropic-orange-soft);
+      color: var(--anthropic-orange);
+      border-radius: var(--radius-full);
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      margin-bottom: 40px;
+    }
+
+    .section {
+      margin-bottom: 60px;
+    }
+
+    .section-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 20px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    /* Composer预览 */
+    .composer-preview {
+      width: min(880px, 100%);
+      margin: 0 auto 24px;
+      padding: 14px 8px 8px;
+      border-radius: var(--radius-composer, 20px);
+      background: var(--surface-base);
+      box-shadow: 0 0 0 1px var(--border-subtle), var(--shadow-composer);
+      transition: box-shadow var(--duration-fast) var(--easing-standard);
+    }
+
+    .composer-preview:focus-within {
+      box-shadow: 0 0 0 1px var(--border-soft), 0 2px 12px oklch(0 0 0 / 0.08), 0 8px 32px oklch(0 0 0 / 0.12);
+    }
+
+    .composer-preview textarea {
+      width: 100%;
+      min-height: 60px;
+      padding: 8px 12px;
+      border: none;
+      background: transparent;
+      color: var(--text-primary);
+      font-family: var(--font-ui);
+      font-size: 14px;
+      resize: none;
+      outline: none;
+    }
+
+    /* 消息气泡预览 */
+    .message-bubble {
+      padding: 10px 16px;
+      border-radius: var(--radius-composer, 20px);
+      background: var(--message-user-bg);
+      color: var(--text-primary);
+      margin-bottom: 16px;
+      max-width: 600px;
+      transition: background-color var(--duration-micro) var(--easing-standard);
+    }
+
+    .message-bubble:hover {
+      background: color-mix(in oklab, var(--text-primary) 7%, transparent);
+    }
+
+    /* 菜单预览 */
+    .menu-demo {
+      position: relative;
+      display: inline-block;
+    }
+
+    .menu-surface {
+      min-width: 220px;
+      padding: 8px;
+      border-radius: var(--radius-menu, 16px);
+      background: var(--menu-surface);
+      box-shadow: 0 0 0 .5px var(--border-subtle), var(--shadow-menu);
+      animation: scale-in var(--anim-scale-in, 200ms) var(--ease-scale-in) both;
+    }
+
+    .menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: var(--radius-md, 12px);
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: background-color var(--duration-micro) var(--easing-standard);
+    }
+
+    .menu-item:hover {
+      background: var(--surface-hover);
+    }
+
+    /* 会话行预览 */
+    .session-row {
+      min-height: 30px;
+      padding: 4px 8px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-session, 12px);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+      cursor: pointer;
+      transition: background-color var(--duration-micro) var(--easing-standard),
+                  border-color var(--duration-micro) var(--easing-standard);
+    }
+
+    .session-row:hover {
+      background: var(--workbench-hover);
+    }
+
+    .session-row.active {
+      background: var(--surface-selected);
+    }
+
+    /* 思考指示器 */
+    .thinking-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 16px;
+    }
+
+    .thinking-dot {
+      width: var(--thinking-dot-size);
+      height: var(--thinking-dot-size);
+      background: var(--anthropic-orange);
+      border-radius: 50%;
+      animation: thinking-pulse var(--thinking-animation-duration) ease-in-out infinite;
+    }
+
+    .thinking-dot:nth-child(1) {
+      animation-delay: var(--thinking-dot-delay-1);
+    }
+
+    .thinking-dot:nth-child(2) {
+      animation-delay: var(--thinking-dot-delay-2);
+    }
+
+    .thinking-dot:nth-child(3) {
+      animation-delay: var(--thinking-dot-delay-3);
+    }
+
+    /* 工具过程摘要 */
+    .process-summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: var(--radius-sm, 8px);
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: color var(--duration-micro) var(--easing-standard),
+                  background-color var(--duration-micro) var(--easing-standard);
+    }
+
+    .process-summary:hover {
+      background: var(--surface-hover);
+      color: var(--text-primary);
+    }
+
+    .process-arrow {
+      transition: transform var(--anim-collapse, 350ms) var(--ease-collapse);
+    }
+
+    .process-summary.expanded .process-arrow {
+      transform: rotate(180deg);
+    }
+
+    /* 示例按钮 */
+    .demo-button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: var(--radius-btn-sm, 10px);
+      background: var(--accent-primary);
+      color: var(--text-on-accent);
+      font-family: var(--font-ui);
+      font-size: 14px;
+      cursor: pointer;
+      transition: background-color var(--duration-micro) var(--easing-standard);
+    }
+
+    .demo-button:hover {
+      background: var(--accent-hover);
+    }
+
+    .demo-button-orange {
+      background: var(--anthropic-orange);
+      color: white;
+    }
+
+    .demo-button-orange:hover {
+      background: var(--anthropic-orange-hover);
+    }
+
+    /* 布局 */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 24px;
+    }
+
+    .card {
+      padding: 20px;
+      background: var(--surface-page);
+      border-radius: var(--radius-card, 16px);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .shimmer-box {
+      height: 40px;
+      border-radius: var(--radius-md);
+      background: linear-gradient(
+        90deg,
+        var(--surface-soft) 0%,
+        color-mix(in oklch, var(--surface-soft) 92%, white) 50%,
+        var(--surface-soft) 100%
+      );
+      background-size: 200% 100%;
+      animation: shimmer var(--anim-shimmer, 2s) linear infinite;
+    }
+
+    .theme-toggle {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 8px 16px;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      background: var(--surface-panel);
+      color: var(--text-primary);
+      cursor: pointer;
+      font-family: var(--font-ui);
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" onclick="toggleTheme()">切换主题</button>
+
+  <div class="preview-container">
+    <h1>
+      MiniCode UI 优化预览
+      <span class="anthropic-badge">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <circle cx="8" cy="8" r="6"/>
+        </svg>
+        Anthropic 风格
+      </span>
+    </h1>
+    <p class="subtitle">基于 Linear + Notion + Anthropic 品牌元素的丝滑细腻界面</p>
+
+    <div class="section">
+      <h2 class="section-title">1. Composer 输入框 (20px 圆角 + 细腻阴影)</h2>
+      <div class="composer-preview">
+        <textarea placeholder="Message Claude..."></textarea>
+      </div>
+      <p style="color: var(--text-secondary); text-align: center;">点击输入框查看 focus 效果 ✨</p>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">2. 用户消息气泡 (hover 微妙反馈)</h2>
+      <div class="message-bubble">
+        这是一条用户消息，hover 查看微妙的背景变化效果
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">3. Anthropic 思考指示器 (三点呼吸动画)</h2>
+      <div class="thinking-indicator">
+        <div class="thinking-dot"></div>
+        <div class="thinking-dot"></div>
+        <div class="thinking-dot"></div>
+        <span style="color: var(--text-secondary); margin-left: 8px;">Claude 正在思考...</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">4. 菜单系统 (Scale In 动画 + 统一圆角)</h2>
+      <div class="grid-2">
+        <div class="card">
+          <div class="menu-surface">
+            <div class="menu-item">📄 新建对话</div>
+            <div class="menu-item">⚙️ 设置</div>
+            <div class="menu-item">🎨 外观</div>
+            <div class="menu-item">💡 帮助</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">5. 侧栏会话行 (12px 圆角 + 丝滑过渡)</h2>
+      <div class="card" style="max-width: 300px;">
+        <div class="session-row">
+          <span>💬</span>
+          <span>新对话</span>
+        </div>
+        <div class="session-row active">
+          <span>🔥</span>
+          <span>当前对话 (已选中)</span>
+        </div>
+        <div class="session-row">
+          <span>📝</span>
+          <span>代码重构讨论</span>
+        </div>
+        <div class="session-row">
+          <span>🎯</span>
+          <span>项目规划</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">6. 工具过程摘要 (hover 反馈 + 箭头旋转)</h2>
+      <div class="process-summary" onclick="this.classList.toggle('expanded')">
+        <span class="process-arrow">▼</span>
+        <span>运行了 3 个工具</span>
+      </div>
+      <p style="color: var(--text-secondary); margin-top: 12px;">点击查看箭头旋转动画</p>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">7. 加载占位 (Shimmer 微光扫过)</h2>
+      <div class="shimmer-box"></div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">8. 按钮系统</h2>
+      <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+        <button class="demo-button">标准按钮</button>
+        <button class="demo-button-orange">Anthropic 橙色</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">✅ 优化总结</h2>
+      <div class="card">
+        <ul style="color: var(--text-secondary); line-height: 1.8;">
+          <li>✨ 统一圆角系统: 10-20px 柔和风格</li>
+          <li>🎨 Anthropic 橙色品牌强调</li>
+          <li>⚡ 丝滑动效: Proximity Reveal 180ms, Collapse 350ms, Scale In/Out 200ms/150ms</li>
+          <li>🌊 细腻阴影: 基于 oklch 的精确阴影系统</li>
+          <li>🎯 微妙过渡: 所有交互元素 100ms 颜色过渡</li>
+          <li>💫 温暖灰调: 极轻微暖调(ΔE < 3)，更舒适</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const currentTheme = html.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', newTheme);
+    }
+  </script>
+</body>
+</html>
