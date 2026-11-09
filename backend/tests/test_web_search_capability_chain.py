@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+import keyring
 
 from backend.agent.state import AgentState
 from backend.agent.tool_execution import toolset_policy_guard_reason
@@ -83,9 +84,9 @@ def test_tavily_presence_refreshes_after_real_vault_publication_without_repeated
     search, registry = search_case
     stored = {}
     reads = []
-    monkeypatch.setattr(vault_module.keyring, "get_password", lambda service, name: (reads.append(name), stored.get((service, name)))[1])
-    monkeypatch.setattr(vault_module.keyring, "set_password", lambda service, name, value: stored.__setitem__((service, name), value))
-    monkeypatch.setattr(vault_module.keyring, "delete_password", lambda service, name: stored.pop((service, name)))
+    monkeypatch.setattr(keyring, "get_password", lambda service, name: (reads.append(name), stored.get((service, name)))[1])
+    monkeypatch.setattr(keyring, "set_password", lambda service, name, value: stored.__setitem__((service, name), value))
+    monkeypatch.setattr(keyring, "delete_password", lambda service, name: stored.pop((service, name)))
     spec = registry.get_tool_spec("web_search")
     assert not policy(registry).is_available(spec)
     vault = EnvVault()
@@ -115,9 +116,9 @@ def test_vault_add_remove_refreshes_warm_search_schemas_and_returns_to_native(se
     search = WebSearchTool(native)
     registry.register(search, replace=True)
     stored, reads = {}, []
-    monkeypatch.setattr(vault_module.keyring, "get_password", lambda service, name: (reads.append(name), stored.get((service, name)))[1])
-    monkeypatch.setattr(vault_module.keyring, "set_password", lambda service, name, value: stored.__setitem__((service, name), value))
-    monkeypatch.setattr(vault_module.keyring, "delete_password", lambda service, name: stored.pop((service, name)))
+    monkeypatch.setattr(keyring, "get_password", lambda service, name: (reads.append(name), stored.get((service, name)))[1])
+    monkeypatch.setattr(keyring, "set_password", lambda service, name, value: stored.__setitem__((service, name), value))
+    monkeypatch.setattr(keyring, "delete_password", lambda service, name: stored.pop((service, name)))
 
     def blocked_domains_available(target):
         schemas = target.get_schemas(toolset_policy=policy(target, hosted=True, mode=mode))

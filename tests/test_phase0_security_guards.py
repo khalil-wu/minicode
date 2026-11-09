@@ -314,11 +314,11 @@ def test_vault_migrates_legacy_entries_individually_without_erasing_others(monke
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "backend.vault.store.keyring.get_password",
+        "keyring.get_password",
         lambda service, name: credentials.get((service, name)),
     )
     monkeypatch.setattr(
-        "backend.vault.store.keyring.set_password",
+        "keyring.set_password",
         lambda service, name, value: credentials.__setitem__((service, name), value),
     )
 

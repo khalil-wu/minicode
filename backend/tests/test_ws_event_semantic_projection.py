@@ -684,9 +684,10 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage(m
                 "breakdown": {"history": used},
             }
 
-        async def compact(self, *, focus: str, restore_state: Any, manual: bool) -> str:
+        async def compact(self, *, focus: str, restore_state: Any, manual: bool, tool_schemas, request_metadata) -> str:
             assert focus == "retain release evidence"
             assert manual is True
+            assert tool_schemas == [] and request_metadata["thread_id"] == "conversation-1"
             assert restore_state is not agent_state and restore_state.conversation_id == agent_state.conversation_id
             self.compacted = True
             return "Retained release goal and latest verification evidence."

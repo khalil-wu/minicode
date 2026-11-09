@@ -1126,7 +1126,7 @@ def test_generated_image_context_round_trips_through_scoped_attachment_reference
     persisted = snapshot["history"][-1]
     assert persisted["role"] == "user"
     assert persisted["attachment_refs"][0]["artifact_id"] == "artifact-image-context"
-    assert persisted["images"] == []
+    assert not persisted.get("images")
     assert encoded not in json.dumps(persisted)
 
     restored = ContextBuilder(
@@ -1158,7 +1158,10 @@ def test_user_authored_system_reminder_is_not_treated_as_runtime_provenance() ->
 
     history = builder.export_snapshot()["history"]
     assert history[0]["content"] == authored
-    assert history[0]["runtime_context"] == ""
+    restored = ContextBuilder()
+    restored.load_snapshot({"history": history})
+    assert restored._history[0].runtime_context == ""
+    assert restored._history[0].content == authored
 
 
 def test_context_ledger_counts_prompt_sections_as_items() -> None:

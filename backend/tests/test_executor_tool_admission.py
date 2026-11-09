@@ -117,13 +117,15 @@ async def test_real_tool_batch_freezes_target_argv_and_returns_actual_exit_outpu
 async def test_real_input_and_cancel_keep_the_original_captured_process(executor_host):
     host = executor_host
     windows = host.environments.primary().peer_info["platformOs"] == "windows"
-    command = "$line=[Console]::ReadLine(); Write-Output ('EXECUTOR_ECHO:'+$line); Start-Sleep -Seconds 30" if windows else "IFS= read -r line; printf 'EXECUTOR_ECHO:%s\\n' \"$line\"; sleep 30"
+    command = "Write-Output 'EXECUTOR_READY'; $line=[Console]::ReadLine(); Write-Output ('EXECUTOR_ECHO:'+$line); Start-Sleep -Seconds 30" if windows else "printf 'EXECUTOR_READY\\n'; IFS= read -r line; printf 'EXECUTOR_ECHO:%s\\n' \"$line\"; sleep 30"
     _, result, _ = await batch(host, "run_command", {"command": command, "login": False, "yield_time_ms": 0})
     assert not result["is_error"], result
     item = host.background.list_commands(conversation_id="source-owner")[0]
     command_id = item["command_id"]
     actual = host.background._processes[command_id]
-    assert await host.background.write_stdin(command_id, "original\n", conversation_id="source-owner", context=host.context, wait_ms=2000, cursor=0) == 9
+    ready = await host.background.wait(command_id, conversation_id="source-owner", wait_ms=10000, cursor=0)
+    assert "EXECUTOR_READY" in host.background.get_output(command_id, conversation_id="source-owner")
+    assert await host.background.write_stdin(command_id, "original\n", conversation_id="source-owner", context=host.context, wait_ms=2000, cursor=ready.output_bytes) == 9
     assert "EXECUTOR_ECHO:original" in host.background.get_output(command_id, conversation_id="source-owner")
     assert host.background._processes[command_id] is actual
     assert await host.background.cancel(command_id, conversation_id="source-owner")

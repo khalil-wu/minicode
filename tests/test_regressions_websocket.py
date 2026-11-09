@@ -2288,26 +2288,19 @@ def test_interrupted_durable_client_command_returns_to_pending(
 
 
 def test_conversation_delete_releases_owned_resources_before_worktree_and_record(monkeypatch, tmp_path) -> None:
+    from backend.conversations.repository import ConversationRepository
     from backend.ws.handlers import conversation as conversation_handlers
 
     order: list[str] = []
-    target = SimpleNamespace(
-        id="conv-delete-order",
-        worktree_path="C:/repo/.minicode/worktrees/conv-delete-order",
-        git_isolated=True,
-    )
-
-    class Repo:
-        def store_instance_id(self) -> str:
-            return "owned-delete-order-store"
-
-        def get_conversation_summary(self, conversation_id: str):
-            return target if conversation_id == target.id else None
-
-        def delete_conversation(self, conversation_id: str) -> bool:
+    class Repo(ConversationRepository):
+        def delete_conversation(self, conversation_id: str, *, lifecycle_lock=None) -> bool:
             assert conversation_id == target.id
             order.append("delete-record")
-            return True
+            return super().delete_conversation(conversation_id, lifecycle_lock=lifecycle_lock)
+
+    repository = Repo(tmp_path / "conversations")
+    target = repository.create_conversation(conversation_id="conv-delete-order",
+        worktree_path=str(tmp_path / "worktrees" / "conv-delete-order"), git_isolated=True)
 
     class TerminalManager:
         async def destroy_sessions_for_conversation(self, conversation_id: str) -> int:
@@ -2326,7 +2319,7 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
         is_connected = True
         ws_manager = None
         active_conversation_id = target.id
-        conversation_repo = Repo()
+        conversation_repo = repository
         lifecycle_lock = asyncio.Lock()
         terminal_manager = TerminalManager()
         background_manager = BackgroundManager()
@@ -2393,7 +2386,7 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
             return 1
 
     async def cleanup(_session, conversation, *, force: bool = False, check_only: bool = False):
-        assert conversation is target
+        assert conversation.id == target.id and conversation.worktree_path == target.worktree_path
         assert force is False
         if check_only:
             order.append("check-worktree")
@@ -2431,6 +2424,7 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
         await asyncio.gather(*type(session).command_tasks)
 
     asyncio.run(scenario())
+    assert ConversationRepository(repository.storage_root).get_conversation(target.id) is None
 
     assert order == [
         "stop-run",
@@ -2449,7 +2443,8 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
     ]
 
 
-def test_conversation_delete_keeps_record_and_worktree_when_run_ignores_cancellation() -> None:
+def test_conversation_delete_keeps_record_and_worktree_when_run_ignores_cancellation(tmp_path) -> None:
+    from backend.conversations.repository import ConversationRepository
     from backend.ws.handlers.conversation import handle_conversation_delete
 
     async def scenario() -> tuple[list[tuple[tuple[object, ...], dict[str, object]]], bool]:
@@ -2467,21 +2462,12 @@ def test_conversation_delete_keeps_record_and_worktree_when_run_ignores_cancella
 
         task = asyncio.create_task(resistant_run())
         await started.wait()
-        target = SimpleNamespace(id="conv-resistant-delete")
+        repository = ConversationRepository(tmp_path / "conversations")
+        target = repository.create_conversation(conversation_id="conv-resistant-delete")
 
         class RunManager:
             def clear_user_message_queue(self, conversation_id: str) -> None:
                 assert conversation_id == target.id
-
-        class Repo:
-            deleted = False
-
-            def get_conversation_summary(self, conversation_id: str):
-                return target if conversation_id == target.id else None
-
-            def delete_conversation(self, _conversation_id: str) -> bool:
-                self.deleted = True
-                return True
 
         class TerminalManager:
             async def destroy_sessions_for_conversation(self, _conversation_id: str) -> int:
@@ -2492,7 +2478,7 @@ def test_conversation_delete_keeps_record_and_worktree_when_run_ignores_cancella
             is_connected = True
             ws_manager = None
             active_conversation_id = target.id
-            conversation_repo = Repo()
+            conversation_repo = repository
             terminal_manager = TerminalManager()
             run_manager = RunManager()
             command_tasks: list[object] = []
@@ -2536,7 +2522,7 @@ def test_conversation_delete_keeps_record_and_worktree_when_run_ignores_cancella
         await asyncio.gather(*type(session).command_tasks)
         release.set()
         await task
-        return emitted, session.conversation_repo.deleted
+        return emitted, ConversationRepository(repository.storage_root).get_conversation(target.id) is None
 
     emitted, deleted = asyncio.run(scenario())
 

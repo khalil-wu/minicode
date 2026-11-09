@@ -586,15 +586,21 @@ test("real MiniCode daemon multiplexes HTTP and reverse window binding, then rea
     const terminal = await host.native(record, "minicode:pty:spawn", [workspace, taskConversation]);
     const taskFile = path.join(workspace, "task-survived-detach.txt"), releaseFile = path.join(workspace, "release-owned-task");
     const taskCode = `import pathlib,time;p=pathlib.Path(${JSON.stringify(taskFile)});r=pathlib.Path(${JSON.stringify(releaseFile)});p.write_text('started');exec('while not r.exists(): time.sleep(.02)');p.write_text('finished');print('TASK_AFTER_DETACH',flush=True)`;
+    const taskScript = path.join(workspace, "owned-detach-task.py");
+    fs.writeFileSync(taskScript, taskCode);
     const shellQuote = value => "'" + value.replace(/'/g, process.platform === "win32" ? "''" : "'\\''") + "'";
-    const command = `${process.platform === "win32" ? "& " : ""}${shellQuote(python)} -c ${shellQuote(taskCode)}${process.platform === "win32" ? "\r" : "\n"}`;
+    const command = `${process.platform === "win32" ? "& " : ""}${shellQuote(python)} ${shellQuote(taskScript)}${process.platform === "win32" ? "\r" : "\n"}`;
     await host.native(record, "minicode:pty:write", [terminal.session_id, command, taskConversation]);
     const waitTask = async expected => {
       const deadline = Date.now() + 12_000;
       while ((!fs.existsSync(taskFile) || fs.readFileSync(taskFile, "utf8") !== expected) && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 20));
       }
-      assert.equal(fs.readFileSync(taskFile, "utf8"), expected);
+      const observed = fs.existsSync(taskFile) ? fs.readFileSync(taskFile, "utf8") : null;
+      if (observed !== expected) {
+        const snapshot = await host.native(record, "minicode:pty:snapshot", [terminal.session_id, 16000, taskConversation]);
+        assert.equal(observed, expected, `actual remote PTY output: ${snapshot.output}`);
+      }
     };
     await waitTask("started");
     const generation = host.ready.generation;

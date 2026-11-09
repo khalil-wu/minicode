@@ -308,7 +308,7 @@ def test_memory_loads_full_transcripts_only_for_selected_candidates(tmp_path, mo
     def load(owner):
         reads.append(owner)
         return SimpleNamespace(**vars(by_id[owner]), transcript=[{"role": "user", "content": "Remember this fact"}])
-    repo = SimpleNamespace(list_conversations=lambda: summaries, get_conversation=load,
+    repo = SimpleNamespace(list_conversations=lambda **kwargs: summaries, get_conversation=load,
                            get_conversation_summary=lambda owner: by_id[owner], transcript_path=lambda owner: tmp_path / f"{owner}.jsonl")
     class Provider:
         async def simple_chat(self, messages):

@@ -31,6 +31,8 @@ def _capture_compaction_fixture(monkeypatch, session):
     from backend.config import AppConfig, LLMSettings
 
     builder = copy(session.context_builder)
+    builder._async_compaction = None
+    builder._async_compaction_execution = None
     builder.load_snapshot = lambda snapshot: setattr(builder, "compacted", bool(snapshot.get("compaction_count")))
     builder.bind_llm_turn_context = lambda _context: None
     builder.hook_manager = None
@@ -237,8 +239,10 @@ def test_manual_compaction_keeps_committed_result_when_event_delivery_fails(monk
         def get_budget_snapshot(self, *, state, tool_schemas):
             return {"used": 100, "total": 1000, "breakdown": {"history": 100}}
 
-        async def compact(self, *, focus, restore_state, manual):
+        async def compact(self, *, focus, restore_state, manual, tool_schemas, request_metadata):
             assert manual is True
+            assert tool_schemas == []
+            assert request_metadata["thread_id"] == conversation.id
             self.compacted = True
             return "Saved summary"
 

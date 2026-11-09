@@ -74,15 +74,15 @@ async def test_archive_publishes_fallback_without_waiting_for_provider_history(
                 context_snapshot={"history": [{"role": "user", "content": f"History {index}"} for index in range(120)]})
             await socket.command("conversation.switch", conversation_id=archived.id)
             await socket.until("conversation.switched", conversation_id=archived.id, is_hydrating=False)
-            read_history = session.conversation_repo.get_conversation
+            read_history = session.conversation_repo.get_execution_context
 
-            def blocked_history(identity):
+            def blocked_history(identity, **options):
                 if identity == fallback.id:
                     history_started.set()
                     assert release_history.wait(10)
-                return read_history(identity)
+                return read_history(identity, **options)
 
-            monkeypatch.setattr(session.conversation_repo, "get_conversation", blocked_history)
+            monkeypatch.setattr(session.conversation_repo, "get_execution_context", blocked_history)
             publish_inventory = session.send_conversation_list
 
             async def publish_while_history_is_blocked(**options):
