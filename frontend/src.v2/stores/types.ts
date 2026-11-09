@@ -1471,6 +1471,7 @@ export interface ConversationMeta {
   environment?: "local" | "remote" | "ssh";
   goal?: ConversationGoal | null;
   parentConversationId?: string;
+  attachedToThreadId?: string;
   parentMessageIndex?: number;
   forkId?: string;
   branchKind?: string;

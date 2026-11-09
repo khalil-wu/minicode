@@ -300,6 +300,7 @@ export interface ConversationSummaryPayload {
   git_isolated?: boolean;
   goal?: GoalInfo | null;
   parent_conversation_id?: string | null;
+  attached_to_thread_id?: string | null;
   parent_message_index?: number | null;
   fork_id?: string | null;
   branch_kind?: string | null;
@@ -535,6 +536,7 @@ export interface ConversationCloneCommand {
   conversation_id: string;
   title?: string;
   activate?: boolean;
+  attach_to_source?: boolean;
 }
 
 export interface ConversationMergeCommand {

@@ -1109,6 +1109,7 @@ const isConversationSummaryPayload = (
     ["projectless_browser_root", 32_768],
     ["summary", 65_536],
     ["parent_conversation_id", 1_024],
+    ["attached_to_thread_id", 1_024],
     ["fork_id", 1_024],
     ["branch_kind", 256],
     ["merged_into_conversation_id", 1_024],
@@ -1759,7 +1760,8 @@ const hasValidSemanticPayload = (
       && (!('conversation_id' in value) || value.conversation_id === null || isBoundedString(value.conversation_id, 1_024))
       && (activeId === null || activeId === undefined || isBoundedString(activeId, 1_024))
       && (activeConversation === null || activeConversation === undefined || isConversationRecordPayload(activeConversation))
-      && (!activeId || conversationIds.includes(String(activeId)))
+      && (!activeId || conversationIds.includes(String(activeId))
+        || isRecord(activeConversation) && isBoundedString(activeConversation.attached_to_thread_id, 1_024))
       && (!activeConversation || !activeId || String(activeConversation.id) === String(activeId))
       && (!('session' in value) || value.session === null || value.session === undefined || isRuntimeSessionSnapshot(value.session))
       && (sidebarOrder === undefined || isRecord(sidebarOrder)

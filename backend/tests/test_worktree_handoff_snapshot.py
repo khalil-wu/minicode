@@ -19,7 +19,7 @@ def test_handoff_without_a_workspace_does_not_use_the_process_directory():
     conversation = SimpleNamespace(id="projectless", workspace_root="", worktree_path="", git_isolated=False)
     root = Mock(side_effect=AssertionError("a repository must not be inferred"))
     preflight = handoff.build_handoff_preflight(conversation, target="worktree",
-        conversation_repo=SimpleNamespace(list_conversations=lambda: []), main_worktree_root=root, has_running_turn=False)
+        conversation_repo=SimpleNamespace(list_conversations=lambda **kwargs: []), main_worktree_root=root, has_running_turn=False)
     assert preflight["allowed"] is False
     assert preflight["source"]["path"] == ""
     assert preflight["checks"][0]["code"] == "source.missing"
@@ -33,7 +33,7 @@ def test_handoff_rejects_a_missing_source_even_if_the_main_checkout_exists(tmp_p
     monkeypatch.setattr(handoff, "_workspace_snapshot", lambda *_args, **_kwargs: handoff.HandoffGitSnapshot("", "head", "main", []))
     monkeypatch.setattr(handoff, "_git_snapshot", lambda *_args, **_kwargs: (False, ""))
     preflight = handoff.build_handoff_preflight(conversation, target="worktree",
-        conversation_repo=SimpleNamespace(list_conversations=lambda: []), main_worktree_root=lambda _: tmp_path, has_running_turn=False)
+        conversation_repo=SimpleNamespace(list_conversations=lambda **kwargs: []), main_worktree_root=lambda _: tmp_path, has_running_turn=False)
     assert preflight["allowed"] is False
     assert any(check["code"] == "source.missing" for check in preflight["checks"])
 
@@ -166,7 +166,7 @@ def test_preflight_reads_each_distinct_root_once_and_reuses_local_source_snapsho
     conversation = SimpleNamespace(id="snapshot-owner", workspace_root=str(source), worktree_path=str(source) if isolated else "",
         git_isolated=isolated, git_branch=f"{source.name}-branch")
     result = handoff.build_handoff_preflight(conversation, target="local" if isolated else "worktree",
-        conversation_repo=SimpleNamespace(list_conversations=lambda: []), main_worktree_root=lambda _root: main, has_running_turn=False)
+        conversation_repo=SimpleNamespace(list_conversations=lambda **kwargs: []), main_worktree_root=lambda _root: main, has_running_turn=False)
     status_roots = [root for root, args in calls if args[0] == "status"]
     assert status_roots == ([source, main] if isolated else [main])
     for root, args in calls:
@@ -187,7 +187,7 @@ def test_main_subdirectory_ignored_sample_stays_cwd_relative_and_does_not_count_
         (sub / f"inside-{index:02}.tmp").write_text("ignored inside\n", encoding="utf-8")
     run, receipts = trace_canonical_reads(monkeypatch)
     conversation = SimpleNamespace(id="subdir-owner", workspace_root=str(sub), worktree_path="", git_isolated=False, git_branch="main")
-    result = handoff.build_handoff_preflight(conversation, target="worktree", conversation_repo=SimpleNamespace(list_conversations=lambda: []),
+    result = handoff.build_handoff_preflight(conversation, target="worktree", conversation_repo=SimpleNamespace(list_conversations=lambda **kwargs: []),
         main_worktree_root=lambda _root: root, has_running_turn=False)
     trace = {"preflight": result, "canonical_reads": receipts}
     trace_json = json.dumps(trace, ensure_ascii=False, indent=2)
@@ -243,7 +243,7 @@ def test_return_local_does_not_scan_main_ignored_inventory_or_project_its_sample
     run, receipts = trace_canonical_reads(monkeypatch)
     conversation = SimpleNamespace(id="return-owner", workspace_root=str(linked), worktree_path=str(linked), git_isolated=True, git_branch="task-branch")
 
-    result = handoff.build_handoff_preflight(conversation, target="local", conversation_repo=SimpleNamespace(list_conversations=lambda: []),
+    result = handoff.build_handoff_preflight(conversation, target="local", conversation_repo=SimpleNamespace(list_conversations=lambda **kwargs: []),
         main_worktree_root=lambda _root: root, has_running_turn=False)
 
     assert result["allowed"], {"preflight": result, "canonical_reads": receipts}
@@ -265,7 +265,7 @@ def test_one_failed_snapshot_keeps_preflight_blocked_without_publishing_clean_st
 
     monkeypatch.setattr(handoff, "run_readonly_git", failed)
     conversation = SimpleNamespace(id="snapshot-error", workspace_root=str(root), worktree_path="", git_isolated=False, git_branch="")
-    result = handoff.build_handoff_preflight(conversation, target="worktree", conversation_repo=SimpleNamespace(list_conversations=lambda: []),
+    result = handoff.build_handoff_preflight(conversation, target="worktree", conversation_repo=SimpleNamespace(list_conversations=lambda **kwargs: []),
         main_worktree_root=lambda _root: root, has_running_turn=False)
     assert not result["allowed"]
     assert any(check["code"] == "source.status_unavailable" for check in result["checks"])

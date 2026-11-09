@@ -205,7 +205,7 @@ class _Repository:
         self.records = {record.id: record for record in records}
         self.rollout_dir = rollout_dir
 
-    def list_conversations(self) -> list[_Summary]:
+    def list_conversations(self, *, include_attached=False) -> list[_Summary]:
         from types import SimpleNamespace
         return [
             SimpleNamespace(**{key: value for key, value in vars(record).items() if key not in {"transcript", "message_count"}}, message_count=len(record.transcript))

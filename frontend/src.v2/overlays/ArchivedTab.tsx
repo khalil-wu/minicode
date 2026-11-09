@@ -28,7 +28,7 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
   const workspaces = useAppStore(state => state.recentWorkspaces);
   const runtimeCapabilities = useAppStore(state => state.runtimeCapabilities);
   const pagedDirectory = useAppStore(state => state.conversationDirectory !== null);
-  const archived = conversations.filter(conversation => conversation.archived && conversation.conversationType !== "side_chat");
+  const archived = conversations.filter(conversation => conversation.archived && conversation.conversationType !== "side_chat" && !conversation.attachedToThreadId);
   const [restoringIds, setRestoringIds] = useState<Record<string, boolean>>({});
   const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");

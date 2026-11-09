@@ -102,6 +102,16 @@ describe("ConversationsTab row rendering performance", () => {
 
   afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+  it("keeps explicitly opened attached threads out of recent and pinned rows", () => {
+    useAppStore.setState(state => ({ conversationId: "attached", conversations: [...state.conversations,
+      { id: "attached", title: "Attached task", updatedAt: "2026-08-16T00:00:00.000Z", attachedToThreadId: "conv-a", pinned: true },
+    ], pinnedConversationIds: ["attached"] }));
+    render(<ConversationsTab conversationId="attached" onSetConfirmDialog={vi.fn()} />);
+    expect(screen.queryByTestId("mock-session-row-attached")).toBeNull();
+    expect(screen.getByTestId("mock-session-row-conv-a")).toBeTruthy();
+    expect(useAppStore.getState().conversationId).toBe("attached");
+  });
+
   it("ignores progress-only runtime updates but projects the actual approval owner", () => {
     const committed = vi.fn();
     render(<Profiler id="sidebar" onRender={committed}><ConversationsTab conversationId="conv-a" onSetConfirmDialog={vi.fn()} /></Profiler>);

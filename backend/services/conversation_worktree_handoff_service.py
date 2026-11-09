@@ -196,7 +196,7 @@ def build_handoff_preflight(
 
     if direction == "worktree_to_local" or reuse_branch:
         shared = []
-        for item in conversation_repo.list_conversations():
+        for item in conversation_repo.list_conversations(include_attached=True):
             if str(getattr(item, "id", "")) == conversation_id or getattr(item, "archived", False) or getattr(item, "git_isolated", False):
                 continue
             candidate = str(getattr(item, "workspace_root", "") or "").strip()

@@ -1759,7 +1759,7 @@ class WebSocketSession(
                 ):
                     active = None
                     self.active_conversation_id = owner = None
-                if active is not None and not any(item["id"] == owner for item in directory["conversations"]):
+                if active is not None and not active.get("attached_to_thread_id") and not any(item["id"] == owner for item in directory["conversations"]):
                     from backend.conversations.models import ConversationSummary
 
                     directory["conversations"].append(ConversationSummary.from_dict(active).to_dict())

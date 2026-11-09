@@ -4,14 +4,18 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 import json
+import logging
 import os
 import sqlite3
+import uuid
 
 from backend.conversations.models import ConversationSummary
 
 
 SORT_COLUMNS = {"created_at": "created_at", "updated_at": "updated_at", "recency_at": "recency_at",
     "section_position": "section_position", "sidebar_position": "sidebar_position"}
+logger = logging.getLogger(__name__)
+ATTACHED_PARENT = "coalesce(json_extract(payload, '$.attached_to_thread_id'),'')"
 
 
 def _decode_summary(payload):
@@ -28,8 +32,7 @@ class ConversationDirectory:
         self.path = repository.storage_root / ".conversation-directory.sqlite3"
         self._indexed_source = None
 
-    @contextmanager
-    def connect(self):
+    def _open_connection(self):
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         try:
@@ -49,11 +52,38 @@ class ConversationDirectory:
                 CREATE INDEX IF NOT EXISTS directory_project ON threads(project_id,archived,updated_at,id);
                 CREATE INDEX IF NOT EXISTS directory_sidebar_project ON threads(project_key,archived,updated_at,id);
                 CREATE INDEX IF NOT EXISTS directory_parent ON threads(parent_id);
+                CREATE INDEX IF NOT EXISTS directory_attached ON threads(
+                    coalesce(json_extract(payload, '$.attached_to_thread_id'),''),archived,created_at,id);
             """)
-            with connection:
-                yield connection
-        finally:
+            return connection
+        except BaseException:
             connection.close()
+            raise
+
+    @contextmanager
+    def connect(self):
+        # All index users share publication ownership, including recovery of
+        # a confirmed corrupt SQLite file. Canonical manifests are untouched.
+        with self.repository._store_lock():
+            try:
+                connection = self._open_connection()
+            except sqlite3.DatabaseError as error:
+                if error.sqlite_errorcode & 0xFF not in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+                    raise
+                backup = self.path.parent / "db-backups" / uuid.uuid4().hex
+                backup.mkdir(parents=True)
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    source = self.path.with_name(self.path.name + suffix)
+                    if source.exists():
+                        source.rename(backup / source.name)
+                self._indexed_source = None
+                logger.warning("Preserved corrupt conversation directory at %s before rebuilding: %s", backup, error)
+                connection = self._open_connection()
+            try:
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
 
     _UPSERT = """INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at, updated_at=excluded.updated_at,
@@ -175,15 +205,18 @@ class ConversationDirectory:
             raise ValueError("originator filtering is not supported by the local thread directory")
         if query.get("parent_thread_id") and query.get("ancestor_thread_id"):
             raise ValueError("parent_thread_id and ancestor_thread_id are mutually exclusive")
-        if query.get("attached_to_thread_id") is not None:
-            raise ValueError("attached thread listing requires persistent attached-thread storage")
+        attached_to = query.get("attached_to_thread_id")
+        if attached_to is not None:
+            self.repository._safe_id(attached_to)
+            if query.get("parent_thread_id") is not None or query.get("ancestor_thread_id") is not None:
+                raise ValueError("attached_to_thread_id cannot be combined with parent_thread_id or ancestor_thread_id")
         if not query.get("use_state_db_only", False):
             self._repair()
         with self.repository._store_lock(), self.connect() as connection:
             state = connection.execute("SELECT * FROM directory_state WHERE singleton=1").fetchone()
             if state is None:
                 raise ValueError("Conversation directory is not initialized; perform a normal directory read first")
-            clauses, params = ["archived=?"], [bool(query.get("archived"))]
+            clauses, params = ["archived=?", ATTACHED_PARENT + "=?"], [bool(query.get("archived")), attached_to or ""]
             if query.get("conversation_type") is not None:
                 clauses.append("conversation_type=?")
                 params.append(query["conversation_type"])
@@ -191,7 +224,7 @@ class ConversationDirectory:
             if sources:
                 clauses.append("source_kind IN (" + ",".join("?" for _ in sources) + ")")
                 params.extend(sources)
-            else:
+            elif attached_to is None:
                 clauses.append("conversation_type='main'")
                 if query.get("conversation_type") is None and not (query.get("parent_thread_id") or query.get("ancestor_thread_id")):
                     clauses.append("source_kind IN ('user','cli','vscode','appServer','exec')")
@@ -274,12 +307,13 @@ class ConversationDirectory:
         if not current:
             self._repair()
 
-    def all_summaries(self, conversation_type=None):
+    def all_summaries(self, conversation_type=None, *, include_attached=False):
         """Legacy full-list consumers share the same scan/publication boundary."""
         self._repair()
         with self.repository._store_lock(), self.connect() as connection:
             state = connection.execute("SELECT instance_id,revision FROM directory_state WHERE singleton=1").fetchone()
-            rows = connection.execute("SELECT payload FROM threads" + (" WHERE conversation_type=?" if conversation_type is not None else "")
+            rows = connection.execute("SELECT payload FROM threads WHERE " + ("1" if include_attached else ATTACHED_PARENT + "=''")
+                + (" AND conversation_type=?" if conversation_type is not None else "")
                 + " ORDER BY created_at DESC,id DESC", (conversation_type,) if conversation_type is not None else ()).fetchall()
         return state["instance_id"], state["revision"], [ConversationSummary.from_dict(json.loads(row[0])) for row in rows]
 
@@ -289,17 +323,21 @@ class ConversationDirectory:
         with self.repository._store_lock(), self.connect() as connection:
             page = self.sidebar_page(limit=25)
             selected = {item["id"]: item for item in page["data"]}
-            for row in connection.execute("SELECT payload FROM threads WHERE pinned=1 AND archived=0 AND conversation_type='main'"):
+            hidden = {row[0] for row in connection.execute("SELECT id FROM threads WHERE " + ATTACHED_PARENT + "!=''")}
+            for row in connection.execute("SELECT payload FROM threads WHERE pinned=1 AND archived=0 AND conversation_type='main' AND " + ATTACHED_PARENT + "=''"):
                 item = _decode_summary(row[0])
                 selected[item["id"]] = item
             sections = self.repository.thread_sections.list()
+            for section in sections:
+                section["item_keys"] = [key for key in section["item_keys"] if not (key.startswith("thread:") and key[7:] in hidden)]
             wanted = {active_id} if active_id else set()
             wanted.update(key[7:] for section in sections for key in section["item_keys"] if key.startswith("thread:"))
             wanted.update(known_ids)
             connection.execute("CREATE TEMP TABLE known (id TEXT PRIMARY KEY,refresh INTEGER)")
             known = set(known_ids)
             connection.executemany("INSERT INTO known VALUES (?,?)", ((identifier, identifier not in known) for identifier in wanted))
-            for row in connection.execute("SELECT payload FROM threads JOIN known USING(id) WHERE change_revision> ? OR id=? OR pinned=1 OR known.refresh=1",
+            for row in connection.execute("SELECT payload FROM threads JOIN known USING(id) WHERE " + ATTACHED_PARENT
+                    + "='' AND (change_revision> ? OR id=? OR pinned=1 OR known.refresh=1)",
                     (since_revision, active_id)):
                 item = _decode_summary(row[0])
                 selected[item["id"]] = item
@@ -311,11 +349,15 @@ class ConversationDirectory:
             removed = [row[0] for row in connection.execute("SELECT known.id FROM known LEFT JOIN threads USING(id) WHERE threads.id IS NULL")]
             summaries = [ConversationSummary.from_dict(item) for item in selected.values()]
             pinned = self.repository._read_pinned_order()
+            sidebar_order = self.repository._read_sidebar_order()
+            sidebar_order["recent_thread_ids"] = [identifier for identifier in sidebar_order["recent_thread_ids"] if identifier not in hidden]
+            sidebar_order["project_thread_orders"] = {key: [identifier for identifier in identifiers if identifier not in hidden]
+                for key, identifiers in sidebar_order["project_thread_orders"].items()}
             return {"conversations": list(selected.values()), "partial_inventory": True,
                 "removed_conversation_ids": removed, "directory_page": {"next_cursor": page["next_cursor"], "project_cursors": project_pages},
                 "inventory_instance_id": page["inventory_instance_id"], "inventory_revision": page["inventory_revision"],
                 "pinned_conversation_ids": self.repository._ordered_pinned_ids(summaries, pinned["thread_ids"]),
-                "pinned_sort_mode": pinned["sort_mode"], "sidebar_order": self.repository._read_sidebar_order(),
+                "pinned_sort_mode": pinned["sort_mode"], "sidebar_order": sidebar_order,
                 "sidebar_sections": sections}
 
     def sidebar_page(self, *, project_key=None, cursor=None, limit=25):

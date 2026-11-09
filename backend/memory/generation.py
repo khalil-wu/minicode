@@ -362,7 +362,7 @@ class MemoryGenerationCoordinator:
     def _scoped_conversations(self) -> list[Any]:
         results: list[Any] = []
         workspace_memories = {}
-        summaries = list(self.repository.list_conversations())
+        summaries = list(self.repository.list_conversations(include_attached=True))
         summaries.sort(
             key=lambda item: str(getattr(item, "updated_at", "") or ""),
             reverse=True,

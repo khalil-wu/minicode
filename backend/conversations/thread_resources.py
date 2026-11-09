@@ -134,7 +134,7 @@ class ThreadResourceReferences:
                 raise ValueError("Invalid resource owner pagination cursor")
             after = anchor["thread_id"]
         owners = []
-        for summary in self.repository.list_conversations():
+        for summary in self.repository.list_conversations(include_attached=True):
             if archived is not None and summary.archived != archived:
                 continue
             if any(item["attachment_type"] == attachment_type and item["identity_key"] == identity_key

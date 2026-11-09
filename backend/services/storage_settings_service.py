@@ -28,7 +28,7 @@ def storage_records() -> FileSwarmStore:
 
 def disk_usage(root: Path = DATA_ROOT, *, repository=None, worktree_paths=(), records: FileSwarmStore | None = None) -> dict[str, Any]:
     sizes = dict.fromkeys(("chats", "archived", "subagents", "unclassified", "worktrees", "other"), 0)
-    conversations = repository.list_conversations() if repository is not None else []
+    conversations = repository.list_conversations(include_attached=True) if repository is not None else []
     journal_categories = {}
     if records is not None:
         for conversation in conversations:

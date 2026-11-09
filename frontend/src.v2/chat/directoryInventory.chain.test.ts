@@ -1,8 +1,9 @@
 /* @vitest-environment jsdom */
 import { beforeEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
-import { handleSessionEvent } from "./sessionEvents";
+import { handleSessionEvent, toConversationMeta } from "./sessionEvents";
 import { publishDirectoryPage } from "../protocol/conversation-directory";
+import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 import type { StreamBuffer } from "../lib/stream-buffer";
 
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "original-session" }) }));
@@ -42,6 +43,27 @@ it("a partial refresh keeps unloaded messages and running work, and only explici
   expect(useAppStore.getState().conversations.map(item => item.id)).toEqual(["visible"]);
   expect(useAppStore.getState().conversationMessages.hidden).toBeUndefined();
   expect(useAppStore.getState().draft).toBe("Unsent visible draft");
+});
+
+it("an explicitly opened attachment keeps its composer and running state across ordinary inventory", () => {
+  const attached = toConversationMeta({ id: "hidden", title: "Attached task", attached_to_thread_id: "visible", revision: 4 });
+  useAppStore.setState(state => ({ conversationId: "hidden", conversations: [state.conversations[0], attached],
+    draft: "Unsent attached draft", isStreaming: true }));
+  const messages = useAppStore.getState().conversationMessages.hidden;
+  const event = normalizeInboundServerEvent({ type: "conversation.list", partial_inventory: true,
+    inventory_instance_id: "original-store", inventory_revision: 6,
+    active_conversation_id: "hidden", conversations: [{ id: "visible", title: "Visible", revision: 2 }],
+    active_conversation: { id: "hidden", title: "Renamed attached task", attached_to_thread_id: "visible", revision: 5 },
+    removed_conversation_ids: [] });
+  expect(event).not.toBeNull();
+  handleSessionEvent(event!, buffers);
+  const state = useAppStore.getState();
+  expect(state.conversationId).toBe("hidden");
+  expect(state.conversations.find(item => item.id === "hidden")?.attachedToThreadId).toBe("visible");
+  expect(state.conversations.find(item => item.id === "hidden")?.title).toBe("Renamed attached task");
+  expect(state.conversationMessages.hidden).toBe(messages);
+  expect(state.conversationStreaming.hidden).toBe(true);
+  expect(state.draft).toBe("Unsent attached draft");
 });
 
 it("an appended page keeps newer per-thread metadata and never changes the active composer", () => {

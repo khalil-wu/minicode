@@ -29,6 +29,17 @@ def import_conversation_tree(
     identities = {record.id: "conv_" + uuid4().hex[:12] for record in sources}
     if tree.selected_conversation_id not in identities:
         raise ValueError("导入文件缺少选中的会话。")
+    # Persist attached parents before their children and roll back in reverse.
+    # A standalone imported fork has no attachment to a thread outside its tree.
+    pending = {record.id: record for record in sources}
+    sources = []
+    while pending:
+        ready = [record for record in pending.values() if record.attached_to_thread_id not in pending]
+        if not ready:
+            raise ValueError("导入文件包含循环附着关系。")
+        sources.extend(ready)
+        for record in ready:
+            del pending[record.id]
 
     def remap(value):
         if isinstance(value, list):
@@ -41,6 +52,7 @@ def import_conversation_tree(
                     "conversation_id",
                     "thread_id",
                     "parent_conversation_id",
+                    "attached_to_thread_id",
                     "source_conversation_id",
                 }
                 and isinstance(item, str)
@@ -85,6 +97,7 @@ def import_conversation_tree(
         record.parent_conversation_id = identities.get(
             record.parent_conversation_id, ""
         )
+        record.attached_to_thread_id = identities.get(record.attached_to_thread_id, "")
         record.merged_into_conversation_id = identities.get(
             record.merged_into_conversation_id, ""
         )
@@ -142,7 +155,7 @@ def import_conversation_tree(
                     store.delete_for_conversation(target_id)
                 except Exception as exc:
                     cleanup_errors.append(exc)
-        for target_id in identities.values():
+        for target_id in (record.id for record in reversed(sources)):
             try:
                 repository.delete_conversation(target_id)
             except Exception as exc:

@@ -1588,6 +1588,15 @@ describe("normalizeInboundServerEvent", () => {
     }
   });
 
+  it("accepts an explicit active attached projection outside ordinary discovery and checks its identity", () => {
+    const valid = { type: "conversation.list", conversations: [], active_conversation_id: "child",
+      active_conversation: { id: "child", attached_to_thread_id: "parent" } };
+    expect(normalizeInboundServerEvent(valid)).toMatchObject(valid);
+    for (const active of [null, { id: "child" }, { id: "wrong", attached_to_thread_id: "parent" }]) {
+      expect(normalizeInboundServerEvent({ ...valid, active_conversation: active })).toBeNull();
+    }
+  });
+
   it("accepts safe goal revisions and rejects stale-wire numeric coercions", () => {
     const valid = {
       type: "goal.updated",

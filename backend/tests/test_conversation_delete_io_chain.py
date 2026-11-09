@@ -26,12 +26,12 @@ def test_delete_disk_io_keeps_event_loop_and_new_conversation_owner_available(mo
         loop_thread = threading.get_ident()
         disk_method = repository.get_conversation_summary if blocked_stage == "summary" else repository.delete_conversation
 
-        def blocked_disk(conversation_id):
+        def blocked_disk(conversation_id, **kwargs):
             assert threading.get_ident() != loop_thread
             loop.call_soon_threadsafe(blocked.set)
             if not release.wait(timeout=2):
                 raise AssertionError("The event loop failed to release its blocked disk worker")
-            return disk_method(conversation_id)
+            return disk_method(conversation_id, **kwargs)
 
         monkeypatch.setattr(repository, "get_conversation_summary" if blocked_stage == "summary" else "delete_conversation", blocked_disk)
         session = SimpleNamespace(

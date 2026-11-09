@@ -151,7 +151,7 @@ def list_managed_worktrees(*, repository=None, ws_manager=None) -> list[dict]:
     from backend.workspace.trust import is_workspace_trusted
 
     repository = repository if repository is not None else ConversationRepository()
-    conversations = repository.list_conversations()
+    conversations = repository.list_conversations(include_attached=True)
     loaded = {context.conversation_id for context in ws_manager.execution_contexts.contexts()} if ws_manager is not None else set()
     sessions = ws_manager.resource_sessions() if ws_manager is not None else ()
     runtime = default_runtime_if_initialized()

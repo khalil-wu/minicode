@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import copy
 import hashlib
 import json
@@ -94,6 +94,16 @@ class ConversationStorageCorruptError(RuntimeError):
 
 class ConversationCreationUnavailableError(ValueError):
     """A durable creation command addresses a deleted or occupied lifecycle."""
+
+
+class AttachedThreadsExistError(ValueError):
+    def __init__(self, child_id: str):
+        self.child_id = child_id
+        super().__init__(f"cannot delete thread while attached thread {child_id} exists; delete the attached thread first")
+
+
+class ConversationLifecycleBusyError(RuntimeError):
+    """Another process owns attached creation or deletion for this source."""
 
 
 class ConversationRepository:
@@ -555,6 +565,7 @@ class ConversationRepository:
         branch_kind: str = "clone",
         idempotency_key: str = "",
         activate: bool = False,
+        attach_to_source: bool = False,
     ) -> ConversationRecord | None:
         """Create an independent, replayable copy of a conversation.
 
@@ -563,10 +574,15 @@ class ConversationRepository:
         clone can therefore be resumed safely without allowing either session
         to delete the same worktree.
         """
+        if not isinstance(attach_to_source, bool):
+            raise ValueError("attach_to_source must be boolean")
         if idempotency_key:
             identity = f"clone:{idempotency_key}"
             clone_id = "conv_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-            request = json.dumps({"source": conversation_id, "title": title, "branch_kind": branch_kind, "activate": activate},
+            request = {"source": conversation_id, "title": title, "branch_kind": branch_kind, "activate": activate}
+            if attach_to_source:
+                request["attach_to_source"] = True
+            request = json.dumps(request,
                                  ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             creation_command_id = identity + ":" + hashlib.sha256(request.encode("utf-8")).hexdigest()
             lock_ids = (conversation_id, clone_id)
@@ -574,7 +590,12 @@ class ConversationRepository:
             clone_id = f"conv_{uuid.uuid4().hex[:12]}"
             creation_command_id = ""
             lock_ids = (conversation_id,)
-        with self._store_lock(*lock_ids):
+        with ExitStack() as ownership:
+            clone_lock = None
+            if attach_to_source:
+                ownership.enter_context(self.conversation_lifecycle(conversation_id))
+                clone_lock = ownership.enter_context(self.conversation_lifecycle(clone_id))
+            ownership.enter_context(self._store_lock(*lock_ids))
             source = self._load_record_for_mutation(conversation_id)
             if source is None:
                 return None
@@ -603,6 +624,7 @@ class ConversationRepository:
             clone.read_state = {}
             clone.last_published_turn = ""
             clone.parent_conversation_id = source.id
+            clone.attached_to_thread_id = source.id if attach_to_source else ""
             clone.parent_message_index = len(source.transcript) - 1 if source.transcript else None
             clone.fork_id = f"fork_{uuid.uuid4().hex[:16]}"
             clone.branch_kind = branch_kind
@@ -639,10 +661,13 @@ class ConversationRepository:
                 )
                 self._commit_record(clone)
             except Exception:
+                if attach_to_source:
+                    self.delete_conversation(clone.id, lifecycle_lock=clone_lock)
                 cleanup_plan_file(copied_plan_path)
                 raise
             self._cache_record(clone)
-            self.thread_sections.copy_thread_placement(source.id, clone.id)
+            if not attach_to_source:
+                self.thread_sections.copy_thread_placement(source.id, clone.id)
             return clone
 
     @staticmethod
@@ -736,7 +761,7 @@ class ConversationRepository:
         selected = self.get_conversation(conversation_id)
         if selected is None:
             return None
-        summaries = {item.id: item for item in self.list_conversations()}
+        summaries = {item.id: item for item in self.list_conversations(include_attached=True)}
         root_id = selected.id
         seen: set[str] = set()
         while root_id and root_id not in seen:
@@ -777,7 +802,14 @@ class ConversationRepository:
         }
 
     def save_conversation(self, record: ConversationRecord) -> ConversationRecord:
-        with self._store_lock(record.id):
+        with ExitStack() as ownership:
+            if record.attached_to_thread_id:
+                if record.attached_to_thread_id != record.parent_conversation_id or record.attached_to_thread_id == record.id:
+                    raise ValueError("Attached threads require a distinct fork source")
+                ownership.enter_context(self.conversation_lifecycle(record.attached_to_thread_id))
+                if self.get_conversation_summary(record.attached_to_thread_id) is None:
+                    raise ValueError(f"Attached thread source '{record.attached_to_thread_id}' not found")
+            ownership.enter_context(self._store_lock(record.id))
             record.updated_at = utc_now_iso()
             record.message_count = len(record.transcript)
             self._commit_record(record)
@@ -788,9 +820,11 @@ class ConversationRepository:
         self,
         *,
         conversation_type: ConversationType | None = None,
+        include_attached: bool = False,
     ) -> list[ConversationSummary]:
         _, _, conversations = self.list_conversations_with_revision(
             conversation_type=conversation_type,
+            include_attached=include_attached,
         )
         return conversations
 
@@ -798,9 +832,11 @@ class ConversationRepository:
         self,
         *,
         conversation_type: ConversationType | None = None,
+        include_attached: bool = False,
     ) -> tuple[str, int, list[ConversationSummary]]:
         return self.directory.all_summaries(
-            normalize_conversation_type(conversation_type) if conversation_type is not None else None)
+            normalize_conversation_type(conversation_type) if conversation_type is not None else None,
+            include_attached=include_attached)
 
     def store_instance_id(self) -> str:
         """Read the atomically published identity without waiting on history writers."""
@@ -821,6 +857,7 @@ class ConversationRepository:
         conversations = [
             copy.deepcopy(item)
             for item in (self._summary_index or {}).values()
+            if not item.attached_to_thread_id
         ]
         if conversation_type is not None:
             normalized_type = normalize_conversation_type(conversation_type)
@@ -836,8 +873,22 @@ class ConversationRepository:
         conversations.sort(key=lambda item: (item.created_at, item.id), reverse=True)
         return conversations
 
-    def delete_conversation(self, conversation_id: str) -> bool:
-        with self._store_lock(conversation_id):
+    def ensure_no_attached_threads(self, conversation_id: str) -> None:
+        # SQLite is a derived index. Check canonical metadata even after an
+        # index loss or failed publication; unreadable metadata must propagate.
+        with self._process_lock:
+            for identifier, stamp in self._discover_summary_stamps().items():
+                if identifier == conversation_id:
+                    continue
+                summary = (self._summary_index.get(identifier)
+                    if self._summary_index_stamps.get(identifier) == stamp
+                    else self._load_summary(identifier, disk_stamp=stamp))
+                if summary is not None and summary.attached_to_thread_id == conversation_id:
+                    raise AttachedThreadsExistError(summary.id)
+
+    def delete_conversation(self, conversation_id: str, *, lifecycle_lock: FileLock | None = None) -> bool:
+        with self.conversation_lifecycle(conversation_id, lock=lifecycle_lock), self._store_lock(conversation_id):
+            self.ensure_no_attached_threads(conversation_id)
             safe_id = self._safe_id(conversation_id)
             manifest_path = self._manifest_path_for(conversation_id)
             manifest = self._read_manifest(conversation_id, log_errors=False)
@@ -1507,7 +1558,7 @@ class ConversationRepository:
         inherited memory notes are removed.
         """
 
-        conversation_ids = [item.id for item in self.list_conversations()]
+        conversation_ids = [item.id for item in self.list_conversations(include_attached=True)]
         conversations_reset = 0
         notes_removed = 0
         with self._store_lock(*conversation_ids):
@@ -2768,6 +2819,27 @@ class ConversationRepository:
                 path.unlink()
             except OSError as exc:
                 logger.warning("Failed to remove stale conversation generation %s: %s", path, exc)
+
+    @contextmanager
+    def conversation_lifecycle(self, conversation_id: str, *, lock: FileLock | None = None):
+        """Hold source ownership across async cleanup and native disk workers.
+
+        Each operation gets its own lock object. Only its explicit owner may
+        reenter it; other tasks and repository instances fail immediately.
+        """
+        path = str(self._base_dir / f".{self._safe_id(conversation_id)}.lifecycle.lock")
+        if lock is None:
+            lock = FileLock(path, timeout=0, thread_local=False, preserve_lock_file=os.name == "nt")
+        elif lock.lock_file != path:
+            raise ValueError("Conversation lifecycle lock belongs to another conversation")
+        try:
+            lock.acquire(timeout=0)
+        except FileLockTimeout as exc:
+            raise ConversationLifecycleBusyError(f"Conversation '{conversation_id}' lifecycle is in use") from exc
+        try:
+            yield lock
+        finally:
+            lock.release()
 
     @contextmanager
     def _store_lock(self, *conversation_ids: str):

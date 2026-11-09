@@ -1039,6 +1039,7 @@ def project_public_conversation(
         ("git_branch", 1_024),
         ("worktree_path", 4_096),
         ("parent_conversation_id", 1_024),
+        ("attached_to_thread_id", 1_024),
         ("fork_id", 1_024),
         ("branch_kind", 128),
         ("merged_into_conversation_id", 1_024),

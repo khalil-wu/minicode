@@ -297,6 +297,7 @@ export const toConversationMeta = (conversation: ConversationSummary) => ({
   agentMode: conversation.agent_mode,
   goal: toConversationGoal(conversation.goal),
   parentConversationId: maybeString(conversation.parent_conversation_id),
+  attachedToThreadId: maybeString(conversation.attached_to_thread_id),
   parentMessageIndex: typeof conversation.parent_message_index === "number" ? conversation.parent_message_index : undefined,
   forkId: maybeString(conversation.fork_id),
   branchKind: maybeString(conversation.branch_kind),
@@ -1481,6 +1482,12 @@ export const handleSessionEvent = (
       if (ev.conversations) {
         const incomingConversationMetas = ev.conversations
           .map(toConversationMeta);
+        // The explicit active projection owns hydration even when ordinary
+        // discovery excludes an attached thread from the sidebar inventory.
+        if (ev.active_conversation?.attached_to_thread_id
+          && !incomingConversationMetas.some(item => item.id === ev.active_conversation?.id)) {
+          incomingConversationMetas.push(toConversationMeta(ev.active_conversation));
+        }
         const requestedActiveConversationId = maybeString(ev.active_conversation_id);
         const storeState = useAppStore.getState();
         const incomingInventoryInstanceId = maybeString(ev.inventory_instance_id)?.trim();

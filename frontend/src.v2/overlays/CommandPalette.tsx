@@ -125,7 +125,7 @@ export const CommandPalette = () => {
 
   const trimmedQuery = query.trim().toLowerCase();
   const conversationCandidates = conversations.filter(
-    (c) => !c.archived && c.conversationType !== "side_chat" && c.id !== conversationId,
+    (c) => !c.archived && !c.attachedToThreadId && c.conversationType !== "side_chat" && c.id !== conversationId,
   );
   const metadataMatches = trimmedQuery && globalSearchEnabled
     ? conversationCandidates.filter((c) =>

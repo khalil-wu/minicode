@@ -190,6 +190,7 @@ class ConversationSummary:
     git_isolated: bool = False
     goal: dict[str, Any] = field(default_factory=dict)
     parent_conversation_id: str = ""
+    attached_to_thread_id: str = ""
     parent_message_index: int | None = None
     fork_id: str = ""
     branch_kind: str = ""
@@ -257,6 +258,7 @@ class ConversationSummary:
             git_isolated=bool(payload.get("git_isolated") or False),
             goal=dict(payload.get("goal") or {}),
             parent_conversation_id=str(payload.get("parent_conversation_id") or ""),
+            attached_to_thread_id=str(payload.get("attached_to_thread_id") or ""),
             parent_message_index=(
                 int(payload["parent_message_index"])
                 if payload.get("parent_message_index") is not None
@@ -318,6 +320,7 @@ class ConversationRecord:
     git_isolated: bool = False
     goal: dict[str, Any] = field(default_factory=dict)
     parent_conversation_id: str = ""
+    attached_to_thread_id: str = ""
     parent_message_index: int | None = None
     fork_id: str = ""
     branch_kind: str = ""
@@ -367,6 +370,7 @@ class ConversationRecord:
             git_isolated=self.git_isolated,
             goal=dict(self.goal or {}),
             parent_conversation_id=self.parent_conversation_id,
+            attached_to_thread_id=self.attached_to_thread_id,
             parent_message_index=self.parent_message_index,
             fork_id=self.fork_id,
             branch_kind=self.branch_kind,
@@ -457,6 +461,7 @@ class ConversationRecord:
             git_isolated=bool(payload.get("git_isolated") or False),
             goal=dict(payload.get("goal") or {}),
             parent_conversation_id=str(payload.get("parent_conversation_id") or ""),
+            attached_to_thread_id=str(payload.get("attached_to_thread_id") or ""),
             parent_message_index=(
                 int(payload["parent_message_index"])
                 if payload.get("parent_message_index") is not None

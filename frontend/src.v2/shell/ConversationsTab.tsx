@@ -373,7 +373,7 @@ export const ConversationsTab = memo(function ConversationsTab({
     });
   }, [conversations, conversationId, isStreaming, conversationStreaming, waitingLabelsByConversation, runtimeWaitingLabels]);
 
-  const filtered = useMemo(() => enrichedConversations.filter((conversation) => !conversation.archived), [enrichedConversations]);
+  const filtered = useMemo(() => enrichedConversations.filter((conversation) => !conversation.archived && !conversation.attachedToThreadId), [enrichedConversations]);
   const sidebarProjects = useMemo(() => recentWorkspaces.filter(project => project.pinned !== false
     || sectionProjectKeys.has(workspaceGroupIdentity(project.path))), [recentWorkspaces, sectionProjectKeys]);
 

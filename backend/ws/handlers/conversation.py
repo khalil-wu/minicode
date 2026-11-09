@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
+from backend.conversations.repository import AttachedThreadsExistError, ConversationLifecycleBusyError
 from backend.memory.pollution import pollution_sources_from_transcript
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
@@ -856,13 +857,43 @@ async def handle_conversation_create(
     return True
 
 
+def _clone_conversation_with_resources(session: "WebSocketSession", source_id: str, **options):
+    # The worker owns the complete copy: cancellation must not leave a durable
+    # attached thread before its uploaded resources have been retained.
+    clone = session.conversation_repo.clone_conversation(source_id, **options)
+    if clone is None:
+        return None, None
+    workspace_root = str(clone.execution_cwd or clone.worktree_path or clone.workspace_root or "")
+    try:
+        session.attachment_store.share_for_conversation(source_id, clone.id, workspace_root)
+        session.artifact_store.share_for_conversation(source_id, clone.id, workspace_root)
+        session.diagnostic_store.share_for_conversation(source_id, clone.id)
+    except Exception as exc:
+        cleanup_errors = []
+        for store in (session.attachment_store, session.artifact_store, session.diagnostic_store):
+            try:
+                store.delete_for_conversation(clone.id)
+            except Exception as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        session.conversation_repo.delete_conversation(clone.id)
+        if cleanup_errors:
+            return None, f"{exc}; resource rollback errors: {'; '.join(str(error) for error in cleanup_errors)}"
+        return None, str(exc)
+    return clone, None
+
+
 async def handle_conversation_clone(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     """Clone a persisted session without sharing mutable state or worktree ownership."""
     from backend.services.conversation_payload_service import build_conversation_switched_payload
     from backend.ws.client_command_log import _clean_command_id
 
+    attach_to_source = data.get("attach_to_source", False)
+    if not isinstance(attach_to_source, bool):
+        raise ValueError("attach_to_source must be boolean")
+    if attach_to_source and (data.get("ephemeral") or data.get("defer_goal_continuation")):
+        raise ValueError("attach_to_source cannot be combined with ephemeral or defer_goal_continuation")
     source_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
-    source = session.conversation_repo.get_conversation(source_id) if source_id else None
+    source = await to_thread_cancel_safe(session.conversation_repo.get_conversation_summary, source_id) if source_id else None
     if source is None:
         await emit_conversation_not_found(session, source_id)
         return True
@@ -878,38 +909,23 @@ async def handle_conversation_clone(session: "WebSocketSession", data: dict[str,
     activation_requested = bool(data.get("activate"))
     command_id = _clean_command_id(data.get("client_command_id"))
     idempotency_key = f"{session.session_id}:{command_id}" if command_id else ""
-    clone = session.conversation_repo.clone_conversation(source.id, title=title,
-        idempotency_key=idempotency_key, activate=activation_requested)
-    if clone is None:
-        await emit_conversation_not_found(session, source.id)
-        return True
-    clone_workspace_root = str(clone.execution_cwd or clone.worktree_path or clone.workspace_root or "")
     try:
-        session.attachment_store.share_for_conversation(
-            source.id,
-            clone.id,
-            clone_workspace_root,
-        )
-        session.artifact_store.share_for_conversation(
-            source.id,
-            clone.id,
-            clone_workspace_root,
-        )
-        session.diagnostic_store.share_for_conversation(source.id, clone.id)
-    except Exception as exc:
-        with suppress(Exception):
-            session.attachment_store.delete_for_conversation(clone.id)
-        with suppress(Exception):
-            session.artifact_store.delete_for_conversation(clone.id)
-        with suppress(Exception):
-            session.diagnostic_store.delete_for_conversation(clone.id)
-        session.conversation_repo.delete_conversation(clone.id)
+        clone, resource_error = await to_thread_cancel_safe(_clone_conversation_with_resources, session, source.id, title=title,
+            idempotency_key=idempotency_key, activate=activation_requested, attach_to_source=attach_to_source)
+    except ConversationLifecycleBusyError as exc:
+        await session.emit_command_result("conversation.clone", str(exc), level="error",
+            data={"conversation_id": source.id, "reason": "lifecycle_in_use", "retryable": True})
+        return True
+    if resource_error is not None:
         await session.emit_command_result(
             "conversation.clone",
-            f"The conversation copy could not retain its attachments: {exc}",
+            f"The conversation copy could not retain its attachments: {resource_error}",
             level="error",
             data={"conversation_id": source.id, "reason": "attachment_clone_failed"},
         )
+        return True
+    if clone is None:
+        await emit_conversation_not_found(session, source.id)
         return True
     activated = False
     if activation_requested:
@@ -949,6 +965,7 @@ async def handle_conversation_clone(session: "WebSocketSession", data: dict[str,
             "conversation_id": clone.id,
             "source_conversation_id": source.id,
             "branch_kind": clone.branch_kind,
+            "attached_to_thread_id": clone.attached_to_thread_id,
             "activated": activated,
             "projection_errors": projection_errors,
         },
@@ -1708,6 +1725,25 @@ def _conversation_delete_task_done(task: asyncio.Task[Any]) -> None:
 
 
 async def _handle_conversation_delete_fenced(session: "WebSocketSession", request: "ConversationDeleteRequest") -> bool:
+    try:
+        # The nonblocking native lock spans every await below. A separate
+        # instance/process cannot attach a child after the pre-stop check.
+        with session.conversation_repo.conversation_lifecycle(request.conversation_id) as lifecycle_lock:
+            await to_thread_cancel_safe(session.conversation_repo.ensure_no_attached_threads, request.conversation_id)
+            return await _handle_conversation_delete_owned(session, request, lifecycle_lock=lifecycle_lock)
+    except AttachedThreadsExistError as exc:
+        await session.emit_command_result("conversation.delete", str(exc), level="error",
+            data={"conversation_id": request.conversation_id, "deleted": False,
+                "reason": "attached_threads_exist", "attached_thread_id": exc.child_id})
+        return True
+    except ConversationLifecycleBusyError as exc:
+        await session.emit_command_result("conversation.delete", str(exc), level="error",
+            data={"conversation_id": request.conversation_id, "deleted": False,
+                "reason": "lifecycle_in_use", "retryable": True})
+        return True
+
+
+async def _handle_conversation_delete_owned(session: "WebSocketSession", request: "ConversationDeleteRequest", *, lifecycle_lock) -> bool:
     # Deletion owns persisted metadata, not a readable model transcript.
     target = await to_thread_cancel_safe(
         session.conversation_repo.get_conversation_summary, request.conversation_id,
@@ -1777,6 +1813,7 @@ async def _handle_conversation_delete_fenced(session: "WebSocketSession", reques
             request=request,
             target=target,
             owner_sessions=owner_sessions,
+            lifecycle_lock=lifecycle_lock,
         )
     finally:
         _release_conversation_mutation(mutation_claim)
@@ -1818,6 +1855,7 @@ async def _handle_conversation_delete_after_run_fence(
     request: Any,
     target: Any,
     owner_sessions: list["WebSocketSession"],
+    lifecycle_lock=None,
 ) -> bool:
     from backend.services.conversation_payload_service import (
         build_worktree_cleanup_outcome,
@@ -1941,6 +1979,7 @@ async def _handle_conversation_delete_after_run_fence(
             return True
     deleted = await to_thread_cancel_safe(
         session.conversation_repo.delete_conversation, request.conversation_id,
+        lifecycle_lock=lifecycle_lock,
     )
     if not deleted:
         await emit_conversation_not_found(session, request.conversation_id)
@@ -3385,7 +3424,7 @@ def _schedule_long_term_memory_forgetting(
 
 def _memory_reset_active_conversation_ids(session: "WebSocketSession") -> list[str]:
     active: set[str] = set()
-    for summary in session.conversation_repo.list_conversations():
+    for summary in session.conversation_repo.list_conversations(include_attached=True):
         if _conversation_has_active_run(session, summary.id):
             active.add(summary.id)
 

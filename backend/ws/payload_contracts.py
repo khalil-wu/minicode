@@ -193,6 +193,7 @@ def _conversation_summary(value: Any, field: str) -> dict[str, Any]:
         ("worktree_path", 32_768),
         ("summary", 65_536),
         ("parent_conversation_id", MAX_ID_CHARS),
+        ("attached_to_thread_id", MAX_ID_CHARS),
         ("fork_id", MAX_ID_CHARS),
         ("branch_kind", 256),
         ("merged_into_conversation_id", MAX_ID_CHARS),
@@ -534,15 +535,15 @@ def validate_session_projection_payload(payload: dict[str, Any]) -> None:
                 raise ValueError("conversation.list pinned order must contain unique known conversations")
             if payload["pinned_sort_mode"] not in {"manual", "updated_at"}:
                 raise ValueError("conversation.list pinned sort mode is invalid")
-        if active_id is not None:
-            _text(active_id, "active_conversation_id", MAX_ID_CHARS, required=True)
-            if str(active_id).strip() not in ids:
-                raise ValueError("conversation.list active conversation is not present in conversations")
         active = payload.get("active_conversation")
         if active is not None:
             record = _conversation_record(active, "active_conversation")
             if active_id is not None and str(record["id"]).strip() != str(active_id).strip():
                 raise ValueError("conversation.list active_conversation does not match active_conversation_id")
+        if active_id is not None:
+            _text(active_id, "active_conversation_id", MAX_ID_CHARS, required=True)
+            if str(active_id).strip() not in ids and not (active and active.get("attached_to_thread_id")):
+                raise ValueError("conversation.list active conversation is not present in conversations")
         if "conversation_id" in payload and payload["conversation_id"] is not None:
             _optional_text(payload["conversation_id"], "conversation_id", MAX_ID_CHARS)
         if payload.get("session") is not None:
