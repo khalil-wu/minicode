@@ -297,7 +297,9 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 :is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover {
   min-height: var(--mc-sidebar-row-height) !important;
   border: 1px solid transparent !important;
-  border-radius: 10px !important;
+  border-radius: var(--radius-session, 12px) !important;
+  transition: background-color var(--duration-micro) var(--easing-standard),
+              border-color var(--duration-micro) var(--easing-standard) !important;
 }
 
 :is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover:hover {
@@ -472,13 +474,15 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 .user-cell-bubble {
   padding: 10px 16px !important;
   border: 0 !important;
-  border-radius: 22px !important;
+  border-radius: var(--radius-composer, 20px) !important;
   background: var(--message-user-bg) !important;
   color: var(--text-primary) !important;
   box-shadow: none !important;
+  transition: background-color var(--duration-micro) var(--easing-standard) !important;
 }
 
 .user-cell-bubble:hover {
+  background: color-mix(in oklab, var(--text-primary) 7%, transparent) !important;
   box-shadow: none !important;
 }
 
@@ -521,24 +525,32 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   gap: 5px;
   padding: 1px 2px !important;
   border: 0 !important;
-  border-radius: 0 !important;
+  border-radius: var(--radius-sm, 8px) !important;
   background: transparent !important;
   color: var(--text-muted) !important;
   font-size: var(--mc-font-body) !important;
   font-weight: var(--fw-regular) !important;
   line-height: 1.35;
   box-shadow: none !important;
+  transition: color var(--duration-micro) var(--easing-standard),
+              background-color var(--duration-micro) var(--easing-standard) !important;
 }
 
 #root .agent-loop-process-summary:hover,
 #root .chat-turn-process-summary:hover {
-  background: transparent !important;
+  background: var(--surface-hover) !important;
   color: var(--text-primary) !important;
 }
 
 #root .agent-loop-process-summary :where(svg, .agent-loop-process-summary-icon) {
   width: 15px;
   height: 15px;
+  transition: transform var(--anim-collapse, 350ms) var(--ease-collapse) !important;
+}
+
+/* 展开状态下的箭头旋转 */
+#root .agent-loop-process-summary[aria-expanded="true"] :where(svg, .agent-loop-process-summary-icon) {
+  transform: rotate(180deg);
 }
 
 .agent-loop-process code,
@@ -560,13 +572,15 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   margin-bottom: 16px !important;
   padding: 14px 8px 8px !important;
   border: 0 !important;
-  border-radius: 22px !important;
+  border-radius: var(--radius-composer, 20px) !important;
   background: var(--surface-base) !important;
-  box-shadow: 0 0 0 1px var(--mc-composer-border, var(--border-subtle)), 0 2px 8px #0000000a, 0 4px 80px 8px #00000006 !important;
+  box-shadow: 0 0 0 1px var(--mc-composer-border, var(--border-subtle)), var(--shadow-composer) !important;
+  transition: box-shadow var(--duration-fast) var(--easing-standard), border-color var(--duration-fast) var(--easing-standard) !important;
 }
 
 .composer-container:focus-within {
   --mc-composer-border: var(--border-soft);
+  box-shadow: 0 0 0 1px var(--border-soft), 0 2px 12px oklch(0 0 0 / 0.08), 0 8px 32px oklch(0 0 0 / 0.12) !important;
 }
 
 .composer-input-region {
@@ -815,16 +829,24 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 .context-menu-surface {
   min-width: min(180px, calc(100vw - 16px));
   border: 0;
-  border-radius: 16px;
+  border-radius: var(--radius-menu, 16px);
   background: color-mix(in srgb, var(--menu-surface) 90%, transparent);
-  box-shadow: 0 0 0 .5px var(--border-subtle), var(--menu-shadow);
-  backdrop-filter: blur(8px);
+  box-shadow: 0 0 0 .5px var(--border-subtle), var(--shadow-menu);
+  backdrop-filter: blur(12px);
+  animation: scale-in var(--anim-scale-in, 200ms) var(--ease-scale-in) both;
+  transform-origin: var(--mc-menu-origin, top);
 }
+
+.context-menu-surface[data-state="closed"] {
+  animation: scale-out var(--anim-scale-out, 150ms) var(--ease-scale-out) both;
+}
+
 .context-menu-surface .mc-menu-item {
-  border-radius: 12px;
+  border-radius: var(--radius-md, 12px);
   font-family: var(--font-ui);
   letter-spacing: 0;
   outline-style: none;
+  transition: background-color var(--duration-micro) var(--easing-standard);
 }
 .context-menu-surface .mc-menu-leading-icon { color: inherit; opacity: .75; }
 .context-menu-surface .mc-menu-content { display: flex; flex: 1; min-width: 0; align-items: center; gap: var(--mc-menu-content-gap, 6px); }
@@ -833,21 +855,23 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   bottom: calc(100% + 4px);
   padding: 4px;
   border: 1px solid var(--border-subtle);
-  border-radius: 16px;
+  border-radius: var(--radius-menu, 16px);
   background: var(--menu-surface);
-  box-shadow: none;
-  animation: mc-dropdown-enter var(--duration-fast) var(--easing-enter-snappy) both;
+  box-shadow: var(--shadow-menu);
+  animation: scale-in var(--anim-scale-in, 200ms) var(--ease-scale-in) both;
   transform-origin: bottom center;
 }
+
 .composer-add-menu > button {
   min-height: 0;
   gap: 6px;
   padding: 5px 8px;
-  border-radius: 12px;
+  border-radius: var(--radius-md, 12px);
   outline-style: none;
   font-family: var(--font-ui);
   font-size: var(--text-chrome);
   line-height: calc(1.25 / .875);
+  transition: background-color var(--duration-micro) var(--easing-standard);
 }
 .composer-add-menu > button[data-highlighted="true"] { background: var(--surface-hover); }
 @supports (corner-shape: superellipse(1.5)) {
