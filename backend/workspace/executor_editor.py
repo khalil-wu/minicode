@@ -83,13 +83,20 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         return path
 
     async def allowed(self, value, *, write=False, inventory=False):
+        path, _metadata = await self._allowed_path(value, write=write, inventory=inventory)
+        return path
+
+    async def _allowed_path(self, value, *, write=False, inventory=False):
         path = self.resolve_workspace_path(value)
         access = self.scope.resolve_access(path.uri)
         if not (access.can_write if write else access.can_read):
             raise HTTPException(403, f"Executor {'write' if write else 'read'} permission denied: {path.uri}")
         lexical = path
-        while await self.metadata(path) is None and path != self.cwd:
+        metadata = await self.metadata(path)
+        existing = metadata
+        while existing is None and path != self.cwd:
             path = path.parent
+            existing = await self.metadata(path)
         canonical = self.resolve(await self.filesystem.canonicalize(path.uri, sandbox=self.sandbox))
         if path != lexical:
             canonical = canonical.joinpath(lexical.relative_to(path).as_posix())
@@ -100,7 +107,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         if not inventory and not registered and (lexical != launch or canonical != launch):
             if _is_dangerous_path(lexical.relative_to(self.cwd)) or _is_dangerous_path(canonical.relative_to(self.cwd)):
                 raise HTTPException(403, "Refusing to access protected path.")
-        return lexical
+        return lexical, metadata
 
     @staticmethod
     def visible(path):
@@ -154,8 +161,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             has_children=has_children, **self.identity(child))
 
     async def read_file(self, value):
-        path = await self.allowed(value)
-        info = await self.metadata(path)
+        path, info = await self._allowed_path(value)
         if info is None:
             raise HTTPException(404, f"Path not found: {value}")
         if not info["isFile"]:
