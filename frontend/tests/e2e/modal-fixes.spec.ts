@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test.describe("Modal routing and layering", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
-    await expect(page.locator("textarea").first()).toBeVisible();
+    await expect(page.locator('.composer-input-region [data-composer-input]').first()).toBeVisible();
   });
 
   test("opening Settings closes the Command palette", async ({ page }) => {
@@ -62,7 +62,7 @@ test.describe("Shell resilience", () => {
       window.dispatchEvent(new CustomEvent("composer-error", { detail: new Error("Test error") }));
     });
 
-    await expect(page.locator("textarea").first()).toBeVisible();
+    await expect(page.locator('.composer-input-region [data-composer-input]').first()).toBeVisible();
   });
 
   test("an invalid URL event does not crash the workbench", async ({ page }) => {
@@ -73,6 +73,6 @@ test.describe("Shell resilience", () => {
     });
 
     await expect(page.locator("body")).toBeVisible();
-    await expect(page.locator("textarea").first()).toBeVisible();
+    await expect(page.locator('.composer-input-region [data-composer-input]').first()).toBeVisible();
   });
 });

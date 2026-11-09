@@ -68,15 +68,19 @@ test("Source Markdown review targets, actual file read, model comments and cold 
   });
   await new Promise<void>(resolve => provider.listen(0, "127.0.0.1", resolve));
   const providerUrl = `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`;
-  const config = JSON.parse(await readFile(path.join(root, "output/playwright/codex-control-audit-20261013/model-control-provider-config.json"), "utf8"));
-  config.llm.custom.base_url = providerUrl; config.llm.custom.wire_api = "chat";
-  config.agent = { code_mode_only: true }; config.memory = { enabled: false };
+  const config = { agent: { code_mode_only: true }, memory: { enabled: false }, features: { memories: false },
+    llm: { provider: "custom", custom: { base_url: providerUrl, api_key: "fixture-model-control", wire_api: "chat",
+      model: "audit-model-a", available_models: ["audit-model-a"] } } };
   await writeFile(path.join(profile, "settings.json"), JSON.stringify(config));
+  const entry = path.join(profile, "review-entry.cjs");
+  await writeFile(entry, `const {app,BrowserWindow}=require('electron'); app.commandLine.appendSwitch('disable-renderer-backgrounding');
+    for (const method of ['show','showInactive','focus']) BrowserWindow.prototype[method]=function(){};
+    require(${JSON.stringify(path.join(root, "desktop/main.js"))});`);
   const { ELECTRON_RUN_AS_NODE: _node, ...environment } = process.env;
   let app: ElectronApplication | undefined;
   const launch = async () => {
     app = await _electron.launch({ executablePath: createRequire(path.join(root, "desktop/package.json"))("electron"),
-      args: [path.join(root, "output/playwright/codex-control-audit-20261013/offscreen-desktop-entry.cjs")], cwd: path.join(root, "desktop"),
+      args: [entry], cwd: path.join(root, "desktop"),
       env: { ...environment, MINICODE_USER_DATA_DIR: profile, MINICODE_BACKEND_PORT: String(await freePort()), MINICODE_FRONTEND_URL: "",
         MINICODE_DISABLE_HARDWARE_ACCELERATION: "1", MINICODE_SYSTEM_CONFIG_FILE: path.join(profile, "absent-system.toml"),
         MINICODE_REQUIREMENTS_FILE: path.join(profile, "absent-requirements.toml"), MINICODE_MANAGED_SETTINGS_DIR: path.join(profile, "managed"),
@@ -99,7 +103,7 @@ test("Source Markdown review targets, actual file read, model comments and cold 
     const owner = await page.evaluate(() => (window as any).__zustandStore.getState().conversationId);
     expect(await page.evaluate(() => (window as any).__zustandStore.getState().setAgentMode("plan"))).toBe(true);
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().slashCommands.some((item: Fact) => item.name === "review" && item.source === "builtin"))).toBe(true);
-    const input = page.locator(".composer-input-region textarea").first(); await input.fill("/review"); await input.press("Enter");
+    const input = page.locator('.composer-input-region [contenteditable="true"]').first(); await input.fill("/review"); await input.press("Enter");
     await expect(page.locator('[data-review-target="uncommitted"]')).toBeVisible();
     await capture(app!, page, "01-source-review-targets.png");
     await page.locator('[data-review-target="uncommitted"]').click();
@@ -109,7 +113,7 @@ test("Source Markdown review targets, actual file read, model comments and cold 
     await expect(page.locator(".message-list-content")).not.toContainText("Code review guidelines:");
     await expect(page.locator(".message-list-content")).not.toContainText("::code-comment");
     expect(await page.evaluate(() => (window as any).__zustandStore.getState().agentMode)).toBe("plan");
-    const prepared = wire.find(event => event.type === "command.result" && event.command === "review.prepare" && event.data?.scope?.mode === "uncommitted");
+    const prepared = wire.find(event => event.type === "command.result" && event.command === "review.create" && event.data?.scope?.mode === "uncommitted");
     expect(prepared).toBeTruthy(); expect(prepared.data.diff).toContain("untracked-note.txt");
     const submitted = wire.find(event => event.outbound && event.type === "user_message" && event.code_review?.mode === "uncommitted");
     expect(submitted.content).toContain("## Code review guidelines:"); expect(submitted.display_content).toBe("请检查我未提交的更改");
@@ -129,10 +133,12 @@ test("Source Markdown review targets, actual file read, model comments and cold 
         controlledModelOnly: true, profile, workspace, baseline, checks, fonts, native, errors }, null, 2));
       return;
     }
-    await input.fill("/review"); await input.press("Enter");
+    await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().isStreaming)).toBe(false);
+    await input.fill("/review");
+    await page.locator('[role="option"][data-command="review"]').click();
     await expect(page.locator('[data-review-branch="main"]')).toBeVisible(); await page.locator('[data-review-branch="main"]').click();
     await expect.poll(() => requests.some(item => item.route === "base" && item.index === 1), { timeout: 30_000 }).toBe(true);
-    const branchPrepared = wire.find(event => event.type === "command.result" && event.command === "review.prepare" && event.data?.scope?.mode === "base-branch");
+    const branchPrepared = wire.find(event => event.type === "command.result" && event.command === "review.create" && event.data?.scope?.mode === "base-branch");
     expect(branchPrepared.data.scope.mergeBaseSha).toBe(baseline); expect(branchPrepared.data.prompt).toContain(`git diff ${baseline}`);
     expect(await page.locator('[data-code-review-comment]').count()).toBe(1);
     checks.push({ scenario: "real main merge-base in submitted Source target prompt, one accumulated deduplicated finding, unchanged disk contents", passed: true });
@@ -140,10 +146,8 @@ test("Source Markdown review targets, actual file read, model comments and cold 
     await input.fill("UNSENT_REVIEW_DRAFT"); await app!.close(); app = undefined;
     page = await launch();
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().conversationId), { timeout: 30_000 }).toBe(owner);
-    await expect(page.locator(".composer-input-region textarea").first()).toHaveValue("UNSENT_REVIEW_DRAFT");
-    await page.getByRole("button", { name: "打开右侧栏", exact: true }).click();
-    await page.getByRole("button", { name: "添加面板", exact: true }).click();
-    await page.getByRole("menuitem", { name: "变更", exact: true }).click();
+    await expect(page.locator('.composer-input-region [contenteditable="true"]').first()).toHaveText("UNSENT_REVIEW_DRAFT");
+    await page.evaluate(() => (window as any).__zustandStore.getState().setRightStackTab("diff"));
     await expect(page.locator('[data-code-review-comment][data-code-review-line="2"]').first()).toContainText("Keep addition semantics");
     await expect(page.locator(".message-list-content")).not.toContainText("Code review guidelines:");
     expect(await readFile(path.join(workspace, "calculate.py"), "utf8")).toBe(workingContent);

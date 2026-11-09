@@ -165,6 +165,11 @@ test("summary and right pane coexist across real ResizeObserver thresholds witho
   await expect(input).toHaveText("Keep this unsent summary draft");
   for (const [width, mode] of [[2200, "gutter"], [1600, "shift"], [1440, "overlay"]] as const) {
     await page.setViewportSize({ width, height: 1000 });
+    if (mode === "overlay") {
+      await expect(summary).toHaveCount(0);
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await toggle.click();
+    }
     await expect(summary).toHaveAttribute("data-display-mode", mode);
     await expect(summary).toHaveAttribute("data-surface", mode === "overlay" ? "popover" : "inline");
     await expect(toggle).toHaveAttribute("aria-pressed", "true");

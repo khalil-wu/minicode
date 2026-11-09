@@ -23,6 +23,7 @@ export default defineConfig({
   timeout: 30000,
   retries: 0,
   use: {
+    locale: "zh-CN",
     baseURL: `http://${host}:${port}`,
     headless: true,
     screenshot: "only-on-failure",
