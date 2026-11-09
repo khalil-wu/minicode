@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import mimetypes
 import os
 import re
 import signal
@@ -27,7 +26,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from fastapi.staticfiles import StaticFiles
+from backend.api.static_files import WebAssetFiles
 from starlette.websockets import WebSocketState
 
 from backend.agent.message import AgentEvent
@@ -404,15 +403,13 @@ app.include_router(create_workspace_router())
 
 # Prefer Vite build artifacts (dist/), proxy to Vite dev server in development
 _public_dir = FRONTEND_DIST if IS_PRODUCTION else PUBLIC_ASSET_ROOT
-mimetypes.add_type("image/svg+xml", ".svg")
-mimetypes.add_type("image/webp", ".webp")
-app.mount("/apps", StaticFiles(directory=str(_public_dir / "apps")), name="app-icons")
-app.mount("/pets", StaticFiles(directory=str(_public_dir / "pets")), name="pet-assets")
+app.mount("/apps", WebAssetFiles(directory=str(_public_dir / "apps")), name="app-icons")
+app.mount("/pets", WebAssetFiles(directory=str(_public_dir / "pets")), name="pet-assets")
 if IS_PRODUCTION:
     # Production: serve static assets from dist/
-    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
+    app.mount("/assets", WebAssetFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
     if (FRONTEND_DIST / "fonts").is_dir():
-        app.mount("/fonts", StaticFiles(directory=str(FRONTEND_DIST / "fonts")), name="fonts")
+        app.mount("/fonts", WebAssetFiles(directory=str(FRONTEND_DIST / "fonts")), name="fonts")
     logger.info("Frontend: production mode, serving dist/")
 else:
     # Development: proxy frontend resource requests to Vite dev server
