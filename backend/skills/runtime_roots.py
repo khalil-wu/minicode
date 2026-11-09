@@ -69,8 +69,7 @@ class RuntimeSkillRoots:
 
         async def notify():
             while self._dirty:
-                delay = self._next_allowed - self._loop.time()
-                if delay > 0:
+                while (delay := self._next_allowed - self._loop.time()) > 0:
                     await asyncio.sleep(delay)
                 self._dirty = False
                 self.revision += 1

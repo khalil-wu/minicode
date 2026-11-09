@@ -19,16 +19,19 @@ def _controlled_cooldown(monkeypatch):
     waits = asyncio.Queue()
     release = asyncio.Event()
     finished = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    clock = [loop.time()]
 
     async def sleep(delay):
         waits.put_nowait(delay)
         try:
             await release.wait()
+            clock[0] += delay
         finally:
             finished.set()
 
     monkeypatch.setattr(runtime_roots, "asyncio", SimpleNamespace(
-        get_running_loop=asyncio.get_running_loop, create_task=asyncio.create_task,
+        get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0], call_soon_threadsafe=loop.call_soon_threadsafe), create_task=asyncio.create_task,
         sleep=sleep, to_thread=asyncio.to_thread, CancelledError=asyncio.CancelledError,
     ))
     return waits, release, finished
@@ -243,6 +246,34 @@ async def test_real_interval_limits_a_burst_and_an_idle_event_does_not_restart_t
         roots._changed()
         await asyncio.wait_for(notices.get(), 1)
         assert roots.revision == 3
+    finally:
+        await roots.aclose()
+
+
+@pytest.mark.asyncio
+async def test_early_timer_wake_waits_for_the_actual_throttle_deadline(monkeypatch):
+    clock = [100.0]
+    waits, notices = [], []
+    roots = RuntimeSkillRoots(lambda: record_notice(), throttle_seconds=.05)
+    roots._loop = SimpleNamespace(time=lambda: clock[0])
+
+    async def record_notice():
+        notices.append(clock[0])
+
+    async def early_sleep(delay):
+        waits.append(delay)
+        clock[0] += delay / 2 if len(waits) == 1 else delay
+
+    monkeypatch.setattr(runtime_roots, "asyncio", SimpleNamespace(
+        create_task=asyncio.create_task, sleep=early_sleep, CancelledError=asyncio.CancelledError,
+    ))
+    try:
+        roots._changed()
+        await roots._pending
+        roots._changed()
+        await roots._pending
+        assert waits == pytest.approx([.05, .025])
+        assert notices == pytest.approx([100.0, 100.05])
     finally:
         await roots.aclose()
 
