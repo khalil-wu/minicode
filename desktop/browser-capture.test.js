@@ -23,6 +23,7 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
     let receiveNativePost;
     const nativePost = new Promise(resolve => { receiveNativePost = resolve; });
     let receiveNativeBackground;
+    const nativeBackgroundRequests = [];
     const nativeBackground = new Promise(resolve => { receiveNativeBackground = resolve; });
     const streamBytes = Buffer.alloc(128 * 1024, "original resumable download;");
     const streamResponses = new Set();
@@ -52,7 +53,9 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       if (request.url === "/native-background") {
         response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         response.end("<!doctype html><h1>Native background destination</h1>");
-        receiveNativeBackground({ method: request.method, referrer: request.headers.referer });
+        const observation = { method: request.method, referrer: request.headers.referer };
+        nativeBackgroundRequests.push(observation);
+        receiveNativeBackground(observation);
         return;
       }
       if (request.url === "/native-post") {
@@ -217,11 +220,8 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       await manager.executeControlCommand({ action: "screenshot", target_id: target.id,
         conversation_id: "capture-owner", window_instance_id: "fixture-window" });
       const backgroundCreated = new Promise(resolve => app.once("web-contents-created", (_event, contents) => {
-        const loadCalls = [];
-        const loadURL = contents.loadURL.bind(contents);
-        contents.loadURL = (destination, options) => { loadCalls.push({ destination, options }); return loadURL(destination, options); };
         const loaded = new Promise(done => contents.once("did-finish-load", done));
-        resolve({ contents, loadCalls, loaded });
+        resolve({ contents, loaded });
       }));
       process.stdout.write("[capture] middle-clicking the original page link for native OpenURLFromTab\n");
       window.focus();
@@ -233,8 +233,9 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       const [backgroundRequest, background] = await Promise.all([nativeBackground, backgroundCreated]);
       await background.loaded;
       assert.deepEqual(backgroundRequest, { method: "GET", referrer: url });
-      assert.equal(background.loadCalls.length, 1); assert.equal(background.loadCalls[0].destination, backgroundUrl);
-      assert.equal(background.loadCalls[0].options.httpReferrer.url, url);
+      // Chromium can navigate its original WebContents directly. Count real
+      // requests, whether createWindow adopts it or explicitly loads a view.
+      assert.deepEqual(nativeBackgroundRequests, [{ method: "GET", referrer: url }]);
       assert.equal(await background.contents.executeJavaScript("window.opener === null"), true);
       assert.equal(background.contents.getURL(), backgroundUrl);
       const backgroundTarget = manager.listTargets("capture-owner", "fixture-window").find(item => item.url === backgroundUrl);

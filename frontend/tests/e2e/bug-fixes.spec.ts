@@ -1679,7 +1679,7 @@ test.describe("Conversation session cache", () => {
 
   test("creating a new session does not erase the previous session cache", async ({ page }) => {
     const previousId = "conv-before-new";
-    await page.evaluate((id) => {
+    await page.evaluate(async (id) => {
       const store = (window as any).__zustandStore;
       const message = {
         id: "before-new-message",
@@ -1698,8 +1698,18 @@ test.describe("Conversation session cache", () => {
         isStreaming: false,
         isConnected: true,
       });
-      store.getState().createConversation();
-      store.getState().switchConversation(id);
+      const creating = store.getState().createConversation();
+      const create = (window as any).__mockWsMessages.map((raw: string) => JSON.parse(raw))
+        .findLast((command: any) => command.type === "conversation.create");
+      (window as any).__mockWs._receive({ type: "conversation.switched", conversation_id: create.conversation_id,
+        conversation: { id: create.conversation_id, title: "New chat", messages: [] }, is_hydrating: false });
+      (window as any).__mockWs._receive({ type: "command.result", command: "conversation.create", level: "success",
+        message: "", client_command_id: create.client_command_id, conversation_id: create.conversation_id,
+        data: { conversation_id: create.conversation_id } });
+      await creating;
+      store.getState().requestConversationSwitch(id);
+      (window as any).__mockWs._receive({ type: "conversation.switched", conversation_id: id,
+        conversation: { id, title: "Before", messages: store.getState().conversationMessages[id] }, is_hydrating: false });
     }, previousId);
 
     await expect(page.getByText("Keep this message after new session")).toBeVisible();

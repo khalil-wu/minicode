@@ -125,7 +125,13 @@ async def test_real_input_and_cancel_keep_the_original_captured_process(executor
     actual = host.background._processes[command_id]
     ready = await host.background.wait(command_id, conversation_id="source-owner", wait_ms=10000, cursor=0)
     assert "EXECUTOR_READY" in host.background.get_output(command_id, conversation_id="source-owner")
-    assert await host.background.write_stdin(command_id, "original\n", conversation_id="source-owner", context=host.context, wait_ms=2000, cursor=ready.output_bytes) == 9
+    async with asyncio.timeout(2):
+        assert await host.background.write_stdin(command_id, "original\n", conversation_id="source-owner", context=host.context, wait_ms=2000, cursor=ready.output_bytes) == 9
+        # Source may deliver the ready marker's CRLF after its text. A wait
+        # returns on any new bytes; that chunk need not be the input's echo.
+        while "EXECUTOR_ECHO:original" not in host.background.get_output(command_id, conversation_id="source-owner"):
+            cursor = host.background.get_status(command_id, conversation_id="source-owner").output_bytes
+            await host.background.wait(command_id, conversation_id="source-owner", wait_ms=2000, cursor=cursor)
     assert "EXECUTOR_ECHO:original" in host.background.get_output(command_id, conversation_id="source-owner")
     assert host.background._processes[command_id] is actual
     assert await host.background.cancel(command_id, conversation_id="source-owner")
