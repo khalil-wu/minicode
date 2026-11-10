@@ -125,7 +125,9 @@ class WorktreeManager:
     def _run_git(self, *args: Any, index_file: Path | None = None, **kwargs: Any) -> Any:
         if self._git_runner is not None:
             return self._git_runner(*args, index_file=index_file, **kwargs)
-        return subprocess.run(*args, **kwargs)
+        # Desktop stdin belongs to the parent-lifetime watcher. Git control
+        # commands have no interactive input and must not inherit that pipe.
+        return subprocess.run(*args, stdin=subprocess.DEVNULL, **kwargs)
 
     def list_worktrees(self) -> list[WorktreeInfo]:
         """

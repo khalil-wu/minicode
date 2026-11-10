@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import subprocess
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -142,6 +144,71 @@ async def test_explicit_local_branch_and_stash_preserve_staging_and_untracked_fi
     assert not git(s.repo, "status", "--porcelain")
     assert git(worktree, "status", "--porcelain").splitlines() == ["M  tracked.txt", "?? untracked.txt"]
     assert (worktree / "untracked.txt").read_text(encoding="utf-8") == "local draft\n"
+
+
+@pytest.mark.asyncio
+async def test_dirty_handoff_git_discovery_keeps_host_responsive_and_claim_until_cleanup(scenario, monkeypatch):
+    from backend.workspace.worktree import WorktreeManager
+
+    s = scenario
+    (s.repo / "tracked.txt").write_text("kept draft\n", encoding="utf-8")
+    preflight = await s.preflight("worktree", dirty_action="stash")
+    assert preflight["allowed"]
+    original = WorktreeManager.__init__
+    host_thread = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+    workers = []
+
+    def initialize(self, *args, **kwargs):
+        workers.append(threading.get_ident())
+        entered.set()
+        assert workers[-1] != host_thread
+        assert release.wait(5)
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(WorktreeManager, "__init__", initialize)
+    task = asyncio.create_task(s.execute(preflight))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        await asyncio.sleep(0)
+        assert not task.done()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        bound = s.repository.get_conversation(s.conversation.id)
+        assert bound.git_isolated
+        assert (Path(bound.worktree_path) / "tracked.txt").read_text(encoding="utf-8") == "kept draft\n"
+        assert workers and host_thread not in workers
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_dirty_handoff_git_children_never_inherit_the_desktop_lifetime_input(scenario, monkeypatch):
+    s = scenario
+    (s.repo / "tracked.txt").write_text("kept draft\n", encoding="utf-8")
+    original = subprocess.run
+    calls = []
+
+    def git_child(argv, **kwargs):
+        if Path(str(argv[0])).name.lower() in {"git", "git.exe"}:
+            assert kwargs["stdin"] == subprocess.DEVNULL
+            calls.append(tuple(argv))
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", git_child)
+    preflight = await s.preflight("worktree", dirty_action="stash")
+    assert preflight["allowed"]
+    result = await s.execute(preflight)
+    assert result["completed"]
+    assert (Path(result["worktree_path"]) / "tracked.txt").read_text(encoding="utf-8") == "kept draft\n"
+    assert any("rev-parse" in call for call in calls)
+    assert any("stash" in call for call in calls)
+    assert any("worktree" in call and "add" in call for call in calls)
 
 
 @pytest.mark.asyncio

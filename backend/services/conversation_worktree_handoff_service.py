@@ -22,7 +22,7 @@ def _git(root: Path, *args: str) -> tuple[bool, str]:
     """Explicit worktree control-plane writes, not readonly UI snapshots."""
     try:
         result = subprocess.run(
-            ["git", *args], cwd=root, env=sanitized_git_env(), capture_output=True,
+            ["git", *args], cwd=root, env=sanitized_git_env(), stdin=subprocess.DEVNULL, capture_output=True,
             text=True, encoding="utf-8", timeout=10, check=True,
         )
         return True, (result.stdout or "").strip()

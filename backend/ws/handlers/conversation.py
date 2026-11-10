@@ -2380,7 +2380,7 @@ async def _handle_conversation_worktree_handoff_claimed(
     if dirty_action == "stash":
         try:
             base_root = await to_thread_cancel_safe(session.main_worktree_root, source_path)
-            handoff_manager = WorktreeManager(base_root)
+            handoff_manager = await to_thread_cancel_safe(WorktreeManager, base_root)
             if await to_thread_cancel_safe(handoff_manager.has_local_changes, source_path, include_ignored=False):
                 source_root = await to_thread_cancel_safe(handoff_manager.worktree_root, source_path)
                 if target_kind == "local":
@@ -2505,7 +2505,7 @@ async def _handle_conversation_worktree_handoff_claimed(
         )
         if updated is None:
             rollback_errors: list[str] = []
-            manager = WorktreeManager(base_root)
+            manager = await to_thread_cancel_safe(WorktreeManager, base_root)
             worktree_path = Path(creation.worktree_path or creation.workspace_root).resolve()
             try:
                 removed = bool(await to_thread_cancel_safe(
@@ -2592,7 +2592,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             session,
             conversation_id,
         )
-        manager = handoff_manager or WorktreeManager(base_root)
+        manager = handoff_manager or await to_thread_cancel_safe(WorktreeManager, base_root)
 
         try:
             remaining_changes = await to_thread_cancel_safe(manager.has_local_changes, source_path, include_ignored=False)
@@ -2911,7 +2911,7 @@ async def _restore_removed_conversation_worktree(
             if raw_base_root
             else await to_thread_cancel_safe(session.main_worktree_root, worktree_path)
         )
-        manager = WorktreeManager(base_root)
+        manager = await to_thread_cancel_safe(WorktreeManager, base_root)
         restored = await to_thread_cancel_safe(
             manager.restore_removed_worktree,
             worktree_path,
