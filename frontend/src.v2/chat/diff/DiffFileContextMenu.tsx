@@ -60,6 +60,7 @@ export function DiffFileContextMenu({ path, workspaceRoot, deleted = false, firs
   const { t, locale } = useI18n();
   const requestChanges = useRef<RequestChanges>();
   const [menu, setMenu] = useState<MenuState>();
+  useLayoutEffect(() => { setMenu(undefined); }, [path, workspaceRoot]);
   const { targets: openTargets } = useDesktopPreferenceTargets(Boolean(menu));
   const [wrap, setWrap] = useDiffViewPreference("wrap");
   const zh = locale === "zh-CN";

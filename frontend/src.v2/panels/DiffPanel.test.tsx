@@ -1049,6 +1049,34 @@ describe("DiffPanel", () => {
     expect((screen.getByRole("button", { name: "下一个文件" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it.each(["unified", "split"] as const)("keeps paged Git comments, line actions and collapse state with their file in %s mode", mode => {
+    const path = (index: number) => `src/page-${index}.ts`;
+    useAppStore.setState({ gitChanges: gitFixture(Array.from({ length: 129 }, (_, index) => ({
+      path: path(index), patch: `diff --git a/${path(index)} b/${path(index)}\n@@ -1 +1 @@\n-old_${index}\n+new_${index}`,
+      additions: 1, deletions: 1,
+    }))) });
+    render(<DiffPanel />);
+    changeDiffLayout(mode);
+    fireEvent.click(screen.getByRole("button", { name: "评论 R1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R1" }), { target: { value: "First file draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    expect(screen.queryByRole("textbox", { name: "评论 R1" })).toBeNull();
+    expect(screen.queryByRole("button", { name: `在编辑器中打开 ${path(0)} 第 1 行` })).toBeNull();
+    expect(screen.getByRole("button", { name: `在编辑器中打开 ${path(1)} 第 1 行` })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "评论 R1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "评论 R1" }), { target: { value: "Second file saved comment" } });
+    fireEvent.click(screen.getByRole("button", { name: "评论", exact: true }));
+    expect(readDiffCommentState("conv-diff").comments.at(-1)).toMatchObject({ position: { path: path(1), line: 1, side: "right" } });
+    fireEvent.click(gitFileTrigger(path(1)));
+    expect(gitFileTrigger(path(1)).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "上一个文件" }));
+    expect(gitFileTrigger(path(0)).getAttribute("aria-expanded")).toBe("true");
+    expect((screen.getByRole("textbox", { name: "评论 R1" }) as HTMLTextAreaElement).value).toBe("First file draft");
+    expect(screen.queryByText("Second file saved comment")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    expect((screen.getByRole("textbox", { name: "评论 R1" }) as HTMLTextAreaElement).value).toBe("Second file saved comment");
+  });
+
   it("defaults ordinary Git files open and deleted files closed while keeping explicit overrides", () => {
     useAppStore.setState({ gitChanges: gitFixture([
       { path: "src/active.ts", patch: "@@ -1 +1 @@\n-old\n+active_content", additions: 1, deletions: 1, status: "M" },
@@ -1230,6 +1258,35 @@ describe("snapshot-backed complete-file Diff reading", () => {
     path, side: request.side, source_kind: request.side === "old" ? "object" : "disk", lines: request.side === "old" ? oldLines : newLines }))) => ({
     type: "command.result" as const, command: "diff.git_file_contents", level: "info" as const, message: "",
     data: { source: command.source, snapshot_generation: command.snapshot_generation, results },
+  });
+
+  it("keeps late full-file reads attached to the requested page when the reader moves to another file", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const pending: Array<{ command: Record<string, any>; finish: (result: Awaited<ReturnType<typeof sendClientCommandAwaitResult>>) => void }> = [];
+    vi.mocked(sendClientCommandAwaitResult).mockImplementation(command => new Promise(finish => pending.push({ command, finish })));
+    const files = Array.from({ length: 129 }, (_, index) => ({ ...file, path: `page-${index}.ts`,
+      revision: `page-${index}`, patch: `diff --git a/page-${index}.ts b/page-${index}.ts\n@@ -50 +50 @@\n-line_50\n+changed_${index}\n` }));
+    useAppStore.setState({ gitChanges: gitFixture(files) });
+    render(<DiffPanel />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(40); });
+    expect(pending).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "下一个文件" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(40); });
+    expect(pending).toHaveLength(2);
+    expect(pending[0].command.requests[0].path).toBe("page-0.ts");
+    expect(pending[1].command.requests[0].path).toBe("page-1.ts");
+    const complete = (request: typeof pending[number], index: number) => request.finish(reply(request.command,
+      request.command.requests.map((item: { side: "old" | "new"; path: string }) => ({ type: "success", ...item,
+        source_kind: item.side === "old" ? "object" : "disk",
+        lines: item.side === "old" ? oldLines : oldLines.map((line, at) => at === 49 ? `changed_${index}\n` : line) }))));
+    await act(async () => complete(pending[0], 0));
+    expect(screen.getByText("changed_1", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("changed_0", { exact: true })).toBeNull();
+    expect(screen.queryByRole("button", { name: "向下展开 20 行" })).toBeNull();
+    await act(async () => complete(pending[1], 1));
+    fireEvent.click(screen.getByRole("button", { name: "向下展开 20 行" }), { shiftKey: true });
+    expect(screen.getByText("line_1", { exact: true })).toBeTruthy();
+    expect(screen.queryByText("changed_0", { exact: true })).toBeNull();
   });
 
   it("uses the real forty-ms content command and expands real context by twenty lines or Shift-all", async () => {

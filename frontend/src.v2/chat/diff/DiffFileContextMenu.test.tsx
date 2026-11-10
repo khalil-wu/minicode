@@ -44,6 +44,19 @@ function listener(handler: (location?: { side: "left" | "right"; line: number })
 }
 
 describe("Source Diff file context menu", () => {
+  it("closes captured line actions when its paged file changes and keeps them closed on returning", () => {
+    const view = render(<DiffFileContextMenu path="first.ts" workspaceRoot="C:/work" preferences={prefs}><span>Real code row</span></DiffFileContextMenu>);
+    openMenu();
+    expect(screen.getByRole("menu")).toBeTruthy();
+    view.rerender(<DiffFileContextMenu path="second.ts" workspaceRoot="C:/work" preferences={prefs}><span>Real code row</span></DiffFileContextMenu>);
+    expect(screen.queryByRole("menu")).toBeNull();
+    view.rerender(<DiffFileContextMenu path="first.ts" workspaceRoot="C:/work" preferences={prefs}><span>Real code row</span></DiffFileContextMenu>);
+    expect(screen.queryByRole("menu")).toBeNull();
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "在“Cursor”中打开" }));
+    expect(opens.preferred).toHaveBeenCalledWith("first.ts", "C:/work", 1, undefined, { targetId: "cursor" });
+  });
+
   it("keeps the Source item order and the captured real line for primary opening without persisting a target", () => {
     render(<DiffFileContextMenu path="src/app.ts" workspaceRoot="C:/work" firstChangedLine={11} preferences={prefs} githubUrl="https://github.com/example/repo/blob/main/src/app.ts">
       <span data-diff-line-number="73" data-diff-line-side="left">Real code row</span>

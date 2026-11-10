@@ -21,7 +21,7 @@ import { parsePositionedDiff as parseUnifiedDiff, type DiffLine, type DiffLineLo
 import { DiffReaderOwnerContext, useDiffAnnotations, type DiffAnnotations } from "./DiffAnnotations";
 import { clearDiffReaderDrafts } from "../lib/diff-comment-storage";
 import { buildDiffWordDecorations, type DiffWordSpan } from "../chat/diff/diff-word-spans";
-import { decorateDiffLineHtml } from "../chat/diff/decorated-diff-syntax";
+import { DiffLineText } from "../chat/diff/DiffLineText";
 import { useWordDiffsPreference } from "../chat/diff/word-diff-preference";
 import { useDiffViewPreference } from "../chat/diff/diff-view-preferences";
 import { ChangesToolbarActions } from "../chat/diff/ChangesToolbarActions";
@@ -540,7 +540,7 @@ const FileWorkspaceChanges = ({ owner, request, workbenchOwner, readerOwnerId }:
             : comparison?.isGitRepo === false ? <div className="mc-diff-file-loading">{tr("当前文件夹未启用 Git")}</div>
             : comparison?.status === "expected" ? <div className="mc-diff-file-loading">{tr(comparison.reason === "default_branch_unavailable" ? "没有可用的默认基准分支" : "无法找到所选分支的共同祖先")}</div>
             : !files.length ? <div className="mc-diff-file-loading">{tr("没有可显示的更改。")}</div> : null}
-          {files.filter(file => !singleFile || file.path === activePath).map(file => <GitFileDiff key={`${selection.source}:${file.path}`} file={file} source={selection.source} viewMode={viewMode}
+          {files.filter(file => !singleFile || file.path === activePath).map(file => <GitFileDiff key={`${selection.source}:${singleFile ? "page" : `file:${file.path}`}`} file={file} source={selection.source} viewMode={viewMode}
             open={openPaths.has(file.path)} onToggle={() => expansion.setFileOpen(file.path, !openPaths.has(file.path))} actions={null} />)}
         </div></div><ChangedFilesTree open={filesVisible} entries={files} activePath={activePath} parentWidth={width} onSelect={jumpToFile} onClose={() => setFilesVisible(false)} />
       </div>
@@ -742,8 +742,8 @@ const UnifiedDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations
             <span className="mc-diff-code-sign select-none" aria-hidden="true" style={{ color: line.kind === "add" ? "var(--diff-added-foreground)" : line.kind === "del" ? "var(--diff-removed-foreground)" : colorForKind(line.kind) }}>
               {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
             </span>
-            <span data-diff-text={`${i}:${line.newLine === undefined ? "old" : "new"}`}
-              dangerouslySetInnerHTML={{ __html: decorateDiffLineHtml(line.text, colorized?.[colorIndex], wordSpans[colorIndex]) }} />
+            <DiffLineText textKey={`${i}:${line.newLine === undefined ? "old" : "new"}`}
+              text={line.text} html={colorized?.[colorIndex]} spans={wordSpans[colorIndex]} />
             {commentIndex !== undefined && commentMap.has(commentIndex) && (
               <span className="ml-2 inline align-middle" style={{ color: "var(--accent-primary)", fontSize: "var(--text-xs)" }} title={commentMap.get(commentIndex)!.content}>
                 <MessageCircle size={14} style={{ display: "inline", verticalAlign: "middle" }} />
@@ -881,9 +881,9 @@ const SplitDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, 
   }, [comments, filePath, workingDirectory]);
 
   const colorizedMap = useMemo(() => {
-    const map = new Map<DiffLine, string>();
+    const map = new Map<DiffLine, { html?: string; spans: DiffWordSpan[] }>();
     lines.forEach((line, i) => {
-      map.set(line, decorateDiffLineHtml(line.text, colorized?.[i], wordSpans[i]));
+      map.set(line, { html: colorized?.[i], spans: wordSpans[i] });
     });
     return map;
   }, [colorized, lines, wordSpans]);
@@ -916,7 +916,7 @@ const SplitDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations, 
   );
 };
 
-const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot }: { row: SplitRow; colorizedMap: Map<DiffLine, string>; annotations: DiffAnnotations; filePath?: string; workspaceRoot?: string }) => {
+const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot }: { row: SplitRow; colorizedMap: Map<DiffLine, { html?: string; spans: DiffWordSpan[] }>; annotations: DiffAnnotations; filePath?: string; workspaceRoot?: string }) => {
   const renderCell = (line: DiffLine | null, side: "left" | "right", lineIndex?: number) => {
     if (!line) {
       return <div className="mc-diff-empty-code-cell px-2" style={{ background: "var(--surface-soft)" }} />;
@@ -933,7 +933,7 @@ const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot 
       : side === "right" && line.kind === "add"
         ? "var(--diff-added-background)"
         : "transparent";
-    const html = colorizedMap?.get(line);
+    const presentation = colorizedMap.get(line)!;
     const readingIndex = lineIndex ?? `full:${line.unifiedIndex}`;
     const lineNumber = side === "left" ? line.oldLine : line.newLine;
     const location = lineNumber === undefined ? undefined : { side, line: lineNumber };
@@ -946,11 +946,8 @@ const SplitRowPair = ({ row, colorizedMap, annotations, filePath, workspaceRoot 
       <div
         className="mc-diff-code-content px-2 whitespace-pre-wrap break-words"
       >
-        {html ? (
-          <span data-diff-text={`${readingIndex}:${side === "left" ? "old" : "new"}`} dangerouslySetInnerHTML={{ __html: html }} />
-        ) : (
-          <span data-diff-text={`${readingIndex}:${side === "left" ? "old" : "new"}`} style={{ color: colorForKind(line.kind) }}>{line.text}</span>
-        )}
+        <DiffLineText textKey={`${readingIndex}:${side === "left" ? "old" : "new"}`}
+          text={line.text} html={presentation.html} spans={presentation.spans} />
       </div>
       </div>
     );
@@ -1484,7 +1481,7 @@ const GitChangesTab = ({ viewMode, comparison, selection }: {
       : comparison?.loading && !files.length ? <div className="mc-diff-file-loading" role="status">{tr("正在加载 Git 更改...")}</div>
       : gitChanges.isGitRepo === false ? <div className="mc-diff-file-loading">{tr("当前文件夹未启用 Git")}</div>
       : comparison && !files.length ? <div className="mc-diff-file-loading">{tr("没有可显示的更改。")}</div> : null}
-    {files.filter(file => navigation.visiblePath === undefined || file.path === navigation.visiblePath).map(file => <GitFileDiff key={`${source}:${file.path}`} file={file} source={source} snapshot={snapshot} viewMode={viewMode}
+    {files.filter(file => navigation.visiblePath === undefined || file.path === navigation.visiblePath).map(file => <GitFileDiff key={`${source}:${navigation.visiblePath === undefined ? `file:${file.path}` : "page"}`} file={file} source={source} snapshot={snapshot} viewMode={viewMode}
       open={navigation.openPaths.has(file.path)} onToggle={() => navigation.setFileOpen(file.path, !navigation.openPaths.has(file.path))} actions={canModify && <>
         <button type="button" disabled={busy} onClick={() => void revert(file.path)} title={tr("放弃更改")} aria-label={tr("放弃 {v0} 的更改", { v0: file.path })}><RotateCcw size={14} /></button>
         <button type="button" disabled={busy} onClick={() => void runAction(source === "staged" ? "diff.git_unstage_file" : "diff.git_stage_file", file.path)}
