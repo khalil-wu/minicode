@@ -500,6 +500,9 @@ const MAX_NOTICE_TEXT_CHARS = 65_536;
 const MAX_JSON_NODES = 4_096;
 const MAX_JSON_DEPTH = 12;
 const MAX_JSON_STRING_CHARS = 262_144;
+// backend.conversations.public_projection.PUBLIC_RECORD_TEXT_BUDGET, used by
+// stream_resume_pages for the same tool records already accepted by the turn.
+const MAX_PUBLIC_RECORD_TEXT_CHARS = 8_388_608;
 const MAX_CONVERSATION_ITEMS = 4_096;
 const MAX_TRANSCRIPT_MESSAGES = 4_096;
 const MAX_SESSION_REPLAY_EVENTS = 1_000;
@@ -530,6 +533,7 @@ type JsonShapeBudget = {
   maxStringCharacters?: number;
   maxArrayItems?: number;
   maxObjectItems?: number;
+  unicodeCodePoints?: boolean;
 };
 
 const hasBoundedJsonShape = (
@@ -544,12 +548,20 @@ const hasBoundedJsonShape = (
   const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
   let nodes = 0;
   let stringCharacters = 0;
+  const textLength = (text: string) => {
+    if (!budget.unicodeCodePoints) return text.length;
+    // Python's producer counts Unicode code points; JS length counts UTF-16
+    // units. Supplementary characters must not halve the recovery budget.
+    let length = text.length;
+    for (const _pair of text.matchAll(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)) length -= 1;
+    return length;
+  };
   while (pending.length > 0) {
     const current = pending.pop()!;
     nodes += 1;
     if (nodes > maxNodes || current.depth > maxDepth) return false;
     if (typeof current.value === "string") {
-      stringCharacters += current.value.length;
+      stringCharacters += textLength(current.value);
       if (stringCharacters > maxStringCharacters) return false;
       continue;
     }
@@ -572,7 +584,7 @@ const hasBoundedJsonShape = (
     if (nodes + pending.length + entries.length > maxNodes) return false;
     for (const [key, item] of entries) {
       if (!isBoundedString(key, 1_024)) return false;
-      stringCharacters += key.length;
+      stringCharacters += textLength(key);
       if (stringCharacters > maxStringCharacters) return false;
       pending.push({ value: item, depth: current.depth + 1 });
     }
@@ -1274,11 +1286,14 @@ const hasCommandActionPayload = (value: Record<string, unknown>): boolean => {
 };
 
 const isStreamResumeToolRecord = (value: unknown, pending: boolean): value is Record<string, unknown> => {
-  if (!isRecord(value) || !hasBoundedJsonShape(value) || !hasCommandActionPayload(value)) return false;
+  if (!isRecord(value) || !hasBoundedJsonShape(value, {
+    maxStringCharacters: MAX_PUBLIC_RECORD_TEXT_CHARS, unicodeCodePoints: true,
+  }) || !hasCommandActionPayload(value)) return false;
   if (!isBoundedString(value.id, 1_024) || !isBoundedString(value.name, 1_024)) return false;
-  if (pending && (!isRecord(value.args) || !hasBoundedJsonShape(value.args))) return false;
+  // The enclosing record already bounds args, as AgentEvent.stream_resume does.
+  if (pending && !isRecord(value.args)) return false;
   if (!pending && "args" in value && value.args !== undefined && value.args !== null
-    && (!isRecord(value.args) || !hasBoundedJsonShape(value.args))) return false;
+    && !isRecord(value.args)) return false;
   for (const field of ["status", "transition", "waiting_on", "waitingOn", "blocking_reason", "blockingReason", "outputPreview", "stdoutPreview", "stderrPreview", "display_hint", "displayHint", "input_summary", "inputSummary", "iteration_id", "iterationId", "phase", "visibility"]) {
     if (!isOptionalBoundedText(value, field, field.toLowerCase().includes("preview") ? MAX_COMMAND_OUTPUT_CHARS : 4_096)) return false;
   }
@@ -1452,9 +1467,10 @@ const hasValidSemanticPayload = (
     ] as const;
     valid = valid
       && hasCommandActionPayload(value)
-      // summary is required by the routing contract. Empty summaries are
-      // retained for compatibility with a few legacy blocked-tool events.
-      && isBoundedString(value.summary, MAX_EVENT_SUMMARY_CHARS, { allowEmpty: true })
+      // Tool summaries carry the requested command/monitor output, including
+      // views above 64 KiB. Apply the existing output budget, not the short
+      // progress-label budget; complete output remains in its owned spool.
+      && isBoundedString(value.summary, MAX_COMMAND_OUTPUT_CHARS, { allowEmpty: true })
       && ["stdout_preview", "stderr_preview"].every(field => !(field in value) || isBoundedString(value[field], MAX_EVENT_CONTENT_CHARS, { allowEmpty: true }))
       && (!("exit_code" in value) || Number.isSafeInteger(value.exit_code))
       && (!("recipient_id" in value) || isBoundedString(value.recipient_id, 1_024))

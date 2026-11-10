@@ -1700,6 +1700,36 @@ describe("normalizeInboundServerEvent", () => {
     }
   });
 
+  it("retains large command results and their accumulated recovery records", () => {
+    const output = `OUTPUT_BEGIN\n${"comment 中文🙂 ".repeat(12_000)}\nOUTPUT_END`;
+    const tool = { id: "command-1", name: "run_command", args: { command: "python emit.py", max_chars: 150_000 },
+      status: "success", summary: output, contentPreview: output, stdoutPreview: output, outputPreview: output,
+      stderrPreview: "", exit_code: 0 };
+    const live = { type: "tool_result", id: tool.id, summary: output, stdout_preview: output, stderr_preview: "", exit_code: 0 };
+    expect(normalizeInboundServerEvent(live)).toMatchObject(live);
+    const resumed = { type: "stream_resume", conversation_id: "conversation-1", message_id: "assistant-1",
+      tool_calls_pending: [], tool_states: [tool], content_blocks: [{ type: "tool_call", record: tool }] };
+    expect(normalizeInboundServerEvent(resumed)).toMatchObject(resumed);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(normalizeInboundServerEvent({ ...live, summary: "x".repeat(1_048_577) })).toBeNull();
+    expect(normalizeInboundServerEvent({ ...resumed, tool_states: [{ ...tool, durationMs: -1 }] })).toBeNull();
+    warn.mockRestore();
+  });
+
+  it("uses the backend public-record code-point budget for large recovered arguments", () => {
+    const tool = { id: "tool", name: "write_file", args: { content: "" }, status: "running" };
+    const metadataChars = JSON.stringify(tool).replace(/[{}:,\"]/g, "").length;
+    const available = 8_388_608 - metadataChars;
+    tool.args.content = "🙂".repeat(available);
+    const resumed = { type: "stream_resume", conversation_id: "conversation-1", message_id: "assistant-1",
+      tool_calls_pending: [tool], tool_states: [tool], content_blocks: [] };
+    expect(normalizeInboundServerEvent(resumed)).not.toBeNull();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    tool.args.content += "x";
+    expect(normalizeInboundServerEvent(resumed)).toBeNull();
+    warn.mockRestore();
+  });
+
   it("rejects nested, unordered, miscounted, and out-of-window replay envelopes", () => {
     const valid = {
       type: "session.replay",
