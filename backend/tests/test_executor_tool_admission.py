@@ -5,7 +5,9 @@ import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import replace
 import os
+from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 
 import pytest
 import pytest_asyncio
@@ -42,8 +44,31 @@ async def executor_host(request, tmp_path):
     kind = request.param
     if kind == "source" and not os.environ.get("MINICODE_SOURCE_EXECUTOR"):
         pytest.skip("requires an explicitly selected owned Source exec-server peer")
-    host = setup(tmp_path, approval_policy="never")
     async with AsyncExitStack() as cleanup:
+        if kind == "source" and os.name == "nt":
+            import ntsecuritycon
+            import win32api
+            import win32con
+            import win32security
+
+            # Pytest's OWNER RIGHTS-only ancestors are inaccessible to Source's
+            # LUA token. Git stats every ancestor when creating refs. Give this
+            # fixture its own root outside that tree and a concrete user ACE;
+            # Source still independently enforces its write-capability SIDs.
+            tmp_path = Path(cleanup.enter_context(TemporaryDirectory(prefix="minicode-source-")))
+            token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+            try:
+                user = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+            finally:
+                token.Close()
+            descriptor = win32security.GetNamedSecurityInfo(str(tmp_path), win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION)
+            dacl = descriptor.GetSecurityDescriptorDacl()
+            dacl.AddAccessAllowedAceEx(win32security.ACL_REVISION,
+                win32con.CONTAINER_INHERIT_ACE | win32con.OBJECT_INHERIT_ACE, ntsecuritycon.FILE_ALL_ACCESS, user)
+            win32security.SetNamedSecurityInfo(str(tmp_path), win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION, None, None, dacl, None)
+        host = setup(tmp_path, approval_policy="never")
         cleanup.callback(host.context.artifact_store.shutdown)
         config_dir = tmp_path / "executors"
         config_dir.mkdir()

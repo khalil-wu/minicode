@@ -7,6 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -501,6 +502,47 @@ async def test_snapshot_uses_complete_structured_git_output_beyond_tool_tail(edi
             for name in ("0000-original.txt", "1023-original.txt"):
                 blob = await run_executor_git(service, ["git", "cat-file", "blob", removed["snapshot_ref"] + ":bulk/" + name])
                 assert blob.returncode == 0 and blob.stdout == b"raw original LF\n"
+
+
+@pytest.mark.parametrize("executor_host", ["source"], indirect=True)
+@pytest.mark.parametrize("operation", ["filesystem", "process"])
+@pytest.mark.asyncio
+async def test_source_workspace_write_enforces_allowed_root_and_later_revocation(executor_host, operation):
+    from backend.environments.errors import ExecutorRpcError
+    from backend.tests.test_executor_editor_reads import editor_context
+    from backend.sandbox.policy import FileSystemAccessMode as Access, FileSystemPath as Target, FileSystemSandboxEntry as Entry, FileSystemSandboxPolicy, FileSystemSpecialPath as Special, PermissionProfile
+
+    host = executor_host
+    allowed, outside = host.workspace / "allowed", host.workspace / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    target, denied = allowed / "owned.txt", outside / "unchanged.txt"
+    target.write_bytes(b"original")
+    denied.write_bytes(b"outside original")
+    async with ExecutorEditorService(editor_context(host)) as service:
+        async def write(path, content, scope, *, permitted):
+            if operation == "filesystem":
+                if permitted:
+                    await service.filesystem.write_file(path.as_uri(), content, sandbox=scope.sandbox_context())
+                else:
+                    with pytest.raises(ExecutorRpcError):
+                        await service.filesystem.write_file(path.as_uri(), content, sandbox=scope.sandbox_context())
+            else:
+                result = await service.run([sys.executable, "-c",
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(sys.argv[2].encode())",
+                    str(path), content.decode()], cwd=service.resolve(allowed.as_uri()), permission_scope=scope)
+                assert (result.returncode == 0) is permitted, result.stderr
+
+        scope = replace(service.scope, cwd_uri=allowed.as_uri(), workspace_root_uris=(allowed.as_uri(),),
+            permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+            Entry(Target.special(Special.ROOT), Access.READ), Entry(Target("path", allowed.as_uri()), Access.WRITE)])))
+        await write(target, b"source written", scope, permitted=True)
+        await write(denied, b"must not escape", scope, permitted=False)
+        readonly = replace(scope, permission_profile=PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+            Entry(Target.special(Special.ROOT), Access.READ)])))
+        await write(target, b"must not survive revocation", readonly, permitted=False)
+        assert await service.filesystem.read_file(target.as_uri(), sandbox=readonly.sandbox_context()) == b"source written"
+        assert target.read_bytes() == b"source written" and denied.read_bytes() == b"outside original"
 
 
 @pytest.mark.parametrize("executor_host", ["source"], indirect=True)
