@@ -143,6 +143,9 @@ class ListWorktreesTool(BaseTool):
     async def execute(
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
+        if context is not None and context.turn_environment is not None and context.turn_environment.is_remote:
+            from backend.workspace.executor_worktree import executor_worktree_tool
+            return await executor_worktree_tool(self, args, context)
         manager = await _resolve_worktree_manager(context)
 
         if manager is None:
@@ -277,6 +280,9 @@ class CreateWorktreeTool(BaseTool):
                 f"已通过 WorktreeCreate hook 创建 worktree: {hook_path}"
             )
 
+        if context is not None and context.turn_environment is not None and context.turn_environment.is_remote:
+            from backend.workspace.executor_worktree import executor_worktree_tool
+            return await executor_worktree_tool(self, args, context)
         manager = await _resolve_worktree_manager(context)
 
         if manager is None:

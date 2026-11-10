@@ -308,6 +308,43 @@ async def _snapshot_action(service, programs, path, label):
         return record
 
 
+async def _create(service, programs, path, branch=None, new_branch=False, commit=None):
+    inventory = await _inventory(service, programs)
+    root = inventory.main.joinpath(".minicode/worktrees")
+    raw = str(path)
+    pure = PureWindowsPath(raw) if service.cwd.convention == "windows" else PurePosixPath(raw)
+    if raw.startswith("file:") or pure.is_absolute():
+        target = service.resolve(raw)
+    elif pure.parts[:2] == (".minicode", "worktrees"):
+        target = inventory.main.joinpath(raw)
+    else:
+        target = root.joinpath(raw)
+    if target == root or not target.is_relative_to(root):
+        raise HTTPException(409, "Worktree path must stay under .minicode/worktrees")
+    if not service.scope.resolve_access(target.uri).can_write:
+        raise PermissionError(f"Executor write permission denied: {target.uri}")
+    nearest = target.parent
+    while await service.metadata(nearest) is None:
+        nearest = nearest.parent
+    actual = await _canonical(service, nearest)
+    target = actual.joinpath(target.relative_to(nearest).as_posix())
+    if target == root or not target.is_relative_to(root):
+        raise HTTPException(409, "Worktree path resolves outside .minicode/worktrees")
+    async with service.mutate([inventory.common, target]):
+        if await service.metadata(target) is not None:
+            raise HTTPException(409, "Worktree path already exists")
+        args = ["worktree", "add"]
+        if new_branch and branch:
+            args.extend(("-b", branch))
+        args.extend(("--", target.native))
+        if branch and not new_branch:
+            args.append(branch)
+        elif commit:
+            args.append(commit)
+        await _git(service, programs, *args, write=True, write_paths=(target.parent,))
+    return {"path": target.uri, "branch": branch or "", "workspace_root": inventory.main.uri}
+
+
 async def _remove(service, programs, path, force, *, model_relative=False):
     inventory = await _inventory(service, programs)
     if model_relative:
@@ -451,9 +488,13 @@ async def executor_worktree_action(service, operation, **kwargs):
 
     async def execute():
         async with ExecutorEditorService(service.context, application_config=service.application_config) as captured:
-            if operation in {"remove", "restore", "snapshot"} and not captured.scope.resolve_access(captured.cwd.uri).can_write:
+            if operation in {"create", "remove", "restore", "snapshot"} and not captured.scope.resolve_access(captured.cwd.uri).can_write:
                 raise PermissionError(f"Executor write permission denied: {captured.cwd.uri}")
             programs = await target_programs(captured)
+            if operation == "create":
+                return await _create(captured, programs, **kwargs)
+            if operation == "list":
+                return await captured.git("worktree")
             if operation == "switch":
                 return await _switch(captured, programs, **kwargs)
             if operation == "remove":
@@ -491,6 +532,23 @@ async def executor_worktree_tool(tool, args, context):
 
     try:
         async with ExecutorEditorService(context, application_config=context.model_execution.config) as service:
+            if tool.name == "create_worktree":
+                result = await executor_worktree_action(service, "create", path=args["path"], branch=args.get("branch"),
+                    new_branch=bool(args.get("new_branch")), commit=args.get("commit"))
+                repository = context.run_context.conversation_repository
+                if repository is not None and context.conversation_id:
+                    repository.register_worktree(context.conversation_id, path=result["path"], backend="executor", workspace_root=result["workspace_root"])
+                basis = f"分支 {result['branch']}" if result["branch"] else f"提交 {args.get('commit') or 'HEAD'}"
+                return tool._success_result(f"已创建 worktree: {result['path']}\n基于: {basis}")
+            if tool.name == "list_worktrees":
+                result = await executor_worktree_action(service, "list")
+                if not result["is_git_repo"]:
+                    return tool._error_result("当前目录不是 Git 仓库")
+                lines = [f"找到 {len(result['worktrees'])} 个 worktree:\n"]
+                for index, entry in enumerate(result["worktrees"], 1):
+                    lines.extend((f"{index}. {entry['path']}", f"   Branch: {entry['branch'] or 'detached at ' + entry['commit']}",
+                        f"   Commit: {entry['commit']}"))
+                return tool._success_result("\n".join(lines))
             if tool.name == "remove_worktree":
                 result = await executor_worktree_action(service, "remove", path=args["path"], force=bool(args.get("force")), model_relative=True)
                 if not result["removed"]:

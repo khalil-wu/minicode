@@ -638,6 +638,45 @@ async def test_gui_worktree_action_temporarily_writes_only_its_validated_directo
 
 @pytest.mark.parametrize("executor_host", ["source"], indirect=True)
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path_kind", ["relative", "native", "uri"])
+async def test_remote_model_create_and_list_use_the_captured_repository(executor_host, monkeypatch, path_kind):
+    from backend.agent.environment_selection import bind_tool_execution_environment, close_tool_execution_environment
+    from backend.tools.worktree_tools import CreateWorktreeTool, ListWorktreesTool, RemoveWorktreeTool
+
+    host = executor_host
+    context = bind_tool_execution_environment(host.context, host.environments.primary())
+    try:
+        async with ExecutorEditorService(context, application_config=context.model_execution.config) as service:
+            empty = await ListWorktreesTool().execute({}, context)
+            assert empty.is_error and "Git" in empty.content
+            linked = await _prepare(None, service)
+            target = linked.parent.joinpath("model-created")
+
+            async def controller_manager(_context):
+                pytest.fail("Remote model worktree tools reached the controller path manager")
+
+            monkeypatch.setattr("backend.tools.worktree_tools._resolve_worktree_manager", controller_manager)
+            requested = {"relative": "model-created", "native": target.native, "uri": target.uri}[path_kind]
+            created = await CreateWorktreeTool().execute({"path": requested, "branch": "model-created", "new_branch": True}, context)
+            assert not created.is_error, created.content
+            assert target.uri in created.content
+            assert (await service.read_bytes(target.joinpath("tracked.txt"))) == b"committed\r\n"
+            listed = await ListWorktreesTool().execute({}, context)
+            assert not listed.is_error and target.uri in listed.content and "model-created" in listed.content, listed.content
+            existing = await CreateWorktreeTool().execute({"path": requested, "branch": "another", "new_branch": True}, context)
+            assert existing.is_error and "already exists" in existing.content
+            outside = await CreateWorktreeTool().execute({"path": "../outside", "branch": "outside", "new_branch": True}, context)
+            assert outside.is_error and "must stay under" in outside.content
+            assert await service.metadata(linked.parent.parent.joinpath("outside")) is None
+            removed = await RemoveWorktreeTool().execute({"path": target.uri}, context)
+            assert not removed.is_error, removed.content
+            assert await service.metadata(target) is None
+    finally:
+        await close_tool_execution_environment(context)
+
+
+@pytest.mark.parametrize("executor_host", ["source"], indirect=True)
+@pytest.mark.asyncio
 async def test_model_worktree_tools_share_executor_refs_index_owner_and_raw_restore(executor_host, monkeypatch):
     from backend.agent.environment_selection import bind_tool_execution_environment, close_tool_execution_environment
     from backend.sandbox.policy import FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy, FileSystemSpecialPath, PermissionProfile
