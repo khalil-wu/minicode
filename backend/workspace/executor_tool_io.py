@@ -216,7 +216,7 @@ async def executor_list_files(tool, args, context):
                 directory = pending.pop()
                 for entry in await _directory_entries(service, directory):
                     path = service.resolve(entry["path"])
-                    if not service.scope.resolve_access(path.uri).can_read:
+                    if not service.scope.resolve_access(path).can_read:
                         continue
                     output.append(path.relative_to(root).as_posix() + ("/" if entry["kind"] == "directory" else ""))
                     if len(output) == limit:
@@ -253,7 +253,7 @@ async def executor_candidate_files(service, root):
     if value is None:
         raise FileNotFoundError(root.uri)
     if value["isFile"]:
-        if service.scope.resolve_access(root.uri).can_read:
+        if service.scope.resolve_access(root).can_read:
             yield root
         return
     pending, seen = [(root, ())], 0
@@ -262,7 +262,7 @@ async def executor_candidate_files(service, root):
         entries = await _directory_entries(service, directory)
         if any(service.resolve(entry["path"]).name == ".gitignore" and entry["kind"] == "file" for entry in entries):
             ignore = directory.joinpath(".gitignore")
-            if service.scope.resolve_access(ignore.uri).can_read:
+            if service.scope.resolve_access(ignore).can_read:
                 specs = (*specs, (directory, GitIgnoreSpec.from_lines((await service.read_text(ignore)).splitlines())))
         for entry in entries:
             seen += 1
@@ -270,7 +270,7 @@ async def executor_candidate_files(service, root):
                 raise SearchResourceLimitError("executor search exceeded 50000 entries; narrow the path")
             path = service.resolve(entry["path"])
             is_dir = entry["kind"] == "directory"
-            if is_dir and path.name.casefold() in _IGNORE_DIRS or not service.scope.resolve_access(path.uri).can_read:
+            if is_dir and path.name.casefold() in _IGNORE_DIRS or not service.scope.resolve_access(path).can_read:
                 continue
             ignored = False
             for base, spec in specs:

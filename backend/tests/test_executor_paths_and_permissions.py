@@ -43,6 +43,34 @@ def test_resolved_permissions_stay_with_each_immutable_scope_after_workspace_or_
     assert original.resolve_access("file:///C:/first/a") is Access.WRITE
 
 
+@pytest.mark.parametrize("uri,expected", [
+    ("file:///C:/workspace/src/a.ts", Access.WRITE),
+    ("file:///c:/WORKSPACE/src/a.ts", Access.WRITE),
+    ("file:///C:/workspace/private/a.ts", Access.DENY),
+    ("file:///C:/workspace/src/a.secret", Access.DENY),
+    ("file:///C:/outside/a.ts", Access.READ),
+    ("file:///C:/workspace/..%5Coutside/a.ts", Access.DENY),
+    ("file:///C:/workspace/a%2Fb.ts", Access.DENY),
+    ("file:///home/workspace/a.ts", Access.DENY),
+])
+def test_parsed_path_permission_checks_keep_scope_replacement_and_encoded_boundaries(uri, expected):
+    from dataclasses import replace
+
+    scope = EnvironmentPermissionScope("target", PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
+        Entry(FileSystemPath.special(Special.ROOT), Access.READ),
+        Entry(FileSystemPath.special(Special.PROJECT_ROOTS), Access.WRITE),
+        Entry(FileSystemPath("path", "file:///C:/workspace/private"), Access.DENY),
+        Entry(FileSystemPath.glob("C:/workspace/**/*.secret"), Access.DENY),
+    ])), "file:///C:/workspace", ("file:///C:/workspace",), "windows")
+    parsed = ExecutorPath.parse(uri)
+    assert scope.resolve_access(parsed) is expected
+    assert scope.resolve_access(uri) is expected
+    moved = replace(scope, cwd_uri="file:///D:/other", workspace_root_uris=("file:///D:/other",))
+    moved_path = ExecutorPath.parse("file:///D:/other/a.ts")
+    assert moved.resolve_access(moved_path) is Access.WRITE
+    assert scope.resolve_access(moved_path) is Access.DENY
+
+
 @pytest.mark.parametrize("base,value,expected", [
     ("file:///workspace/src", "../tests/test.rs", "file:///workspace/tests/test.rs"),
     ("file:///workspace/src", "/", "file:///"),

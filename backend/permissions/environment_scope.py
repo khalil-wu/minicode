@@ -306,8 +306,17 @@ class EnvironmentPermissionScope:
     windows_sandbox_level: str = "disabled"
     use_legacy_landlock: bool = False
     _entries_cache: tuple[tuple[ExecutorPath, FileSystemAccessMode], ...] | None = field(default=None, init=False, repr=False, compare=False)
+    _cwd_cache: ExecutorPath | None = field(default=None, init=False, repr=False, compare=False)
 
-    def resolve_path(self, value: str) -> ExecutorPath:
+    @property
+    def cwd_path(self) -> ExecutorPath:
+        if self._cwd_cache is None:
+            object.__setattr__(self, "_cwd_cache", ExecutorPath.parse(self.cwd_uri, platform_os=self.platform_os))
+        return self._cwd_cache
+
+    def resolve_path(self, value: str | ExecutorPath) -> ExecutorPath:
+        if isinstance(value, ExecutorPath):
+            return value
         return ExecutorPath.resolve(value, cwd_uri=self.cwd_uri, platform_os=self.platform_os,
             user_home_uri=self.user_home_uri)
 
@@ -391,7 +400,7 @@ class EnvironmentPermissionScope:
         # create a fresh scope; repeated file checks reuse only its URI rules.
         if self._entries_cache is not None:
             return self._entries_cache
-        cwd = ExecutorPath.parse(self.cwd_uri, platform_os=self.platform_os)
+        cwd = self.cwd_path
         root = cwd
         while root.parent != root:
             root = root.parent
@@ -428,11 +437,11 @@ class EnvironmentPermissionScope:
             if entry.path.kind == "glob_pattern"}))
         return writable, denied, globs
 
-    def resolve_access(self, value: str) -> FileSystemAccessMode:
+    def resolve_access(self, value: str | ExecutorPath) -> FileSystemAccessMode:
         profile = self.permission_profile
         if profile.enforcement is not SandboxEnforcement.MANAGED or profile.file_system.kind is FileSystemSandboxKind.UNRESTRICTED:
             return FileSystemAccessMode.WRITE
-        path, cwd = self.resolve_path(value), ExecutorPath.parse(self.cwd_uri)
+        path, cwd = self.resolve_path(value), self.cwd_path
         if path.convention != cwd.convention or path.lexical_depth is None or cwd.lexical_depth is None:
             return FileSystemAccessMode.DENY
         from backend.sandbox.permission_glob import permission_glob_matches

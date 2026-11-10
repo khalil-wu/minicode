@@ -131,7 +131,9 @@ class ExecutorWorkspaceService:
         self.workspace_roots = tuple(ExecutorPath.parse(uri, platform_os=self.scope.platform_os)
                                      for uri in self.scope.workspace_root_uris)
 
-    def resolve(self, value: str) -> ExecutorPath:
+    def resolve(self, value: str | ExecutorPath) -> ExecutorPath:
+        if isinstance(value, ExecutorPath):
+            return value
         return ExecutorPath.resolve(value, cwd_uri=self.scope.cwd_uri, platform_os=self.scope.platform_os,
                                     user_home_uri=self.scope.user_home_uri)
 

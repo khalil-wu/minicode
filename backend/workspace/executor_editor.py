@@ -76,8 +76,8 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                 "conversation_id": self.context.conversation_id, "session_id": self.context.session_id}
 
     def resolve_workspace_path(self, value):
-        path = ExecutorPath.resolve(value, cwd_uri=self.cwd.uri, platform_os=self.scope.platform_os,
-            user_home_uri=self.scope.user_home_uri)
+        path = value if isinstance(value, ExecutorPath) else ExecutorPath.resolve(value, cwd_uri=self.cwd.uri,
+            platform_os=self.scope.platform_os, user_home_uri=self.scope.user_home_uri)
         if not path.is_relative_to(self.cwd) and path != self._registered_editor_file:
             raise HTTPException(400, "Path is outside workspace root.")
         return path
@@ -88,7 +88,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
 
     async def _allowed_path(self, value, *, write=False, inventory=False):
         path = self.resolve_workspace_path(value)
-        access = self.scope.resolve_access(path.uri)
+        access = self.scope.resolve_access(path)
         if not (access.can_write if write else access.can_read):
             raise HTTPException(403, f"Executor {'write' if write else 'read'} permission denied: {path.uri}")
         lexical = path
@@ -136,7 +136,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         entries = []
         if outcome["truncated"]:
             for child in await self.directory_entries(path):
-                if not self.scope.resolve_access(child.uri).can_read:
+                if not self.scope.resolve_access(child).can_read:
                     continue
                 info = await self.metadata(child)
                 entries.append(self._tree_entry(child, is_dir=info["isDirectory"], size=info["size"], modified_ms=info["modifiedAtMs"],
@@ -145,7 +145,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             walked = {self.resolve(item["path"]): item for item in outcome["entries"]}
             visible = {entry: item for entry, item in walked.items() if self.visible(entry)}
             populated = {entry.parent for entry in visible if entry.parent in walked}
-            children = [child for child in visible if child.parent not in walked and self.scope.resolve_access(child.uri).can_read]
+            children = [child for child in visible if child.parent not in walked and self.scope.resolve_access(child).can_read]
             # Source fs/walk carries only path and kind. File size and mtime
             # belong to fs/getMetadata on the same captured executor.
             async with aclosing(_ordered_reads(children, self.metadata)) as completed:
@@ -181,7 +181,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         return WorkspaceFileResponse(workspace_root=self.workspace_root_value, path=self.display(path), name=path.name,
             content=content, content_hash=WorkspaceService.content_hash(content), size_bytes=len(content.encode("utf-8")),
             modified_at=WorkspaceService.iso_timestamp(info["modifiedAtMs"] / 1000),
-            language_hint=WorkspaceService.infer_language_hint(path), read_only=not self.scope.resolve_access(path.uri).can_write,
+            language_hint=WorkspaceService.infer_language_hint(path), read_only=not self.scope.resolve_access(path).can_write,
             **self.identity(path))
 
     async def write_file(self, path, content):
@@ -293,7 +293,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         for entry in outcome["entries"]:
             path = self.resolve(entry["path"])
             relative = path.relative_to(self.cwd).as_posix()
-            if any(part in WORKSPACE_IGNORED_NAMES for part in path.relative_to(self.cwd).parts) or not self.scope.resolve_access(path.uri).can_read:
+            if any(part in WORKSPACE_IGNORED_NAMES for part in path.relative_to(self.cwd).parts) or not self.scope.resolve_access(path).can_read:
                 continue
             pure = PurePosixPath("/") / relative
             if kind != "all" and (entry["kind"] == "file") != (kind == "file"):
@@ -339,7 +339,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                     dependencies.append(relative)
                     if not include_dependencies:
                         continue
-                entries.append((path.uri, relative, kind))
+                entries.append((path, relative, kind))
             issues.extend(WorkspaceProjectIndexIssue(path=entry["path"], status_code=500, message=str(entry)) for entry in outcome["errors"])
             if outcome["truncated"]:
                 issues.append(WorkspaceProjectIndexIssue(path=".", status_code=413, message="Executor walk was truncated."))
@@ -483,7 +483,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             if buffer is not None:
                 return buffer
             try:
-                return await self.read_file(path.uri)
+                return await self.read_file(path)
             except HTTPException as error:
                 return error
 
