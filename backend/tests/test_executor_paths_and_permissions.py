@@ -68,6 +68,43 @@ def test_source_join_vectors(base, value, expected):
     assert actual.uri == expected
 
 
+@pytest.mark.parametrize("root", ["file:///workspace", "file:///C:/workspace", "file://server/share"])
+@pytest.mark.parametrize("segment,parent", [
+    (".", False), ("%2e", False), ("%2E", False),
+    ("..", True), (".%2e", True), (".%2E", True), ("%2e.", True), ("%2E.", True),
+    ("%2e%2e", True), ("%2E%2e", True), ("%2e%2E", True), ("%2E%2E", True),
+])
+def test_source_encoded_dot_segments_resolve_before_containment(root, segment, parent):
+    expected = root if parent else root + "/child"
+    path = ExecutorPath.parse(f"{root}/child/{segment}/file.txt")
+    assert path.uri == expected + "/file.txt"
+    assert path.is_relative_to(ExecutorPath.parse(root + "/child")) is not parent
+    assert ExecutorPath.parse(f"{root}/child/{segment}").uri == expected + "/"
+
+
+@pytest.mark.parametrize("segment,native", [
+    ("%252e", "%2e"), ("%252E%252e", "%2E%2e"), ("%2500", "%00"),
+    ("%252F", "%2F"), ("%255C", "%5C"), ("%2", "%2"), ("%GG", "%GG"),
+])
+def test_uri_escape_text_is_decoded_once_across_native_identity_and_containment(segment, native):
+    root = ExecutorPath.parse("file:///C:/workspace")
+    path = ExecutorPath.parse(f"{root.uri}/{segment}/file.txt")
+    assert path.native == f"C:\\workspace\\{native}\\file.txt"
+    assert path == ExecutorPath.parse(f"file:///c:/WORKSPACE/{segment}/FILE.txt")
+    assert path.is_relative_to(root)
+    assert path.parent.name == native
+    assert path.relative_to(root).as_posix() == f"{native}/file.txt"
+
+
+@pytest.mark.parametrize("segment", ["%00", "prefix%00suffix", "\0", "%00%2500"])
+def test_uri_null_rejection_keeps_reserved_opaque_paths_distinct(segment):
+    with pytest.raises(ValueError, match="Null bytes"):
+        ExecutorPath.parse(f"file:///workspace/{segment}")
+    opaque = ExecutorPath.from_native(b"/workspace/a\0b", convention="posix")
+    assert opaque.native_bytes() == b"/workspace/a\0b"
+    assert not opaque.is_relative_to(ExecutorPath.parse("file:///workspace"))
+
+
 @pytest.mark.parametrize("value", ["D:tmp", "D:..\\tmp", "abc\0file"])
 def test_other_drive_relative_and_null_retain_source_errors(value):
     with pytest.raises(ValueError):

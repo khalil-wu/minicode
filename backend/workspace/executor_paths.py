@@ -65,12 +65,12 @@ class ExecutorPath:
         segments: list[str] = []
         input_segments = path.split("/")[1:]
         for index, segment in enumerate(input_segments):
-            dot = unquote_to_bytes(segment)
-            if dot == b".":
+            dot = segment.lower()
+            if dot in {".", "%2e"}:
                 if index == len(input_segments) - 1:
                     segments.append("")
                 continue
-            if dot == b"..":
+            if dot in {"..", ".%2e", "%2e.", "%2e%2e"}:
                 anchor = int(not host and bool(segments) and bool(re.fullmatch(r"[A-Za-z]:", segments[0])))
                 if len(segments) > anchor:
                     segments.pop()
@@ -81,8 +81,9 @@ class ExecutorPath:
         first = next((index for index, segment in enumerate(segments) if segment), None)
         if not host and first is not None and _DRIVE.fullmatch(segments[first]):
             segments[first] = segments[first][0].upper() + segments[first][1:]
-        uri = urlunsplit(("file", host, "/" + "/".join(segments), "", ""))
-        if b"\0" in unquote_to_bytes(urlsplit(uri).path) and _opaque_bytes(uri) is None:
+        normalized_path = "/" + "/".join(segments)
+        uri = urlunsplit(("file", host, normalized_path, "", ""))
+        if "%00" in normalized_path and _opaque_bytes(uri) is None:
             raise ValueError("Null bytes are not allowed in executor paths")
         return cls(uri, platform_os)
 
@@ -197,15 +198,22 @@ class ExecutorPath:
     def _segments(self) -> tuple[str, ...]:
         return self._path_segments
 
+    @cached_property
+    def _decoded_segments(self) -> tuple[bytes, ...]:
+        return tuple(unquote_to_bytes(part) for part in self._segments())
+
+    @cached_property
+    def _decoded_path(self) -> bytes:
+        return unquote_to_bytes(urlsplit(self.uri).path)
+
     def _identity(self):
         return self._path_identity
 
     @cached_property
     def _path_identity(self):
         if self.convention == "windows" and _opaque_bytes(self.uri) is None:
-            parts = self._segments()
-            if not any(b"/" in unquote_to_bytes(part) or b"\\" in unquote_to_bytes(part) for part in parts):
-                return urlsplit(self.uri).netloc, unquote_to_bytes(urlsplit(self.uri).path).lower()
+            if not any(b"/" in part or b"\\" in part for part in self._decoded_segments):
+                return urlsplit(self.uri).netloc, self._decoded_path.lower()
         return self.uri
 
     def __eq__(self, other: object) -> bool:
@@ -220,7 +228,7 @@ class ExecutorPath:
         if opaque is not None:
             return opaque.decode("utf-16-le" if self.convention == "windows" else "utf-8", errors="replace")
         parsed = urlsplit(self.uri)
-        decoded = unquote_to_bytes(parsed.path).decode("utf-8", errors="replace")
+        decoded = self._decoded_path.decode("utf-8", errors="replace")
         if self.convention == "windows":
             native = ("//" + parsed.netloc + decoded if parsed.netloc else decoded.lstrip("/")).replace("/", "\\")
             return native + "\\" if re.fullmatch(r"[A-Za-z]:", native) else native
@@ -229,7 +237,7 @@ class ExecutorPath:
     def native_bytes(self) -> bytes:
         if self.convention != "posix":
             raise ValueError("Native byte paths require a POSIX executor")
-        return _opaque_bytes(self.uri) or unquote_to_bytes(urlsplit(self.uri).path)
+        return _opaque_bytes(self.uri) or self._decoded_path
 
     def to_local_path(self):
         """Lossless conversion only at the actual selected local executor."""
@@ -246,10 +254,9 @@ class ExecutorPath:
             if not re.match(r"[A-Za-z]:[\\/]|[\\/]{2}", native):
                 raise ValueError("The opaque Windows path is not absolute")
             return Path(native)
-        parts = self._segments()
-        if any(b"/" in unquote_to_bytes(part) or b"\\" in unquote_to_bytes(part) for part in parts):
+        if any(b"/" in part or b"\\" in part for part in self._decoded_segments):
             raise ValueError("Encoded Windows path separators cannot reach native conversion")
-        unquote_to_bytes(urlsplit(self.uri).path).decode("utf-8")
+        self._decoded_path.decode("utf-8")
         return Path(self.native)
 
     @property
@@ -271,10 +278,19 @@ class ExecutorPath:
         if _opaque_bytes(self.uri) is not None:
             return None
         parts = self._segments()
-        decoded = tuple(unquote_to_bytes(part) for part in parts)
+        decoded = self._decoded_segments
         if any(b"/" in part or self.convention == "windows" and b"\\" in part for part in decoded):
             return None
-        return tuple(_decode(part).translate(_ASCII_FOLD) for part in parts) if self.convention == "windows" else decoded
+        if self.convention != "windows":
+            return decoded
+        normalized = []
+        for encoded, value in zip(parts, decoded):
+            try:
+                text = value.decode("utf-8")
+            except UnicodeDecodeError:
+                text = encoded
+            normalized.append(text.translate(_ASCII_FOLD))
+        return tuple(normalized)
 
     @property
     def suffix(self) -> str:
