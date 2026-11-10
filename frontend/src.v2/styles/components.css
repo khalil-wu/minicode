@@ -61,7 +61,7 @@
 
 .btn-primary {
   background: var(--accent-primary);
-  color: white;
+  color: var(--text-on-accent);
   box-shadow: var(--shadow-sm);
 }
 

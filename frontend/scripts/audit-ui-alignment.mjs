@@ -834,8 +834,14 @@ try {
   await trigger.click();
   assert.equal(await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).locator(".appearance-code-theme-preview").count(), 1);
   await capture("07-theme-root-menu");
-  await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).hover();
+  // Keep geometry sampling independent of the native cursor while the desktop
+  // window is resized and captured. Keyboard navigation opens the same flyout.
+  await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
   await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).waitFor();
+  // Measure the settled menu: entry transforms deliberately scale painted bounds.
+  await page.locator(".appearance-code-theme-menu").evaluateAll(elements =>
+    Promise.all(elements.flatMap(element => element.getAnimations().map(animation => animation.finished))));
   const themeMenus = await page.locator(".appearance-code-theme-menu").evaluateAll(elements => elements.map(element => {
     const row = element.querySelector('[role="menuitemradio"]');
     const preview = row.querySelector(".appearance-code-theme-preview");
@@ -939,6 +945,8 @@ try {
       checks.push({ scenario: "Actual Configuration description → Agent defaults → scope toolbar; Source ghost opener and external arrow", configGeometry });
       await scope.click();
       assert.equal(await page.getByRole("option", { name: "管理员", exact: true }).count(), 1);
+      await page.getByRole("listbox").evaluate(element =>
+        Promise.all(element.getAnimations().map(animation => animation.finished)));
       const scopeMenuGeometry = await page.getByRole("listbox").evaluate(element => {
         const row = element.querySelector('[role="option"]');
         const style = getComputedStyle(row);
@@ -981,7 +989,7 @@ try {
       await auditProjectConfig({ page, app, workspace, profile, capture, checks, wire, trace });
     }
     if (label === "钩子") {
-      await assertSettingsInfoColor([51, 156, 255]);
+      await assertSettingsInfoColor([7, 95, 198]);
       const emptyTitle = page.getByText("未找到钩子", { exact: true });
       await emptyTitle.waitFor();
       const copyWidth = await emptyTitle.evaluate(element => element.parentElement.getBoundingClientRect().width);
@@ -1003,7 +1011,7 @@ try {
   trace("appearance:dark:select-mode");
   await page.getByRole("radio", { name: "深色", exact: true }).click();
   await page.locator(".settings-center-tab").filter({ hasText: "钩子" }).click();
-  const darkInfoColor = await assertSettingsInfoColor([153, 206, 255]);
+  const darkInfoColor = await assertSettingsInfoColor([139, 182, 248]);
   await capture("settings-12-dark-info-link", { darkInfoColor });
   await page.locator(".settings-center-tab").filter({ hasText: "外观" }).click();
   trace("appearance:dark:open-import");

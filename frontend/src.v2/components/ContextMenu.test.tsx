@@ -13,6 +13,30 @@ const menuLayout = (width: number, height: number) => {
 };
 
 describe("ContextMenu keyboard navigation", () => {
+  it.each(["pointer", "keyboard"])("opens again with %s while its previous exit is still running", (input) => {
+    vi.useFakeTimers();
+    const Owner = () => {
+      const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+      return <><button onClick={event => setAnchor(anchor ? null : event.currentTarget)}
+        onKeyDown={event => { if (event.key === "ArrowDown") setAnchor(event.currentTarget); }}>Options</button>
+        {anchor && <ContextMenu anchor={anchor} position={{ x: 0, y: 0 }} onClose={() => setAnchor(null)} items={[{ label: "Open" }]} />}</>;
+    };
+    render(<Owner />);
+    const trigger = screen.getByRole("button", { name: "Options" });
+    trigger.focus(); fireEvent.click(trigger);
+    const previous = screen.getByRole("menu");
+    previous.style.animationDuration = "0.1s";
+    fireEvent.keyDown(previous, { key: "Escape" });
+    expect(previous.inert).toBe(true);
+    if (input === "pointer") { fireEvent.pointerDown(trigger); fireEvent.click(trigger); }
+    else fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const reopened = screen.getByRole("menu");
+    expect(reopened).not.toBe(previous);
+    act(() => vi.advanceTimersByTime(100));
+    expect(screen.getByRole("menu")).toBe(reopened);
+    expect(reopened.inert).not.toBe(true);
+  });
+
   it("retires an open menu and flyout when its retained panel hides without selecting or restoring hidden focus", () => {
     const action = vi.fn(), close = vi.fn();
     const Panel = ({ visible }: { visible: boolean }) => {
@@ -199,6 +223,24 @@ describe("ContextMenu keyboard navigation", () => {
     expect(document.activeElement).toBe(parent);
   });
 
+  it.each(["right", "left"] as const)("keeps a direct pointer jump into its %s flyout despite the previous direction", side => {
+    menuLayout(180, 126);
+    const parentLeft = side === "right" ? 20 : window.innerWidth - 190;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: parentLeft,
+      right: parentLeft + 180, top: 100, bottom: 134, width: 180, height: 34 } as DOMRect);
+    render(<ContextMenu position={{ x: parentLeft, y: 100 }} onClose={vi.fn()} items={[
+      { label: "Open", submenu: [{ label: "Editor" }] },
+    ]} />);
+    const parent = screen.getByRole("menuitem", { name: "Open" });
+    fireEvent.click(parent);
+    const child = screen.getByRole("menuitem", { name: "Editor" });
+    expect(screen.getByRole("menu", { name: "Open" }).dataset.side).toBe(side);
+    fireEvent.mouseMove(parent, { clientX: 100, clientY: 120 });
+    fireEvent.mouseMove(parent, { clientX: side === "left" ? 110 : 90, clientY: 120 });
+    fireEvent.mouseOut(parent, { relatedTarget: child, clientX: side === "left" ? 10 : 350, clientY: 120 });
+    expect(screen.getByRole("menuitem", { name: "Editor" })).toBe(child);
+  });
+
   it("bottom-aligns Help using layout dimensions rather than its transformed paint bounds", () => {
     menuLayout(180, 126);
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
@@ -255,15 +297,49 @@ describe("ContextMenu keyboard navigation", () => {
     document.body.append(trigger, target);
     const close = vi.fn();
     trigger.focus();
-    const view = render(<ContextMenu position={{ x: 0, y: 0 }} onClose={close} items={[{ label: "Copy" }, { label: "Open", onClick: () => target.focus() }]} />);
+    const items = [{ label: "Copy" }, { label: "Open", onClick: () => target.focus() }];
+    let view = render(<ContextMenu position={{ x: 0, y: 0 }} onClose={close} items={items} />);
     screen.getByRole("menuitem", { name: "Copy" }).focus();
     fireEvent.click(screen.getByRole("menuitem", { name: "Copy" }));
     expect(document.activeElement).toBe(trigger);
+    view.unmount();
+    view = render(<ContextMenu position={{ x: 0, y: 0 }} onClose={close} items={items} />);
     screen.getByRole("menuitem", { name: "Open" }).focus();
     fireEvent.click(screen.getByRole("menuitem", { name: "Open" }));
     expect(document.activeElement).toBe(target);
     expect(close).toHaveBeenCalledTimes(2);
     view.unmount(); trigger.remove(); target.remove();
+  });
+
+  it("releases keyboard and pointer input during exit and runs the action exactly once without stealing its focus", () => {
+    vi.useFakeTimers();
+    const target = document.createElement("input"); document.body.append(target);
+    const action = vi.fn(() => target.focus()), close = vi.fn();
+    const view = render(<ContextMenu position={{ x: 0, y: 0 }} onClose={close} items={[{ label: "Open", onClick: action }]} />);
+    const menu = screen.getByRole("menu"), item = screen.getByRole("menuitem", { name: "Open" });
+    menu.style.animationDuration = "0.1s";
+    fireEvent.click(item);
+    expect(menu.inert).toBe(true);
+    expect(menu.getAttribute("aria-hidden")).toBe("true");
+    expect(close).not.toHaveBeenCalled();
+    expect(action).toHaveBeenCalledOnce();
+    fireEvent.click(item);
+    expect(action).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(100));
+    expect(close).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(target);
+    view.unmount(); target.remove();
+  });
+
+  it("cancels a pending exit when the menu owner unmounts", () => {
+    vi.useFakeTimers();
+    const close = vi.fn();
+    const view = render(<ContextMenu position={{ x: 0, y: 0 }} onClose={close} items={[{ label: "Open" }]} />);
+    const menu = screen.getByRole("menu"); menu.style.animationDuration = "0.1s";
+    fireEvent.keyDown(menu, { key: "Escape" });
+    view.unmount();
+    act(() => vi.advanceTimersByTime(200));
+    expect(close).not.toHaveBeenCalled();
   });
   it("keeps a menu on screen after a negative launcher coordinate and a viewport resize", () => {
     menuLayout(200, 180);

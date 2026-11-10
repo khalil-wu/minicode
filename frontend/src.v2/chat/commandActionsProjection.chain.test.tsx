@@ -253,7 +253,9 @@ describe("source-backed Codex activity disclosure transitions", () => {
     expect(view.result.current.title).toBe("已读取文件运行了命令");
   });
 
-  it("retains the body during the real 300 ms height and opacity closing transition", () => {
+  it("retains the body through the configured height and opacity closing transition", () => {
+    document.documentElement.style.setProperty("--duration-base", "200ms");
+    document.documentElement.style.setProperty("--easing-enter", "cubic-bezier(0.19, 1, 0.22, 1)");
     vi.stubGlobal("matchMedia", () => ({ matches: false }));
     useAppStore.setState({ reducedMotion: false });
     const motions: { onfinish: null | (() => void); cancel: ReturnType<typeof vi.fn> }[] = [];
@@ -266,12 +268,14 @@ describe("source-backed Codex activity disclosure transitions", () => {
     const view = render(<Disclosure expanded={false} />);
     view.rerender(<Disclosure expanded />);
     expect(screen.getByText("real tool evidence")).toBeTruthy();
-    expect(animate.mock.calls[0][1]).toMatchObject({ duration: 300, easing: "cubic-bezier(0.19, 1, 0.22, 1)" });
+    expect(animate.mock.calls[0][1]).toMatchObject({ duration: 200, easing: "cubic-bezier(0.19, 1, 0.22, 1)" });
     act(() => motions[0].onfinish!());
     view.rerender(<Disclosure expanded={false} />);
     expect(screen.getByText("real tool evidence")).toBeTruthy();
     act(() => motions[1].onfinish!());
     expect(screen.queryByText("real tool evidence")).toBeNull();
+    document.documentElement.style.removeProperty("--duration-base");
+    document.documentElement.style.removeProperty("--easing-enter");
   });
 
   it("keeps completed read, search and directory records in event order under one exploration summary", () => {

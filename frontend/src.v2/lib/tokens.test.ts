@@ -166,6 +166,19 @@ describe("Phase A — design token property tests", () => {
     }
   });
 
+  it("keeps readable link and keyboard focus colors separate from neutral primary actions", () => {
+    for (const theme of [dark, light]) {
+      const link = parse(resolveValue(theme, theme["--text-info"]))!;
+      const focus = parse(resolveValue(theme, theme["--focus-ring"]))!;
+      expect(oklch(link)?.c).toBeGreaterThan(0.05);
+      expect(formatHex(focus)).toBe(formatHex(link));
+      for (const name of ["--surface-base", "--surface-sidebar", "--surface-hover", "--surface-active"]) {
+        const background = parse(resolveValue(theme, theme[name]))!;
+        expect(wcagContrast(link, background), name).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
   it("P2.6 font-size ratio: adjacent --text-* steps r ∈ [1.05, 1.45]", () => {
     const sizeNames = ["--text-xs", "--text-sm", "--text-base", "--text-md", "--text-lg", "--text-xl", "--text-2xl", "--text-3xl"];
     const px = sizeNames.map((n) => {

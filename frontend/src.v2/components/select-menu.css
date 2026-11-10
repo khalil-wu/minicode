@@ -92,7 +92,7 @@
 }
 
 .mc-select-trigger:focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--accent-primary) 55%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -129,8 +129,8 @@
   padding: 6px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-medium);
+  background: var(--menu-surface);
+  box-shadow: var(--menu-shadow);
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
   animation: mc-select-enter var(--duration-fast) var(--easing-enter-snappy);
@@ -144,18 +144,21 @@
   transform-origin: bottom;
 }
 
+.mc-select-popover[data-state="closed"] {
+  pointer-events: none;
+  animation: mc-dropdown-exit var(--duration-micro) var(--easing-exit) both;
+}
+
 /* Voice and Config scope selects use the menu surface at the default size. */
 .mc-select-popover[data-settings-select="true"] {
   padding: 4px;
   border: 0;
   border-radius: 16px;
-  background: color-mix(in srgb, var(--menu-surface) 90%, transparent);
-  box-shadow: 0 0 0 .5px var(--border-subtle), var(--menu-shadow);
-  backdrop-filter: blur(8px);
+  background: var(--menu-surface);
+  box-shadow: var(--menu-shadow);
   font-family: var(--font-ui);
   font-size: var(--text-chrome);
   line-height: calc(1.25 / .875);
-  animation: none;
 }
 
 .mc-select-option-wrap {
@@ -258,7 +261,7 @@
 }
 
 @keyframes mc-select-enter {
-  from { opacity: 0; transform: scale(.98); }
+  from { opacity: 0; transform: scale(.99); }
   to { opacity: 1; transform: scale(1); }
 }
 

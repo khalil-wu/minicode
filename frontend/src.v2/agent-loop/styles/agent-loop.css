@@ -447,7 +447,7 @@
 
 .agent-loop-process-chevron {
   flex-shrink: 0;
-  transition: transform var(--duration-base) var(--easing-enter);
+  transition: transform var(--transition-fast);
 }
 
 .agent-loop-process-summary[aria-expanded="true"] .agent-loop-process-chevron {

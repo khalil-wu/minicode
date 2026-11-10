@@ -220,7 +220,8 @@ it("skips disabled actions and leaves typing and Space to the composer rather th
   expect(item.getAttribute("data-highlighted")).toBe("true");
   fireEvent.keyDown(window, { key: "Enter" });
   expect(plan).toHaveBeenCalledOnce();
-  expect(close).toHaveBeenCalledWith(true);
+  // Focus is restored before the action; delayed teardown must not reclaim it.
+  expect(close).toHaveBeenCalledWith(false);
 });
 
 it("preserves outside focus and closes stale add controls while switching conversation owners", () => {

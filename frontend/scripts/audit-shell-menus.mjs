@@ -9,6 +9,7 @@ export async function auditShellMenus({ page, capture, checks }) {
   await page.keyboard.press("ArrowRight");
   const helpMenu = page.getByRole("menu", { name: "帮助", exact: true });
   await helpMenu.waitFor();
+  await helpMenu.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
   assert.deepEqual(await helpMenu.getByRole("menuitem").allTextContents(), ["新增内容", "键盘快捷键", "使用指南"]);
   assert.equal(await helpMenu.getByRole("separator").count(), 1);
   assert.equal(await helpMenu.getByRole("menuitem").first().evaluate(element => document.activeElement === element), true);
@@ -19,9 +20,10 @@ export async function auditShellMenus({ page, capture, checks }) {
     const row = element.querySelector('[role="menuitem"]');
     return { padding: getComputedStyle(element).padding, borderWidth: getComputedStyle(element).borderTopWidth,
       blur: getComputedStyle(element).backdropFilter, fontSize: getComputedStyle(row).fontSize,
-      rowPadding: getComputedStyle(row).padding, transform: getComputedStyle(element).transform };
+      rowPadding: getComputedStyle(row).padding,
+      transformIsIdentity: new DOMMatrixReadOnly(getComputedStyle(element).transform).isIdentity };
   });
-  assert.deepEqual(helpGeometry, { padding: "4px", borderWidth: "0px", blur: "none", fontSize: "13px", rowPadding: "5px 8px", transform: "none" });
+  assert.deepEqual(helpGeometry, { padding: "4px", borderWidth: "0px", blur: "none", fontSize: "13px", rowPadding: "5px 8px", transformIsIdentity: true });
   await capture("shell-02-help-submenu");
   await page.keyboard.press("End");
   const guide = helpMenu.getByRole("menuitem", { name: "使用指南", exact: true });

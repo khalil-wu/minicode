@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { cleanup, render } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../../stores";
 import { useProcessDisclosure } from "./useProcessDisclosure";
 
@@ -11,11 +11,17 @@ function Disclosure({ expanded }: { expanded: boolean }) {
 
 const previousReducedMotion = useAppStore.getState().reducedMotion;
 const previousAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
+beforeEach(() => {
+  document.documentElement.style.setProperty("--duration-base", "200ms");
+  document.documentElement.style.setProperty("--easing-enter", "cubic-bezier(0.19, 1, 0.22, 1)");
+});
 afterEach(() => {
   cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks();
   if (previousAnimate) Object.defineProperty(HTMLElement.prototype, "animate", previousAnimate);
   else delete (HTMLElement.prototype as Partial<HTMLElement>).animate;
   useAppStore.setState({ reducedMotion: previousReducedMotion });
+  document.documentElement.style.removeProperty("--duration-base");
+  document.documentElement.style.removeProperty("--easing-enter");
 });
 
 it("reverses an unfinished disclosure from the visible frame and retires its old completion callback", () => {

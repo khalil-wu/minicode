@@ -5,6 +5,7 @@ import { useComposerPlugins } from "./useComposerPlugins";
 import { ComposerReferenceIcon } from "./ComposerReferenceIcon";
 import { composerPluginReference } from "./composer-references";
 import type { PluginContextRef } from "../stores/types";
+import { usePopupDismiss } from "../components/usePopupDismiss";
 
 export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGoal, goalAvailable, onFiles, onRemoteFiles, onGoal, onPlan, onPlugin, onClose }: {
   workspaceRoot: string;
@@ -23,12 +24,19 @@ export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGo
   const { plugins, loading, error } = useComposerPlugins(true, workspaceRoot);
   const menu = useRef<HTMLDivElement>(null);
   const focusOwner = useRef(document.activeElement);
+  const { dismiss, exiting, closing } = usePopupDismiss(menu, () => onClose(false));
+  const close = (restoreFocus: boolean) => {
+    if (!dismiss()) return false;
+    if (restoreFocus) window.dispatchEvent(new Event("composer:focus"));
+    return true;
+  };
   const [highlighted, setHighlighted] = useState("files");
   useEffect(() => {
+    if (exiting) return;
     const root = menu.current!;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.isComposing || event.defaultPrevented) return;
-      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(true); return; }
+      if (event.isComposing || event.defaultPrevented || closing.current) return;
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); return; }
       const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)'));
       const current = buttons.findIndex(button => button.dataset.addMenuItem === highlighted);
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -42,15 +50,16 @@ export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGo
       }
     };
     const handleFocus = (event: FocusEvent) => {
-      if (event.target !== focusOwner.current && !root.contains(event.target as Node)) onClose(false);
+      if (event.target !== focusOwner.current && !root.contains(event.target as Node)) close(false);
     };
     window.addEventListener("keydown", handleKeyDown, true);
     document.addEventListener("focusin", handleFocus);
     return () => { window.removeEventListener("keydown", handleKeyDown, true); document.removeEventListener("focusin", handleFocus); };
-  }, [highlighted, onClose]);
-  const choose = (action: () => void) => { onClose(true); action(); };
+  }, [highlighted, onClose, exiting]);
+  const choose = (action: () => void) => { if (close(true)) action(); };
   const enabledPlugins = plugins.filter(plugin => plugin.enabled && plugin.id);
   return <div ref={menu} className="mc-dropdown-menu composer-add-menu" role="menu" aria-label={tr("添加内容")}
+    data-state={exiting ? "closed" : "open"} aria-hidden={exiting || undefined}
     onMouseDown={event => { if ((event.target as Element).closest('button[role="menuitem"]')) event.preventDefault(); }}>
     <div className="composer-menu-heading">{tr("添加")}</div>
     <button type="button" role="menuitem" data-add-menu-item="files" data-highlighted={highlighted === "files" || undefined} aria-current={highlighted === "files" || undefined}

@@ -4,6 +4,7 @@ import type { CSSProperties, KeyboardEvent, OptionHTMLAttributes, ReactElement, 
 import { Check, ChevronDown } from "lucide-react";
 import { MenuControlSourceIcon } from "../lib/menu-control-source-icons";
 import { usePanelVisible } from "../shell/panelVisibility";
+import { usePopupDismiss } from "./usePopupDismiss";
 import "./select-menu.css";
 
 type SelectOption = {
@@ -97,6 +98,11 @@ export const SelectMenu = ({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const { dismiss, exiting, closing, reset: resetExit } = usePopupDismiss(menuRef, () => setOpen(false));
+  const closeMenu = (restoreFocus = false) => {
+    if (!open || !dismiss()) return;
+    if (restoreFocus) triggerRef.current!.focus({ preventScroll: true });
+  };
   const openedByKeyboard = useRef(false);
   const typeahead = useRef({ value: "", time: 0 });
   const menuId = useId();
@@ -109,12 +115,13 @@ export const SelectMenu = ({
   useEffect(() => {
     if (disabled || !visible) setOpen(false);
   }, [disabled, visible]);
+  useEffect(() => { if (!open) resetExit(); }, [open]);
 
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || exiting) return undefined;
     const close = (event: PointerEvent) => {
       const path = event.composedPath();
-      if (!path.includes(rootRef.current!) && !path.includes(menuRef.current!)) setOpen(false);
+      if (!path.includes(rootRef.current!) && !path.includes(menuRef.current!)) closeMenu();
     };
     const closeOnViewportChange = () => setOpen(false);
     const closeOnScroll = (event: Event) => { if (!event.composedPath().includes(menuRef.current!)) setOpen(false); };
@@ -128,7 +135,7 @@ export const SelectMenu = ({
       window.removeEventListener("resize", closeOnViewportChange);
       window.removeEventListener("scroll", closeOnScroll, true);
     };
-  }, [open, settingsSelect]);
+  }, [open, settingsSelect, exiting]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -143,7 +150,7 @@ export const SelectMenu = ({
       const maxHeight = Math.max(0, Math.min(menuMaxHeight, useAbove ? above : below));
       // Menus size to their contents unless the consumer requests a width.
       const minWidth = Math.min(menuWidth ?? 0, window.innerWidth - 16);
-      const width = Math.min(Math.max(menu.getBoundingClientRect().width, minWidth), window.innerWidth - 16);
+      const width = Math.min(Math.max(menu.offsetWidth, minWidth), window.innerWidth - 16);
       const left = align === "end" ? rect.right - width : rect.left;
       const heightInView = Math.min(menu.scrollHeight, maxHeight);
       const top = useAbove ? rect.top - sideOffset - heightInView : rect.bottom + sideOffset;
@@ -169,7 +176,7 @@ export const SelectMenu = ({
   }, [open, menuMaxHeight, menuWidth, options, align, settingsSelect]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || exiting) return;
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
@@ -179,24 +186,30 @@ export const SelectMenu = ({
       else (selectedOption ?? first)?.focus();
     });
     return () => { active = false; };
-  }, [open, settingsSelect]);
+  }, [open, settingsSelect, exiting]);
 
   const openMenu = (keyboard = false) => {
     if (disabled || !visible) return;
     openedByKeyboard.current = keyboard;
     typeahead.current = { value: "", time: 0 };
+    resetExit();
+    if (menuRef.current) {
+      menuRef.current.inert = false;
+      menuRef.current.removeAttribute("aria-hidden");
+      menuRef.current.dataset.state = "open";
+    }
     setOpen(true);
     if (!open) onOpen?.();
   };
 
   const selectValue = (nextValue: string) => {
+    if (closing.current) return;
+    closeMenu(true);
     onValueChange(nextValue);
-    setOpen(false);
-    triggerRef.current!.focus({ preventScroll: true });
   };
 
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (open && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); return; }
+    if (open && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeMenu(); return; }
     if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       event.stopPropagation();
@@ -205,15 +218,15 @@ export const SelectMenu = ({
   };
 
   const handleOptionKeyDown = (event: KeyboardEvent<HTMLElement>, option?: SelectOption) => {
+    if (closing.current) return;
     if (event.key === "Tab") {
       if (settingsSelect) { event.preventDefault(); return; }
-      setOpen(false); triggerRef.current!.focus({ preventScroll: true }); return;
+      closeMenu(true); return;
     }
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      setOpen(false);
-      triggerRef.current!.focus({ preventScroll: true });
+      closeMenu(true);
       return;
     }
     if (option && (event.key === "Enter" || (event.key === " " && (!typeahead.current.value || Date.now() - typeahead.current.time >= 1000)))) {
@@ -256,9 +269,9 @@ export const SelectMenu = ({
 
   let previousGroup = "";
   return (
-    <div ref={rootRef} className={`mc-select-menu ${className}`.trim()} style={style} data-open={open ? "true" : "false"}
+    <div ref={rootRef} className={`mc-select-menu ${className}`.trim()} style={style} data-open={open && !exiting ? "true" : "false"}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget) && !menuRef.current?.contains(event.relatedTarget)) setOpen(false);
+        if (!event.currentTarget.contains(event.relatedTarget) && !menuRef.current?.contains(event.relatedTarget)) closeMenu();
       }}
     >
       <select
@@ -281,17 +294,17 @@ export const SelectMenu = ({
         className="mc-select-trigger"
         aria-label={`${ariaLabel}，当前：${selectedText || "未选择"}`}
         aria-describedby={ariaDescribedBy}
-        aria-expanded={open}
+        aria-expanded={open && !exiting}
         aria-haspopup="listbox"
         aria-controls={open ? menuId : undefined}
         title={title || selectedText || ariaLabel}
         disabled={disabled}
         onPointerDown={event => {
           if (!settingsSelect || event.button !== 0 || event.ctrlKey) return;
-          if (open) { setOpen(false); triggerRef.current!.focus({ preventScroll: true }); }
+          if (open && !exiting) closeMenu(true);
           else { event.preventDefault(); openMenu(); }
         }}
-        onClick={event => { if (!settingsSelect || event.detail === 0) open ? setOpen(false) : openMenu(); }}
+        onClick={event => { if (!settingsSelect || event.detail === 0) open && !exiting ? closeMenu() : openMenu(); }}
         onKeyDown={handleTriggerKeyDown}
       >
         <span className="mc-select-trigger-value">
@@ -305,6 +318,8 @@ export const SelectMenu = ({
           ref={menuRef}
           id={menuId}
           role="listbox"
+          data-state={exiting ? "closed" : "open"}
+          aria-hidden={exiting || undefined}
           tabIndex={-1}
           aria-label={ariaLabel}
           onKeyDown={event => { if (event.target === event.currentTarget) handleOptionKeyDown(event); }}

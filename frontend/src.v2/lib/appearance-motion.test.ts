@@ -5,6 +5,9 @@ import { afterEach, expect, it } from "vitest";
 import { useAppStore } from "../stores";
 import files from "../../test/appearance-motion-files.json";
 
+const entryStyles = [...readFileSync("src.v2/main.tsx", "utf8").matchAll(/import "\.\/(.+\.css)"/g)]
+  .map(match => `frontend/src.v2/${match[1]}`);
+
 afterEach(() => document.querySelectorAll("[data-motion-fixture]").forEach(element => element.remove()));
 
 it("uses the real tooltip rules so explicit Off keeps animation even when the OS requests reduced motion", () => {
@@ -23,7 +26,9 @@ it("uses the real tooltip rules so explicit Off keeps animation even when the OS
 it("keeps every audited OS media rule conditional on the explicit application preference", () => {
   expect(files).toContain("frontend/src.v2/panels/BrowserPanel.css");
   expect(files).toContain("frontend/src.v2/composer/composer.css");
-  for (const file of files) {
+  // Include every stylesheet loaded by the real entry. A new global style
+  // must not bypass the user's explicit preference by missing the fixture list.
+  for (const file of new Set([...files, ...entryStyles])) {
     const style = postcss.parse(readFileSync(`../${file}`, "utf8"));
     style.walkAtRules("media", media => {
       if (!/prefers-reduced-motion\s*:\s*reduce/.test(media.params)) return;

@@ -21,32 +21,32 @@
 
 :root {
   color-scheme: dark;
-  --desktop-shell-background: #151719;
+  --desktop-shell-background: #202020;
   --desktop-frame-border: #ffffff0d;
-  --desktop-edge-glow: inset 0 0 24px 3px #87cefa1a, inset 0 0 64px 8px #87cefa0a;
+  --desktop-edge-glow: none;
 
   /* ── Surface layers (9) — Pillar 1.1
      Tonal monotonicity invariant (P1.2):
        L is monotone non-decreasing across the 9 steps,
-       adjacent ΔL ∈ [0.018, 0.035].
+       adjacent planes remain distinct without tinting the UI.
 
      Neutral charcoal planes keep prose and the editor in one workbench. ──── */
-  --surface-sunken:  oklch(0.185 0.002 250);
-  --surface-base:    oklch(0.205 0.002 250);
-  --surface-sidebar: oklch(0.225 0.002 250);
-  --surface-page:    oklch(0.245 0.002 250);
-  --surface-soft:    oklch(0.265 0.003 250);
+  --surface-sunken:  oklch(0.185 0 0);
+  --surface-base:    oklch(0.209 0 0);
+  --surface-sidebar: oklch(0.2435 0 0);
+  --surface-page:    oklch(0.252 0 0);
+  --surface-soft:    oklch(0.260 0 0);
   --surface-selected: color-mix(in oklab, var(--text-primary) 5%, transparent);
-  --surface-panel:   oklch(0.285 0.003 250);
-  --surface-raised:  oklch(0.305 0.004 250);
-  --surface-hover:   oklch(0.325 0.004 250);
-  --surface-active:  oklch(0.345 0.004 250);
+  --surface-panel:   oklch(0.269 0 0);
+  --surface-raised:  oklch(0.277 0 0);
+  --surface-hover:   oklch(0.293 0 0);
+  --surface-active:  oklch(0.321 0 0);
 
-  /* Workbench-only surfaces; settings retain the established palette. */
-  --workbench-sidebar: oklch(0.205 0.002 250);
-  --workbench-tool: oklch(0.255 0.002 250);
-  --workbench-hover: oklch(0.285 0.002 250);
-  --workbench-active: oklch(0.315 0.003 250);
+  /* Shared chrome roles keep sidebars and settings on the same palette. */
+  --workbench-sidebar: var(--surface-sidebar);
+  --workbench-tool: oklch(0.255 0 0);
+  --workbench-hover: oklch(0.285 0 0);
+  --workbench-active: oklch(0.315 0 0);
 
   /* Code surfaces and syntax follow the app theme, independently of prose. */
   --editor-background: #181818;
@@ -87,18 +87,18 @@
   /* ── Text (4) — Pillar 1.2
      WCAG invariant (P1.3): primary/secondary ≥ 4.5:1 vs any surface,
      muted ≥ 3.0:1 (large text only). ────────────────────── */
-  --text-primary:   oklch(0.930 0.002 250);
-  --text-secondary: oklch(0.800 0.003 250);
-  --text-muted:     oklch(0.680 0.004 250);
-  --text-disabled:  oklch(0.930 0.002 250 / 0.40);
+  --text-primary:   oklch(0.943 0 0);
+  --text-secondary: oklch(0.783 0 0);
+  --text-muted:     oklch(0.706 0 0);
+  --text-disabled:  oklch(0.943 0 0 / 0.40);
   --text-on-accent: oklch(0.18 0 0);
 
   /* ── Border (4) — Pillar 1.3 ──────────────────────────── */
   --border-subtle: oklch(0.870 0.006 250 / 0.12);
   --border-soft:   oklch(0.870 0.006 250 / 0.18);
   --border-strong: oklch(0.870 0.006 250 / 0.30);
-  --border-focus:  var(--accent-primary);
-  --focus-ring:    var(--accent-primary);
+  --border-focus:  var(--text-info);
+  --focus-ring:    var(--border-focus);
 
   /* Neutral interaction colors shared by controls, links and selected text. */
   --accent-primary:   oklch(0.82 0 0);
@@ -123,7 +123,7 @@
   --state-danger:       oklch(0.71 0.16 28);
   --state-danger-soft:  oklch(0.71 0.16 28 / 0.12);
   --state-info:         oklch(0.76 0 0);
-  --text-info:          oklch(0.8322390331 0.0885122441 246.9536732); /* dark blue-100, #99ceff. */
+  --text-info:          oklch(0.77 0.106 259); /* Links and keyboard focus. */
   --sidebar-pin-drop-info: #63a8f8;
   --state-info-soft:    oklch(0.76 0 0 / 0.12);
   /* Agent identity colors remain independent of execution state. */
@@ -199,6 +199,8 @@
   --radius-lg:   16px;
   --radius-xl:   20px;
   --radius-full: 9999px;
+  --radius-row: 10px;
+  --radius-composer: 22px;
 
   /* ── Shadows (4) — legacy names, aliased to the refined oklch set ──── */
   --shadow-sm:     var(--shadow-refined);
@@ -210,6 +212,8 @@
   --shadow-refined:       0 1px 2px oklch(0 0 0 / 0.06), 0 4px 14px oklch(0 0 0 / 0.06);
   --shadow-refined-hover: 0 2px 4px oklch(0 0 0 / 0.08), 0 8px 24px oklch(0 0 0 / 0.10);
   --shadow-refined-focus: 0 0 0 3px var(--accent-soft);
+  --shadow-popover: 0 0 0 .5px var(--border-subtle), 0 8px 24px -6px oklch(0 0 0 / 0.24);
+  --shadow-composer: 0 1px 2px oklch(0 0 0 / 0.04), 0 4px 12px oklch(0 0 0 / 0.04);
 
   /* ── Glass effects (精致版毛玻璃) ────────────────────── */
   --glass-backdrop: blur(12px) saturate(150%);
@@ -375,9 +379,9 @@
    ════════════════════════════════════════════════════════ */
 [data-theme="light"] {
   color-scheme: light;
-  --desktop-shell-background: #eef3f9;
-  --desktop-frame-border: #e5e9ee;
-  --desktop-edge-glow: inset 0 0 24px 3px #87cefa2b, inset 0 0 64px 8px #87cefa12;
+  --desktop-shell-background: #f5f5f5;
+  --desktop-frame-border: #e5e5e5;
+  --desktop-edge-glow: none;
 
   /* Light mode uses white content planes with neutral, low-contrast interaction
      fills. This keeps hierarchy without turning every page into a grey card.
@@ -392,19 +396,19 @@
      carried by 1px hairlines. Re-laddered so *planes* (not lines) carry depth:
      white content floats above neutral grey chrome (macOS sidebar-grey model).
      Still monotone, still ≥ each adjacent step distinguishable. */
-  --surface-sunken:  oklch(0.955 0.002 250);
+  --surface-sunken:  oklch(0.955 0 0);
   --surface-base:    oklch(1 0 0);
-  --surface-sidebar: oklch(0.965 0.002 250);
+  --surface-sidebar: oklch(0.970 0 0);
   --surface-page:    oklch(1 0 0);
-  --surface-soft:    oklch(0.975 0.003 250);
+  --surface-soft:    oklch(0.975 0 0);
   --surface-selected: color-mix(in oklab, var(--text-primary) 5%, transparent);
-  --surface-panel:   oklch(0.960 0.003 250);
+  --surface-panel:   oklch(0.960 0 0);
   --surface-raised:  oklch(1 0 0);
-  --surface-hover:   oklch(0.940 0.004 250);
-  --surface-active:  oklch(0.915 0.005 250);
+  --surface-hover:   oklch(0.940 0 0);
+  --surface-active:  oklch(0.915 0 0);
 
-  --workbench-sidebar: #f9fbfd;
-  --workbench-tool: oklch(0.978 0.001 250);
+  --workbench-sidebar: var(--surface-sidebar);
+  --workbench-tool: oklch(0.978 0 0);
   --workbench-hover: oklch(0.958 0 0);
   --workbench-active: oklch(0.937 0 0);
 
@@ -444,18 +448,18 @@
   --editor-bracket-3: #43767c;
 
   /* Separate reading text, secondary controls, and quiet process evidence. */
-  --text-primary:   #1a1c1f;
-  --text-secondary: oklch(0.470 0.005 250);
-  --text-muted:     oklch(0.560 0.005 250);
-  --text-disabled:  oklch(0.300 0.004 250 / 0.48);
+  --text-primary:   #202020;
+  --text-secondary: oklch(0.475 0 0);
+  --text-muted:     oklch(0.517 0 0);
+  --text-disabled:  oklch(0.300 0 0 / 0.48);
   --text-on-accent: oklch(0.985 0.005 250);
 
   /* Border (4) */
   --border-subtle: oklch(0.300 0.006 250 / 0.10);
   --border-soft:   oklch(0.300 0.006 250 / 0.16);
   --border-strong: oklch(0.300 0.006 250 / 0.28);
-  --border-focus:  var(--accent-primary);
-  --focus-ring:    var(--accent-primary);
+  --border-focus:  var(--text-info);
+  --focus-ring:    var(--border-focus);
 
   /* Accent (7) — light mode pushes L lower so primary stays
      ≥ 4.5:1 vs surface-page (P1.4 invariant under light theme). */
@@ -477,7 +481,7 @@
   --state-danger:       oklch(0.55 0.18 28);
   --state-danger-soft:  oklch(0.55 0.18 28 / 0.12);
   --state-info:         oklch(0.48 0 0);
-  --text-info:          oklch(0.6820337244 0.1734435798 251.1105012); /* light blue-300, #339cff. */
+  --text-info:          #075fc6;
   --sidebar-pin-drop-info: #3a83f7;
   --state-info-soft:    oklch(0.48 0 0 / 0.12);
   --agent-identity-teal:   oklch(0.55 0.10 183);
@@ -506,6 +510,8 @@
   --shadow-soft:   var(--shadow-refined);
   --shadow-medium: var(--shadow-refined-hover);
   --shadow-strong-overlay: 0 10px 30px oklch(0.15 0.005 250 / 0.22);
+  --shadow-popover: 0 0 0 .5px var(--border-subtle), 0 8px 24px -6px oklch(0 0 0 / 0.16);
+  --shadow-composer: 0 1px 2px oklch(0 0 0 / 0.04), 0 4px 12px oklch(0 0 0 / 0.04);
 
   /* Backward-compat aliases (mirror :root layout). */
   --surface-elevated:     var(--surface-raised);

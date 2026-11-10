@@ -168,7 +168,7 @@
 
 .skills-page-heading h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: calc(24px * var(--app-text-scale));
   line-height: 1.25;
   font-weight: var(--fw-medium);
   letter-spacing: 0;
@@ -177,7 +177,7 @@
 .skills-page-heading p {
   margin: 4px 0 0;
   color: var(--text-muted);
-  font-size: 15px;
+  font-size: var(--mc-font-body);
   line-height: 1.5;
 }
 

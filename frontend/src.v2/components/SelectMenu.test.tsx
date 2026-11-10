@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { useState } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SelectMenu } from "./SelectMenu";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -19,7 +19,35 @@ const ControlledSelect = ({ disabled = false }: { disabled?: boolean }) => {
 };
 
 describe("SelectMenu", () => {
-  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
+
+  it.each(["", "settings-select"])("restores keyboard navigation when a %s select reopens during its exit", async (className) => {
+    vi.useFakeTimers();
+    const change = vi.fn();
+    render(<SelectMenu ariaLabel="Scope" className={className} value="user" onValueChange={change}>
+      <option value="project">Project</option><option value="user">User</option>
+    </SelectMenu>);
+    const trigger = screen.getByRole("button", { name: "Scope，当前：User" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    await act(async () => { await Promise.resolve(); });
+    const menu = screen.getByRole("listbox");
+    menu.style.animationDuration = "0.1s";
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(document.activeElement).toBe(trigger);
+    expect(menu.inert).toBe(true);
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    await act(async () => { await Promise.resolve(); });
+    const reopened = screen.getByRole("listbox");
+    expect(reopened.inert).not.toBe(true);
+    expect(reopened.contains(document.activeElement)).toBe(true);
+    act(() => vi.advanceTimersByTime(100));
+    expect(screen.getByRole("listbox")).toBe(reopened);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.keyDown(document.activeElement!, { key: "End" });
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(change).toHaveBeenCalledExactlyOnceWith("user");
+  });
 
   it.each(["", "settings-select"])("closes a retained %s select on panel hide while preserving its selected value", async (className) => {
     const change = vi.fn();
@@ -202,9 +230,13 @@ describe("SelectMenu", () => {
   });
 
   it("anchors an intrinsically wider option menu at the trigger end instead of the selected label width", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function () {
+      return this.classList.contains("mc-select-popover") ? 380 : 120;
+    });
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
       return this.classList.contains("mc-select-popover")
-        ? { left: 0, right: 380, top: 0, bottom: 80, width: 380, height: 80 } as DOMRect
+        // Entrance transforms change paint bounds, not the eventual menu width.
+        ? { left: 0, right: 376.2, top: 0, bottom: 80, width: 376.2, height: 80 } as DOMRect
         : { left: 600, right: 720, top: 100, bottom: 132, width: 120, height: 32 } as DOMRect;
     });
     render(<SelectMenu ariaLabel="实际选项" align="end" value="short" onValueChange={vi.fn()}>
@@ -218,6 +250,9 @@ describe("SelectMenu", () => {
   });
 
   it.each([undefined, 240])("preserves intrinsic narrow settings menus and explicit consumer widths (%s)", (menuWidth) => {
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function () {
+      return this.classList.contains("mc-select-popover") ? menuWidth ?? 88 : 120;
+    });
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
       const width = this.classList.contains("mc-select-popover") ? menuWidth ?? 88 : 120;
       return { left: this.classList.contains("mc-select-popover") ? 0 : 600,

@@ -16,8 +16,8 @@ export const emptyAppearanceColors = (): AppearanceColors => ({ light: null, dar
 // Inactive variants cannot read the currently painted variant's computed style.
 // These are the authored base values in styles/tokens.css, not a theme preset.
 export const defaultAppearanceColors: Record<AppearanceVariant, AppearanceColorValues> = {
-  light: { accent: formatHex("oklch(0.38 0 0)")!, surface: "#ffffff", ink: "#1a1c1f" },
-  dark: { accent: formatHex("oklch(0.82 0 0)")!, surface: formatHex("oklch(0.205 0.002 250)")!, ink: formatHex("oklch(0.930 0.002 250)")! },
+  light: { accent: formatHex("oklch(0.38 0 0)")!, surface: "#ffffff", ink: "#202020" },
+  dark: { accent: formatHex("oklch(0.82 0 0)")!, surface: formatHex("oklch(0.209 0 0)")!, ink: formatHex("oklch(0.943 0 0)")! },
 };
 export const parseAppearanceColors = (raw: string | null): AppearanceColors =>
   raw === null ? emptyAppearanceColors() : savedColors.parse(JSON.parse(raw));
@@ -106,6 +106,7 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
     "--border-soft": borderLight,
     "--border-strong": borderHeavy,
     "--border-focus": focus,
+    "--focus-ring": focus,
     "--accent-primary": colors.accent,
     "--accent-secondary": accentText,
     "--accent-strong": colors.accent,

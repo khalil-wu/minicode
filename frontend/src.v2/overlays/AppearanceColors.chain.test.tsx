@@ -140,7 +140,7 @@ it("keeps both variants and follows system changes without leaking the old varia
     light = true; act(syncSystemTheme);
     expect(useAppStore.getState().resolvedTheme).toBe("light");
     expect(document.documentElement.style.getPropertyValue("--surface-base")).toBe("#f3e8d7");
-    expect(document.documentElement.style.getPropertyValue("--text-primary")).toBe("#1a1c1f");
+    expect(document.documentElement.style.getPropertyValue("--text-primary")).toBe("#202020");
     expect(initialAppearanceColors()).toMatchObject({ light: { surface: "#f3e8d7" }, dark: { ink: "#bbddee" } });
   } finally { window.matchMedia = previous; }
 });

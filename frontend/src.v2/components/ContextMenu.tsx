@@ -5,6 +5,7 @@ import { MenuSourceIcon } from "../lib/menu-source-icons";
 import { SidebarSortSourceIcon } from "../lib/sidebar-sort-icons";
 import { Tip } from "./Tooltip";
 import { usePanelVisible } from "../shell/panelVisibility";
+import { usePopupDismiss } from "./usePopupDismiss";
 
 export interface ContextMenuItem {
   label: string;
@@ -46,16 +47,25 @@ interface ContextMenuProps {
 export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className, style, itemFontSize, returnFocusTo, anchor, side = "bottom", align = "end", alignOffset = 0 }: ContextMenuProps) => {
   const visible = usePanelVisible();
   const surfaces = useRef(new Set<HTMLElement>());
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const { dismiss: beginExit, exiting, closing } = usePopupDismiss(surfaceRef, onClose);
   const triggerRef = useRef(returnFocusTo ?? document.activeElement as HTMLElement);
   const focusListenerRef = useRef<(event: FocusEvent) => void>();
   const closeMenu = () => {
+    if (closing.current) return false;
     window.removeEventListener("focusin", focusListenerRef.current!);
-    onClose();
+    const started = beginExit();
+    for (const surface of surfaces.current) {
+      surface.inert = true;
+      surface.setAttribute("aria-hidden", "true");
+      surface.dataset.state = "closed";
+    }
+    return started;
   };
 
   // Dismiss on outside mousedown or Escape; arrow/Home/End roving focus
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || exiting) return;
     const containsEvent = (event: Event) => (anchor != null && event.composedPath().includes(anchor))
       || [...surfaces.current].some(surface => event.composedPath().includes(surface));
     const handleMouseDown = (e: MouseEvent) => {
@@ -75,13 +85,13 @@ export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className
       window.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("focusin", handleFocus);
     };
-  }, [onClose, anchor, visible]);
+  }, [onClose, anchor, visible, exiting]);
   useEffect(() => { if (!visible) onClose(); }, [visible, onClose]);
 
-  const dismiss = () => { closeMenu(); triggerRef.current?.focus({ preventScroll: true }); };
-  const select = (item: ContextMenuItem) => { dismiss(); item.onClick?.(); };
+  const dismiss = () => { if (!closeMenu()) return false; triggerRef.current?.focus({ preventScroll: true }); return true; };
+  const select = (item: ContextMenuItem) => { if (dismiss()) item.onClick?.(); };
   return visible ? createPortal(<MenuSurface items={items} position={position} surfaces={surfaces.current} onDismiss={dismiss} onSelect={select}
-    id={id} ariaLabel={ariaLabel} className={className} style={style} itemFontSize={itemFontSize} trigger={anchor} side={side} align={align} alignOffset={alignOffset} />, document.body) : null;
+    id={id} ariaLabel={ariaLabel} className={className} style={style} itemFontSize={itemFontSize} trigger={anchor} side={side} align={align} alignOffset={alignOffset} surfaceRef={surfaceRef} exiting={exiting} />, document.body) : null;
 };
 
 const surfaceStyle: CSSProperties = {
@@ -100,7 +110,7 @@ const containsPoint = (point: Point, polygon: Point[]) => {
   return inside;
 };
 
-function MenuSurface({ items, position, anchor, trigger, side, align = "end", alignOffset = 0, focusFirst = false, surfaces, onDismiss, onSelect, onBack, id, ariaLabel, className, style, itemFontSize, maxHeight, alignToParentBottom, surfaceRef }: {
+function MenuSurface({ items, position, anchor, trigger, side, align = "end", alignOffset = 0, focusFirst = false, surfaces, onDismiss, onSelect, onBack, id, ariaLabel, className, style, itemFontSize, maxHeight, alignToParentBottom, surfaceRef, exiting = false }: {
   items: ContextMenuItem[];
   position: { x: number; y: number };
   anchor?: HTMLButtonElement;
@@ -121,6 +131,7 @@ function MenuSurface({ items, position, anchor, trigger, side, align = "end", al
   itemFontSize?: string;
   alignToParentBottom?: boolean;
   surfaceRef?: RefObject<HTMLDivElement>;
+  exiting?: boolean;
 }) {
   const ownRef = useRef<HTMLDivElement>(null);
   const ref = surfaceRef ?? ownRef;
@@ -134,9 +145,11 @@ function MenuSurface({ items, position, anchor, trigger, side, align = "end", al
   const reserveIcon = items.some(item => item.icon !== undefined);
   const clearHover = () => { if (hover.current) window.clearTimeout(hover.current.timer); hover.current = null; };
   const clearGrace = () => { if (grace.current) window.clearTimeout(grace.current.timer); grace.current = null; };
+  useEffect(() => { if (exiting) { clearHover(); clearGrace(); } }, [exiting]);
   const headingToSubmenu = (event: ReactMouseEvent) => grace.current?.side === pointer.current.direction
     && containsPoint({ x: event.clientX, y: event.clientY }, grace.current.area);
   const openSubmenu = (index: number, button: HTMLButtonElement, focusFirst: boolean) => {
+    if (ref.current!.inert) return;
     clearHover(); clearGrace();
     setSubmenu({ index, anchor: button, focusFirst });
   };
@@ -161,6 +174,10 @@ function MenuSurface({ items, position, anchor, trigger, side, align = "end", al
       return;
     }
     clearGrace();
+    // A fast pointer move can land inside the flyout without another move
+    // event on the parent. Its actual destination takes precedence over the
+    // cached direction used for the diagonal corridor between the surfaces.
+    if (event.relatedTarget instanceof Node && submenuRef.current.contains(event.relatedTarget)) return;
     const rect = submenuRef.current.getBoundingClientRect();
     const side = submenuRef.current.dataset.side as "left" | "right";
     const near = side === "right" ? rect.left : rect.right;
@@ -269,6 +286,8 @@ function MenuSurface({ items, position, anchor, trigger, side, align = "end", al
       className={className ? `context-menu-surface ${className}` : "context-menu-surface"}
       tabIndex={-1}
       role="menu"
+      data-state={exiting ? "closed" : "open"}
+      aria-hidden={exiting || undefined}
       data-side={anchor ? adjusted.side : side}
       onKeyDown={handleKeyDown}
       onMouseMoveCapture={event => {
@@ -276,7 +295,10 @@ function MenuSurface({ items, position, anchor, trigger, side, align = "end", al
         pointer.current.x = event.clientX;
       }}
       aria-label={ariaLabel ?? anchor?.textContent ?? undefined}
-      style={{ ...surfaceStyle, ...style, ...(maxHeight === undefined ? {} : { maxHeight: `min(${maxHeight}px, calc(100dvh - 16px))` }), left: adjusted.x, top: adjusted.y }}
+      style={{ ...surfaceStyle, "--mc-menu-origin": anchor ? adjusted.side === "left" ? "top right" : "top left"
+        : side === "top" ? "bottom center" : side === "right" ? `${align === "end" ? "bottom" : "top"} left`
+          : side === "left" ? `${align === "end" ? "bottom" : "top"} right` : "top center",
+        ...style, ...(maxHeight === undefined ? {} : { maxHeight: `min(${maxHeight}px, calc(100dvh - 16px))` }), left: adjusted.x, top: adjusted.y } as CSSProperties}
     >
       {items.map((item, i) =>
         item.separator ? (
@@ -357,7 +379,7 @@ function MenuSurface({ items, position, anchor, trigger, side, align = "end", al
     {submenu && !items[submenu.index]?.disabled && items[submenu.index]?.submenu && createPortal(<MenuSurface items={items[submenu.index].submenu!} position={{ x: 0, y: 0 }} anchor={submenu.anchor}
       className={items[submenu.index].submenuClassName}
       ariaLabel={typeof items[submenu.index].label === "string" ? items[submenu.index].label as string : undefined}
-      focusFirst={submenu.focusFirst} surfaces={surfaces} onDismiss={onDismiss} onSelect={onSelect}
+      focusFirst={submenu.focusFirst} surfaces={surfaces} onDismiss={onDismiss} onSelect={onSelect} exiting={exiting}
       itemFontSize={itemFontSize}
       surfaceRef={submenuRef}
       alignToParentBottom={items[submenu.index].alignToParentBottom}
