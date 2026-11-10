@@ -1191,6 +1191,22 @@ describe("EditorPanel", () => {
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({ path: "renamed/main.ts", content: "current", loading: false });
   });
 
+  it("shares the pending file read while a preview is activated, kept and pinned", async () => {
+    let finish!: (value: Awaited<ReturnType<typeof readWorkspaceFile>>) => void;
+    vi.mocked(readWorkspaceFile).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    useAppStore.setState({ editorTabs: [{ id: "pending-preview", path: "preview.ts", content: "", original: "", loading: true, preview: true }],
+      activeTabPath: "preview.ts" });
+    render(<EditorPanel />);
+    await waitFor(() => expect(readWorkspaceFile).toHaveBeenCalledTimes(1));
+    act(() => useAppStore.getState().setActiveTab("preview.ts"));
+    act(() => useAppStore.getState().keepEditorTab("preview.ts"));
+    act(() => useAppStore.getState().pinEditorTab("preview.ts", true));
+    expect(readWorkspaceFile).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ path: "preview.ts", content: "export const loaded = true;", content_hash: "loaded-hash" }));
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ id: "pending-preview", loading: false,
+      content: "export const loaded = true;", contentHash: "loaded-hash", preview: false, pinned: true });
+  });
+
   it("navigates file tabs with arrow, Home and End keys while retaining their buffers", async () => {
     const paths = ["first.ts", "second.ts", "third.ts"];
     useAppStore.setState({

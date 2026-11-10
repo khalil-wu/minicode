@@ -417,6 +417,11 @@ const readFileSnapshot = async (path: string, workingDirectory: string, owner?: 
   };
 };
 
+const samePendingFileRead = (left: EditorTab, right: EditorTab) => left.id === right.id
+  && left.path === right.path && left.workspaceOwner === right.workspaceOwner
+  && left.content === right.content && left.original === right.original && left.contentHash === right.contentHash
+  && left.recoveryPending === right.recoveryPending;
+
 export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" } = {}) => {
   const { t: tr } = useI18n();
   const explorerId = useId();
@@ -496,7 +501,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const [editorEpoch, setEditorEpoch] = useState(0);
   const pendingRevealRef = useRef<EditorTarget | null>(null);
   const loadEpochRef = useRef(new Map<string, number>());
-  const loadingTabsRef = useRef(new WeakSet<EditorTab>());
+  const loadingTabsRef = useRef(new Map<string, { tab: EditorTab; workspace: string }>());
   const openingRequestsRef = useRef(new WeakSet<EditorOpenRequest>());
 
   const activeTab = tabs.find((tab) => editorPathsEqual(tab.path, activeTabPath, workingDirectory)) ?? null;
@@ -650,11 +655,18 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   }, [editorOpenRequests, consumeEditorOpenRequest, openEditorTab, workingDirectory]);
 
   useEffect(() => {
+    const pending = loadingTabsRef.current;
+    for (const [id, read] of pending) {
+      if (!workspaceRootsEqual(read.workspace, workingDirectory) || !tabs.some(tab => tab.id === id && tab.loading)) pending.delete(id);
+    }
     for (const tab of tabs) {
-      if (tab.loading && !loadingTabsRef.current.has(tab)) {
-        loadingTabsRef.current.add(tab);
-        void loadFileContent(tab);
-      }
+      if (!tab.loading || tab.recoveryPending) continue;
+      const read = pending.get(tab.id);
+      // Activating, pinning or keeping a preview clones the tab but keeps the
+      // same file request. A rename, restored buffer or new owner starts a new read.
+      if (read && samePendingFileRead(read.tab, tab)) continue;
+      pending.set(tab.id, { tab, workspace: workingDirectory });
+      void loadFileContent(tab);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs, workingDirectory]);
@@ -682,7 +694,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       if (loadEpochRef.current.get(epochKey) !== epoch) return;
       if (!workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
       const currentState = useAppStore.getState();
-      if (!currentState.editorTabs.includes(tab)) return;
+      const currentTab = currentState.editorTabs.find(entry => entry.id === tab.id);
+      if (!currentTab?.loading || !samePendingFileRead(currentTab, tab)) return;
       callback();
     };
     if (isImagePath(path) || isPdfPath(path)) {
