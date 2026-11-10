@@ -259,17 +259,16 @@ async def executor_candidate_files(service, root):
     pending, seen = [(root, ())], 0
     while pending:
         directory, specs = pending.pop()
-        entries = await _directory_entries(service, directory)
-        if any(service.resolve(entry["path"]).name == ".gitignore" and entry["kind"] == "file" for entry in entries):
+        entries = [(service.resolve(entry["path"]), entry["kind"]) for entry in await _directory_entries(service, directory)]
+        if any(path.name == ".gitignore" and kind == "file" for path, kind in entries):
             ignore = directory.joinpath(".gitignore")
             if service.scope.resolve_access(ignore).can_read:
                 specs = (*specs, (directory, GitIgnoreSpec.from_lines((await service.read_text(ignore)).splitlines())))
-        for entry in entries:
+        for path, kind in entries:
             seen += 1
             if seen > 50_000:
                 raise SearchResourceLimitError("executor search exceeded 50000 entries; narrow the path")
-            path = service.resolve(entry["path"])
-            is_dir = entry["kind"] == "directory"
+            is_dir = kind == "directory"
             if is_dir and path.name.casefold() in _IGNORE_DIRS or not service.scope.resolve_access(path).can_read:
                 continue
             ignored = False
@@ -281,7 +280,7 @@ async def executor_candidate_files(service, root):
                 continue
             if is_dir:
                 pending.append((path, specs))
-            elif entry["kind"] == "file":
+            elif kind == "file":
                 yield path
 
 

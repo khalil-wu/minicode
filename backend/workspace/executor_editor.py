@@ -164,6 +164,10 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             has_children=has_children, **self.identity(child))
 
     async def read_file(self, value):
+        path, content, info = await self.read_indexed_text(value)
+        return self.file_payload(path, content, info)
+
+    async def read_indexed_text(self, value):
         path, info = await self._allowed_path(value)
         if info is None:
             raise HTTPException(404, f"Path not found: {value}")
@@ -175,7 +179,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             content = (await self.read_bytes(path, limit=WORKSPACE_MAX_FILE_BYTES)).decode("utf-8")
         except UnicodeDecodeError as error:
             raise HTTPException(400, "Only UTF-8 text files are supported.") from error
-        return self.file_payload(path, content, info)
+        return path, content, info
 
     def file_payload(self, path, content, info):
         return WorkspaceFileResponse(workspace_root=self.workspace_root_value, path=self.display(path), name=path.name,
@@ -330,10 +334,11 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                 if entry["kind"] != "file":
                     continue
                 path = self.resolve(entry["path"])
-                relative = path.relative_to(self.cwd).as_posix()
-                dependency = "node_modules" in path.relative_to(self.cwd).parts
-                kind = _file_kind(path.pure, dependency=dependency)
-                if kind is None or any(part in _DEPENDENCY_IGNORED_DIRS for part in path.relative_to(self.cwd).parts[:-1]):
+                relative_path = path.relative_to(self.cwd)
+                relative = relative_path.as_posix()
+                dependency = "node_modules" in relative_path.parts
+                kind = _file_kind(relative_path, dependency=dependency)
+                if kind is None or any(part in _DEPENDENCY_IGNORED_DIRS for part in relative_path.parts[:-1]):
                     continue
                 if dependency:
                     dependencies.append(relative)
@@ -483,7 +488,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             if buffer is not None:
                 return buffer
             try:
-                return await self.read_file(path)
+                return await self.read_indexed_text(path)
             except HTTPException as error:
                 return error
 
@@ -493,9 +498,8 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                     error = snapshot
                     issues.append({"path": relative, "message": str(error.detail)})
                     continue
-                content = snapshot.content
+                content = buffer.content if buffer is not None else snapshot[1]
                 original = buffer.original if buffer is not None else content
-                content_hash, read_only = snapshot.content_hash, snapshot.read_only
                 if "\0" in content or pattern.search(content) is None:
                     continue
                 utf16, starts = _text_index(content)
@@ -515,6 +519,8 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                         "groups": groups, "named_groups": {name: groups[index - 1] for name, index in pattern.groupindex.items()}})
                     count += 1
                 if matches:
+                    content_hash = buffer.content_hash if buffer is not None else WorkspaceService.content_hash(content)
+                    read_only = buffer.read_only if buffer is not None else not self.scope.resolve_access(path).can_write
                     files.append({"path": relative, "content": content, "original": original, "content_hash": content_hash,
                         "size_bytes": len(content.encode("utf-8")), "read_only": read_only, "from_buffer": buffer is not None, "matches": matches, **self.identity(path)})
                 if truncated:

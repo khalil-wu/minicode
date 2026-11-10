@@ -8,6 +8,7 @@ import pytest
 
 from backend.tests.test_executor_tool_admission import executor_host
 from backend.workspace.executor_editor import ExecutorEditorService
+from backend.workspace.service import WorkspaceService
 from backend.workspace.text_search import SearchBuffer, WorkspaceTextSearchRequest
 
 
@@ -23,12 +24,12 @@ async def test_search_preserves_order_unicode_buffers_and_issues_when_reads_fini
     host = executor_host
     for name, content in {
         "00.ts": "😀 NEEDLE\r\n", "01.ts": "disk unchanged", "02.ts": "NEEDLE\n",
-        "03.ts": "no match\n" * 100, "04.ts": "NEEDLE excluded",
+        "03.ts": "NEEDLEish no whole-word match\n" * 100, "04.ts": "NEEDLE excluded",
     }.items():
         (host.workspace / name).write_text(content, encoding="utf-8")
     (host.workspace / "05.ts").write_bytes(b"\xff")
     async with ExecutorEditorService(editor_context(host)) as service:
-        original = service.read_file
+        original = service.read_indexed_text
         later_finished = asyncio.Event()
         read_paths = []
 
@@ -42,7 +43,7 @@ async def test_search_preserves_order_unicode_buffers_and_issues_when_reads_fini
                 later_finished.set()
             return result
 
-        monkeypatch.setattr(service, "read_file", read)
+        monkeypatch.setattr(service, "read_indexed_text", read)
         from backend.workspace import text_search
         index = text_search._text_index
         indexed = []
@@ -52,8 +53,16 @@ async def test_search_preserves_order_unicode_buffers_and_issues_when_reads_fini
             return index(content)
 
         monkeypatch.setattr(text_search, "_text_index", text_index)
+        original_hash = WorkspaceService.content_hash
+        hashed = []
+
+        def hash_text(content):
+            hashed.append(content)
+            return original_hash(content)
+
+        monkeypatch.setattr(WorkspaceService, "content_hash", staticmethod(hash_text))
         async with asyncio.timeout(10):
-            result = await service.search_content(WorkspaceTextSearchRequest(query="NEEDLE", include=["*.ts"], exclude=["04.ts"],
+            result = await service.search_content(WorkspaceTextSearchRequest(query="NEEDLE", whole_word=True, include=["*.ts"], exclude=["04.ts"],
                 buffers=[SearchBuffer(path="01.ts", content="NEEDLE unsaved", original="disk unchanged", content_hash="buffer-hash")]))
         assert [file["path"] for file in result["files"]] == ["00.ts", "01.ts", "02.ts"]
         assert result["match_count"] == 3 and not result["truncated"]
@@ -63,7 +72,9 @@ async def test_search_preserves_order_unicode_buffers_and_issues_when_reads_fini
         assert result["files"][1]["content_hash"] == "buffer-hash" and result["files"][1]["from_buffer"]
         assert [issue["path"] for issue in result["issues"]] == ["05.ts"]
         assert "01.ts" not in read_paths and "04.ts" not in read_paths
-        assert len(indexed) == 3
+        assert len(indexed) == 4
+        assert hashed == [file["content"] for file in result["files"] if not file["from_buffer"]]
+        assert all(file["content_hash"] == original_hash(file["content"]) for file in result["files"] if not file["from_buffer"])
         assert (host.workspace / "01.ts").read_text() == "disk unchanged"
 
 
