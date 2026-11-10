@@ -150,6 +150,9 @@ async def test_http_editor_bytes_hash_rename_preview_and_dirty_search_use_accept
     assert moved.status_code == 200, moved.text
     tree = await server.client.get("/api/workspace/tree", params={**server.params, "path": "new-folder"})
     assert tree.status_code == 200 and tree.json()["entries"][0]["path_uri"] == (server.host.workspace / "new-folder/moved.txt").as_uri(), tree.text
+    entry = tree.json()["entries"][0]
+    assert entry["size_bytes"] == len(b"saved executor\r\n")
+    assert entry["modified_at"] and not entry["is_dir"]
     assert (server.view / "same.txt").read_text() == "controller must remain untouched\n"
     removed = await server.client.delete("/api/workspace/path", params={**server.params, "path": "new-folder", "recursive": True})
     assert removed.status_code == 200 and not (server.host.workspace / "new-folder").exists(), removed.text

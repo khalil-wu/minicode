@@ -123,8 +123,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         return [self.resolve(item["path"]) for item in outcome["entries"] if self.visible(self.resolve(item["path"]))]
 
     async def list_tree(self, value):
-        path = await self.allowed(value, inventory=True)
-        metadata = await self.metadata(path)
+        path, metadata = await self._allowed_path(value, inventory=True)
         if metadata is None:
             raise HTTPException(404, f"Path not found: {value}")
         if not metadata["isDirectory"]:
@@ -146,12 +145,16 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             walked = {self.resolve(item["path"]): item for item in outcome["entries"]}
             visible = {entry: item for entry, item in walked.items() if self.visible(entry)}
             populated = {entry.parent for entry in visible if entry.parent in walked}
-            for child, item in visible.items():
-                if child.parent in walked or not self.scope.resolve_access(child.uri).can_read:
-                    continue
-                is_dir = item["kind"] == "directory"
-                entries.append(self._tree_entry(child, is_dir=is_dir, size=item["size"], modified_ms=item["modifiedAtMs"],
-                    has_children=is_dir and child in populated))
+            children = [child for child in visible if child.parent not in walked and self.scope.resolve_access(child.uri).can_read]
+            # Source fs/walk carries only path and kind. File size and mtime
+            # belong to fs/getMetadata on the same captured executor.
+            async with aclosing(_ordered_reads(children, self.metadata)) as completed:
+                async for child, info in completed:
+                    if info is None:
+                        raise FileNotFoundError(child.uri)
+                    is_dir = info["isDirectory"]
+                    entries.append(self._tree_entry(child, is_dir=is_dir, size=info["size"], modified_ms=info["modifiedAtMs"],
+                        has_children=is_dir and child in populated))
         entries.sort(key=lambda item: (not item.is_dir, item.name.casefold()))
         return WorkspaceTreeResponse(workspace_root=self.workspace_root_value, requested_path=self.display(path), entries=entries, **self.identity())
 

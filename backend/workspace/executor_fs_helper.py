@@ -184,9 +184,7 @@ def _walk(root: Path, options: dict, cancelled) -> dict:
                 return outcome
             entry_count += 1
             path = directory / name
-            # FindFirstFile caches file size but reports zero for directories;
-            # preserve the metadata size returned by the existing Windows API.
-            if name != entry.name or os.name == "nt" and stat.S_ISDIR(value.st_mode) and not symlink:
+            if name != entry.name:
                 try:
                     value = path.lstat()
                     symlink = _is_link(value)
@@ -206,8 +204,7 @@ def _walk(root: Path, options: dict, cancelled) -> dict:
             # than resolving and decoding the whole absolute path per file.
             uri = (directory_uri.rstrip("/") + "/" + quote(name, safe="!$&'()*+,-.:;=@_~[]")
                    if directory_uri is not None else native_uri(path))
-            if not append("entries", path, uri=uri, kind="directory" if is_directory else "file",
-                    size=value.st_size, modifiedAtMs=max(0, value.st_mtime_ns // 1_000_000)):
+            if not append("entries", path, uri=uri, kind="directory" if is_directory else "file"):
                 return outcome
             if is_directory and depth < depth_limit and not (hidden and name.startswith(".")):
                 try:

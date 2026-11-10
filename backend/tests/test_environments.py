@@ -455,7 +455,9 @@ async def test_source_executable_interop_with_new_python_client(tmp_path):
     environment = manager.get_environment("test")
     try:
         info = await environment.info()
-        assert info["providerId"] and info["executorVersion"]
+        # Source omits providerId for unstamped builds; release version and
+        # actual shell metadata are still present in environment/info.
+        assert info["executorVersion"] and info["shell"]["path"]
         assert (await environment.status())["status"] == "ready"
         target = (tmp_path / "source-python-client.bin").as_uri()
         await environment.filesystem.write_file(target, b"Source\x00\xffUTF8", sandbox=None)

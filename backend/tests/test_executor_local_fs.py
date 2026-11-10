@@ -189,7 +189,7 @@ async def test_local_filesystem_direct_full_crud_binary_copy_and_source_shapes(t
 
 
 @pytest.mark.asyncio
-async def test_walk_retains_native_uri_and_metadata_for_escaped_names_and_directories(tmp_path):
+async def test_walk_retains_source_shape_for_escaped_names_and_directories(tmp_path):
     from backend.workspace.executor_fs_helper import native_uri
 
     root = tmp_path / "百分%#中文"
@@ -203,9 +203,7 @@ async def test_walk_retains_native_uri_and_metadata_for_escaped_names_and_direct
             "followDirectorySymlinks": False}, sandbox=None)
         expected = []
         for path in [nested, *sorted(nested.iterdir())]:
-            metadata = path.stat()
-            expected.append({"path": native_uri(path), "kind": "directory" if path.is_dir() else "file",
-                "size": metadata.st_size, "modifiedAtMs": metadata.st_mtime_ns // 1_000_000})
+            expected.append({"path": native_uri(path), "kind": "directory" if path.is_dir() else "file"})
         assert outcome == {"entries": expected, "errors": [], "truncated": False}
     finally:
         await fs.close()
@@ -385,15 +383,11 @@ async def test_local_walk_skips_file_and_broken_links_and_does_not_revisit_direc
     options = {"maxDepth": 64, "maxDirectories": 100, "maxEntries": 100, "followDirectorySymlinks": True}
     result = await fs.walk(root.as_uri(), options, sandbox=None)
 
-    def walked(path):
-        value = path.stat()
-        return {"size": value.st_size, "modifiedAtMs": value.st_mtime_ns // 1_000_000}
-
-    assert result == {"entries": [{"path": (root / "a.txt").as_uri(), "kind": "file", **walked(root / "a.txt")},
-                                  {"path": (root / "cycle").as_uri(), "kind": "directory", **walked(root / "cycle")}],
+    assert result == {"entries": [{"path": (root / "a.txt").as_uri(), "kind": "file"},
+                                  {"path": (root / "cycle").as_uri(), "kind": "directory"}],
                       "errors": [], "truncated": False}
     result = await fs.walk(root.as_uri(), {**options, "followDirectorySymlinks": False}, sandbox=None)
-    assert result["entries"] == [{"path": (root / "a.txt").as_uri(), "kind": "file", **walked(root / "a.txt")}]
+    assert result["entries"] == [{"path": (root / "a.txt").as_uri(), "kind": "file"}]
     await fs.close()
 
 
@@ -500,7 +494,7 @@ async def test_local_native_non_utf8_bytes_keep_source_uri_through_read_canonica
     root_uri = ExecutorPath.from_native(native_root, convention="posix").uri
     result = await fs.walk(root_uri, {"maxDepth": 1, "maxDirectories": 10, "maxEntries": 10,
         "followDirectorySymlinks": False}, sandbox=None)
-    assert result == {"entries": [{"path": uri, "kind": "file", "size": 11, "modifiedAtMs": os.stat(native).st_mtime_ns // 1_000_000}],
+    assert result == {"entries": [{"path": uri, "kind": "file"}],
                       "errors": [], "truncated": False}
     await fs.close()
 
