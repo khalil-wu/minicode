@@ -338,16 +338,19 @@ def run_readonly_git(
     root: Path, *args: str, timeout: float = 5,
     sandbox_policy: SandboxPolicy | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Keep synchronous snapshot callers inside the canonical Git boundary.
+    """Read app-owned Git metadata under the captured filesystem authority.
 
-    These services also run in existing async WS/scheduler hosts. A joined
-    worker owns the coroutine through pipe and sandbox cleanup; no task is
-    detached, and no session's bypass authority is borrowed for a snapshot.
+    Full-read scopes use the same fixed host command as workbench metadata.
+    Restricted scopes retain the canonical sandbox owner and joined cleanup.
     """
     from backend.sandbox import SandboxRunner
     from backend.tools.git_support import _run_git
 
     policy = sandbox_policy or readonly_git_policy(root)
+    if policy.resolve(cwd=root).full_disk_read:
+        from backend.services.workspace_api_service import run_ui_git_metadata
+
+        return run_ui_git_metadata(root, *args, timeout=timeout)
     launch_cwd = root
     argv = ["git", *args]
     if (root != policy.workspace_root
@@ -376,7 +379,10 @@ def run_readonly_git(
 def readonly_git_host_path(root: Path, value: str, *, sandbox_policy: SandboxPolicy | None = None) -> Path:
     from backend.sandbox import SandboxRunner
 
-    mapper = SandboxRunner(sandbox_policy or readonly_git_policy(root))
+    policy = sandbox_policy or readonly_git_policy(root)
+    if policy.resolve(cwd=root).full_disk_read:
+        return Path(value)
+    mapper = SandboxRunner(policy)
     return Path(mapper.map_path_from_sandbox(value))
 
 

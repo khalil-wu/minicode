@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -251,8 +252,10 @@ def run_ui_git_metadata(root: Path, *args: str, timeout: float = 10) -> subproce
     Model Git tools retain their ToolExecutionContext and sandbox runner; the
     workbench's own inventory does not require a model execution environment.
     """
+    hooks_path = "NUL" if os.name == "nt" else "/dev/null"
     return subprocess.run(
-        ["git", "--no-optional-locks", "--literal-pathspecs", *args], cwd=root,
+        ["git", "--no-optional-locks", "--literal-pathspecs", "-c", "safe.bareRepository=explicit",
+         "-c", f"core.hooksPath={hooks_path}", "-c", "core.fsmonitor=false", *args], cwd=root,
         env=sanitized_git_env(root), stdin=subprocess.DEVNULL, capture_output=True,
         text=True, encoding="utf-8", timeout=timeout,
     )

@@ -11,6 +11,7 @@ import pytest
 from backend.services import conversation_worktree_handoff_service as handoff
 from backend.services import health_service, workspace_api_service, workspace_service
 from backend.sandbox.runner import SandboxUnavailableError
+from backend.sandbox import SandboxPolicy
 from backend.tools import git_support
 
 
@@ -32,6 +33,7 @@ def test_sync_snapshot_from_async_host_waits_for_canonical_owner(monkeypatch, tm
         return _result(argv, "完成\n")
 
     monkeypatch.setattr(git_support, "_run_git", canonical)
+    monkeypatch.setattr(workspace_service, "readonly_git_policy", lambda root: SandboxPolicy(workspace_root=root, readable_roots=(root,)))
 
     async def oracle():
         host_thread = threading.get_ident()
@@ -109,6 +111,8 @@ def test_doctor_services_and_handoff_read_snapshots_use_request_root(monkeypatch
         raise AssertionError(argv)
 
     monkeypatch.setattr(git_support, "_run_git", canonical)
+    monkeypatch.setattr(workspace_service, "readonly_git_policy", lambda root: SandboxPolicy(workspace_root=root, readable_roots=(root,)))
+    monkeypatch.setattr(workspace_service, "_capture_readonly_git_policy", lambda root: (SandboxPolicy(workspace_root=root, readable_roots=(root,)), None))
     monkeypatch.setattr(workspace_service, "readonly_git_host_path", lambda root, value, **kwargs: root if value == "/workspace" else Path(value))
     assert workspace_service.git_branch_for(main) == "main"
     assert workspace_service.main_worktree_root(main) == main
@@ -166,6 +170,7 @@ def test_host_git_and_model_namespace_failures_remain_distinct(monkeypatch, tmp_
         raise SandboxUnavailableError("actual namespace unavailable")
 
     monkeypatch.setattr(git_support, "_run_git", canonical)
+    monkeypatch.setattr(workspace_service, "readonly_git_policy", lambda root: SandboxPolicy(workspace_root=root, readable_roots=(root,)))
     def host_unavailable(*args, **kwargs):
         raise OSError("host Git unavailable")
     monkeypatch.setattr(workspace_api_service, "run_ui_git_metadata", host_unavailable)

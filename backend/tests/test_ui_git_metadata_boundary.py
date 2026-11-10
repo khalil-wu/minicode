@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -80,7 +82,56 @@ def test_ui_metadata_uses_fixed_git_flags_and_scrubbed_host_environment(monkeypa
     monkeypatch.setattr("backend.services.workspace_api_service.subprocess.run", capture)
     result = run_ui_git_metadata(tmp_path, "branch", "--show-current")
     argv, options = calls[0]
-    assert argv == ["git", "--no-optional-locks", "--literal-pathspecs", "branch", "--show-current"]
+    assert argv == ["git", "--no-optional-locks", "--literal-pathspecs", "-c", "safe.bareRepository=explicit",
+        "-c", f"core.hooksPath={'NUL' if os.name == 'nt' else '/dev/null'}", "-c", "core.fsmonitor=false", "branch", "--show-current"]
     assert options["cwd"] == tmp_path and options["stdin"] == subprocess.DEVNULL
     assert "TAVILY_API_KEY" not in options["env"] and "GIT_DIR" not in options["env"]
     assert result.stdout == "main\n"
+
+
+def test_full_read_handoff_metadata_avoids_sandbox_probes_and_repository_helpers(tmp_path, monkeypatch):
+    from backend.services import workspace_service
+    from backend.tests.test_readonly_git_service_boundary import _real_repository
+
+    root = tmp_path / "repo"
+    _real_repository(root)
+    marker = tmp_path / "monitor-invocations"
+    monitor = tmp_path / "monitor.sh"
+    monitor.write_text("#!/bin/sh\nprintf invoked >> " + shlex.quote(marker.as_posix()) + "\nprintf '\\0'\n", encoding="utf-8", newline="\n")
+    monitor.chmod(0o755)
+    env = runtime_env.sanitized_git_env(root)
+    subprocess.run(["git", "config", "core.fsmonitor", shlex.quote(monitor.as_posix())], cwd=root, env=env, check=True, capture_output=True)
+    subprocess.run(["git", "status", "--porcelain"], cwd=root, env=env, check=True, capture_output=True)
+    assert marker.read_text() == "invoked"
+    index_before = (root / ".git/index").read_bytes()
+    policy = workspace_service.readonly_git_policy(root)
+    assert policy.resolve(cwd=root).full_disk_read
+
+    def no_sandbox(*_args, **_kwargs):
+        pytest.fail("App-owned full-read metadata cannot depend on sandbox discovery")
+
+    monkeypatch.setattr(SandboxRunner, "capability", no_sandbox)
+    monkeypatch.setattr(SandboxRunner, "map_path_from_sandbox", no_sandbox)
+    result = workspace_service.run_readonly_git(root, "status", "--porcelain=v2", "--branch", sandbox_policy=policy)
+    assert result.returncode == 0 and "# branch.head main" in result.stdout
+    assert workspace_service.readonly_git_host_path(root, str(root), sandbox_policy=policy) == root
+    assert marker.read_text() == "invoked"
+    assert (root / ".git/index").read_bytes() == index_before
+
+
+def test_full_read_host_metadata_error_does_not_retry_under_another_authority(tmp_path, monkeypatch):
+    from backend.services import workspace_service
+    from backend.tests.test_readonly_git_service_boundary import _real_repository
+
+    root = tmp_path / "repo"
+    _real_repository(root)
+    policy = workspace_service.readonly_git_policy(root)
+    assert policy.resolve(cwd=root).full_disk_read
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("fixed host Git unavailable")
+
+    monkeypatch.setattr("backend.services.workspace_api_service.run_ui_git_metadata", unavailable)
+    monkeypatch.setattr(SandboxRunner, "capability", lambda *_args, **_kwargs: pytest.fail("No alternate authority after failure"))
+    with pytest.raises(OSError, match="fixed host Git unavailable"):
+        workspace_service.run_readonly_git(root, "status", sandbox_policy=policy)
