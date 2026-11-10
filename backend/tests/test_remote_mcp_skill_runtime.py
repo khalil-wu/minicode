@@ -529,13 +529,17 @@ for line in sys.stdin.buffer:
         # This is a real yielded Code Mode cell. Its second MCP request has
         # not started when the next model step replaces the active catalog.
         held = {}
-        original_execute = parent_proxy.execute
+        proxy_type = type(parent_proxy)
+        original_execute = proxy_type.execute
 
-        async def capture_run(args, *, context=None):
-            held["run"] = context.run_context
-            return await original_execute(args, context=context)
+        async def capture_run(proxy, args, *, context=None):
+            if context is not None and proxy._manager is prepared.mcp_manager:
+                held["run"] = context.run_context
+            return await original_execute(proxy, args, context=context)
 
-        monkeypatch.setattr(parent_proxy, "execute", capture_run)
+        # Admission copies the proxy; patch the class so a copied wrapper uses
+        # its actual receiver instead of recursively preparing the old proxy.
+        monkeypatch.setattr(proxy_type, "execute", capture_run)
         for tool in (ToolExecTool(), ToolWaitTool(), ToolSearchTool(registry)):
             registry.register(tool)
 
@@ -559,6 +563,7 @@ for line in sys.stdin.buffer:
             context_builder=context, agent_settings=AgentSettings(code_mode_only=True), token_budget=budget)
         state, _, _, _, _ = await run_model(tmp_path, model, session=session, context=context)
         assert state.terminal_status == "completed", model.reports
+        assert all(not call.result_payload["is_error"] for call in state.tool_calls), state.tool_calls
         assert model.reports[-1]["output"] == ["原环境真实执行😀"] and held["retirement"].done()
         assert prepared.mcp_manager.get_client("bound") is None
 
