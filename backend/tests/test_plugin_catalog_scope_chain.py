@@ -221,7 +221,7 @@ def test_configured_marketplace_and_registered_snapshot_are_read_from_current_so
     assert failed["status"] == "error" and failed["error"] and failed["plugins"] == []
 
 
-@pytest.mark.parametrize("case", ["canonical", "disabled", "foreign-source", "other-market", "other-version", "own-logo"])
+@pytest.mark.parametrize("case", ["canonical", "disabled", "relocated-source", "foreign-source", "other-market", "other-version", "own-logo"])
 def test_installed_bundled_icon_uses_matching_source_and_version_without_rewriting_the_install(catalog_home, case, monkeypatch):
     env = catalog_home
     bundled = Path(__file__).resolve().parents[1] / "plugins/bundled"
@@ -230,6 +230,8 @@ def test_installed_bundled_icon_uses_matching_source_and_version_without_rewriti
     payload["interface"].pop("logo")
     if case == "other-version":
         payload["version"] = "0.2.1"
+    if case == "foreign-source":
+        payload["mcp_servers"]["cua_repl"]["command"] = "different-runtime"
     source = env.root / "old-package"
     manifest = source / ".minicode-plugin/plugin.json"
     manifest.parent.mkdir(parents=True)
@@ -238,7 +240,7 @@ def test_installed_bundled_icon_uses_matching_source_and_version_without_rewriti
         (source / "custom.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><title>Custom</title></svg>', encoding="utf8")
     manifest.write_text(json.dumps(payload), encoding="utf8")
     market = "other" if case == "other-market" else "minicode-bundled"
-    origin = env.root if case == "foreign-source" else bundled
+    origin = env.root if case in {"foreign-source", "relocated-source"} else bundled
     record = PluginStore().materialize(source, name="computer-use", marketplace=market, version=payload["version"],
         source={"source": "directory", "path": str(origin.resolve())})
     settings = json.loads(env.settings.read_text(encoding="utf8"))
@@ -253,7 +255,7 @@ def test_installed_bundled_icon_uses_matching_source_and_version_without_rewriti
     plugin = next(item for item in response.json()["plugins"] if item["id"] == record.plugin_id)
     assert plugin["path"] == str(record.path) and plugin["enabled"] is (case != "disabled")
     logo = env.client.get("/api/plugins/asset", params={"plugin_path": plugin["path"], "variant": "logo", "workspace_root": ""})
-    if case in {"canonical", "disabled", "own-logo"}:
+    if case in {"canonical", "disabled", "own-logo", "relocated-source"}:
         assert plugin["iconVariant"] == "logo" and plugin["iconVariants"] == ["logo"]
         assert logo.status_code == 200
         expected = source / "custom.svg" if case == "own-logo" else bundled / "computer-use/assets/app-icon.png"

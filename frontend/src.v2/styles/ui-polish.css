@@ -395,10 +395,22 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   background: var(--surface-hover) !important;
 }
 
-.mc-sidebar-right-tab-frame[data-active="true"] {
+.mc-sidebar-right-tab-frame[data-active="true"],
+.mc-sidebar-browser-tab-host .mc-browser-tab[data-active="true"] {
   border-color: transparent !important;
-  background: var(--workbench-tool) !important;
-  box-shadow: none !important;
+  background: var(--surface-active) !important;
+  box-shadow: inset 0 0 0 1px var(--border-subtle) !important;
+}
+
+.mc-sidebar-right-tab[aria-selected="false"],
+.mc-sidebar-browser-tab-host .mc-browser-tab[data-active="false"] > [role="tab"] {
+  color: var(--text-secondary) !important;
+}
+
+.mc-sidebar-right-tab[aria-selected="true"],
+.mc-sidebar-browser-tab-host .mc-browser-tab[data-active="true"] > [role="tab"] {
+  color: var(--text-primary) !important;
+  font-weight: var(--fw-medium);
 }
 
 .mc-sidebar-right [role="tab"] {

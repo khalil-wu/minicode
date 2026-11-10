@@ -95,11 +95,11 @@ def _primary_plugin_manifest(plugin_dir: Path) -> Path | None:
 
 
 def _bundled_plugin_asset_manifest(entry: Mapping[str, Any]) -> Path | None:
-    """Find the packaged assets belonging to an installed bundled version."""
+    """Match an installed bundled definition across app installation paths."""
     from backend.plugins.manager import BUNDLED_MARKETPLACE_ROOT, _read_marketplace_manifest
 
     source = entry.get("source_descriptor") or {}
-    if source.get("source") != "directory" or _filesystem_path_key(source.get("path")) != _filesystem_path_key(BUNDLED_MARKETPLACE_ROOT.resolve()):
+    if source.get("source") != "directory":
         return None
     if entry.get("store_valid") is False:
         return None
@@ -109,7 +109,22 @@ def _bundled_plugin_asset_manifest(entry: Mapping[str, Any]) -> Path | None:
             continue
         manifest = plugin_manifest_path(BUNDLED_MARKETPLACE_ROOT / item["source"]["path"])
         payload = _read_plugin_manifest(manifest)
-        if payload is not None and payload.get("version") == entry.get("version"):
+        if payload is None or payload.get("version") != entry.get("version"):
+            continue
+        if _filesystem_path_key(source.get("path")) == _filesystem_path_key(BUNDLED_MARKETPLACE_ROOT.resolve()):
+            return manifest
+        installed_path = _primary_plugin_manifest(Path(entry["path"]))
+        installed = _read_plugin_manifest(installed_path) if installed_path is not None else None
+        if installed is None:
+            continue
+        # A packaged app can move while its installed plugin remains in user
+        # data. Require the same definition, allowing only the declared image
+        # fields to differ; a matching name/version never substitutes code.
+        def definition(value):
+            interface = {key: item for key, item in value.get("interface", {}).items()
+                if key not in {"logo", "logoDark", "composerIcon"}}
+            return {**value, "interface": interface}
+        if definition(installed) == definition(payload):
             return manifest
     return None
 

@@ -20,6 +20,14 @@ def is_native_cua(config):
 
 
 def build_native_bootstrap(*, python, app_access, native_source=None, approval_home=None, python_module_root=None):
+    if python_module_root is not None and native_source is None:
+        # The local receiver already owns these packaged modules. Inlining
+        # them into --eval also duplicates them inside the Windows sandbox
+        # launch request, where the complete argv can exceed CreateProcess.
+        options = {"python": python, "pythonModuleRoot": python_module_root,
+            "appAccess": app_access, "approvalHome": approval_home}
+        return ("const {startNativeCua}=await import(" + json.dumps((ROOT / "native_cua_entry.mjs").as_uri())
+            + ");await startNativeCua(" + json.dumps(options, separators=(",", ":")) + ");")
     source = native_source if native_source is not None else (ROOT / "native_cua_windows.py").read_text(encoding="utf-8")
     compressed = base64.b64encode(gzip.compress(source.encode(), mtime=0)).decode()
     prefix = "import sys;sys.path.insert(0," + repr(python_module_root) + ");" if python_module_root is not None else ""

@@ -147,8 +147,25 @@ def test_explicit_native_selection_uses_receiving_python_and_never_installed_run
         is_configured_cua(replace(selected, env={**selected.env, "MINICODE_CUA_PROVIDER": "unknown"}))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Actual Windows native companion startup")
+@pytest.mark.asyncio
+async def test_packaged_local_companion_initializes_and_reads_windows_without_inline_runtime(tmp_path, monkeypatch):
+    async with native_companion(tmp_path, monkeypatch, choice={"action": "decline"}, production=True) as case:
+        client = case.client
+        # The permission launcher serializes argv alongside its environment.
+        # Leave room for that captured environment instead of embedding code.
+        launch = json.dumps({"argv": [case.config.command, *case.config.args], "env": {"PATH": "x" * 14_000}})
+        assert len(subprocess.list2cmdline(["sandbox.exe", "--launch-restricted-windows-sandbox", launch])) < 32767
+        assert {tool.name for tool in await client.list_tools()} == {"js", "js_reset", "js_add_node_module_dir"}
+        owner = {"conversation_id": "native-local-read", "turn_id": "native-local-turn", "session_id": "native-local-session"}
+        result = await client.call_tool("js", {"code": "var windows = await cua.getState(); nodeRepl.write('NATIVE_WINDOWS_READ_OK');"}, request_owner=owner)
+        assert not result.is_error, text(result)
+        assert "NATIVE_WINDOWS_READ_OK" in text(result)
+        assert not case.approvals  # Listing windows performs no input or app capture.
+
+
 @asynccontextmanager
-async def native_companion(tmp_path, monkeypatch, *, choice, app_access=None, blocked=False):
+async def native_companion(tmp_path, monkeypatch, *, choice, app_access=None, blocked=False, production=False):
     from backend.agent.environment_selection import EnvironmentConfig, EnvironmentConfigState, ThreadEnvironmentDefaults, ThreadEnvironments, TurnEnvironmentRequest, TurnEnvironmentSelection
     from backend.environments import EnvironmentManager
     from backend.mcp.environment_runtime import MCPEnvironmentRuntime
@@ -171,7 +188,8 @@ async def native_companion(tmp_path, monkeypatch, *, choice, app_access=None, bl
     fixture = Path(__file__).parent / "fixtures/native_cua_receiving.py"
     source = "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[2])) + ")\n" + fixture.read_text(encoding="utf-8")
     real_builder = build_native_bootstrap
-    monkeypatch.setattr(module, "build_native_bootstrap", lambda **kwargs: real_builder(**kwargs, native_source=source))
+    if not production:
+        monkeypatch.setattr(module, "build_native_bootstrap", lambda **kwargs: real_builder(**kwargs, native_source=source))
     log = tmp_path / "native-fixture.jsonl"
     selected = MCPServerConfig("cua_repl", command=shutil.which("node"), env={
         "MINICODE_CUA_PROVIDER": PROVIDER, "CUA_REPL_ENABLED_SURFACES": "computer", "MINICODE_CUA_FIXTURE_LOG": str(log)})
