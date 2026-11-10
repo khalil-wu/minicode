@@ -437,8 +437,8 @@ def create_workspace_router() -> APIRouter:
                 if message["type"] == "http.disconnect":
                     return
 
-        scan = asyncio.create_task(service.project_index(include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths)
-            if isinstance(service, ExecutorEditorService) else project_index_runtime.read(service, include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths, previous_revision=previous_revision, previous_instance_id=previous_instance_id))
+        scan = asyncio.create_task(project_index_runtime.read(service, include_dependencies=include_dependencies,
+            include_dependency_paths=include_dependency_paths, previous_revision=previous_revision, previous_instance_id=previous_instance_id))
         disconnect = asyncio.create_task(wait_for_disconnect())
         try:
             completed, _ = await asyncio.wait((scan, disconnect), return_when=asyncio.FIRST_COMPLETED)

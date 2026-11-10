@@ -38,7 +38,7 @@ class ProjectIndexScanCancelled(Exception):
 
 @dataclass(frozen=True)
 class CachedProjectIndexFile:
-    version: tuple[int, int, int]
+    version: tuple[int, int, int] | None
     file: WorkspaceProjectIndexFile
 
 

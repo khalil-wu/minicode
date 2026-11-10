@@ -307,32 +307,61 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         results.sort(key=lambda item: (-item["score"], item["path"]))
         return {"query": query, "results": results[:limit], **self.identity()}
 
-    async def project_index(self, *, include_dependencies=False, include_dependency_paths=False, **_revision):
-        from backend.workspace.project_index import _file_kind, _DEPENDENCY_IGNORED_DIRS
-        outcome = await self.walk(self.cwd)
+    async def project_index(self, *, include_dependencies=False, include_dependency_paths=False,
+                            cached_files=None, updated_files=None, dirty_paths=frozenset(),
+                            incremental=False, dependency_paths=()):
+        from backend.workspace.project_index import CachedProjectIndexFile, _file_kind, _DEPENDENCY_IGNORED_DIRS
+        cached_files = cached_files or {}
+        if incremental:
+            for relative in dirty_paths:
+                metadata = await self.metadata(self.cwd.joinpath(relative))
+                if metadata is None or not metadata["isFile"]:
+                    incremental = False
+                    break
         files, issues, dependencies, entries = [], [], [], []
-        for entry in outcome["entries"]:
-            if entry["kind"] != "file":
-                continue
-            path = self.resolve(entry["path"])
-            relative = path.relative_to(self.cwd).as_posix()
-            dependency = "node_modules" in path.relative_to(self.cwd).parts
-            kind = _file_kind(path.pure, dependency=dependency)
-            if kind is None or any(part in _DEPENDENCY_IGNORED_DIRS for part in path.relative_to(self.cwd).parts[:-1]):
-                continue
-            if dependency:
-                dependencies.append(relative)
-                if not include_dependencies:
+        if incremental:
+            dependencies.extend(dependency_paths)
+            entries.extend((relative, relative, cached.file.kind)
+                for relative, cached in cached_files.items()
+                if include_dependencies or "node_modules" not in PurePosixPath(relative).parts)
+        else:
+            outcome = await self.walk(self.cwd)
+            for entry in outcome["entries"]:
+                if entry["kind"] != "file":
                     continue
-            entries.append((path, relative, kind))
+                path = self.resolve(entry["path"])
+                relative = path.relative_to(self.cwd).as_posix()
+                dependency = "node_modules" in path.relative_to(self.cwd).parts
+                kind = _file_kind(path.pure, dependency=dependency)
+                if kind is None or any(part in _DEPENDENCY_IGNORED_DIRS for part in path.relative_to(self.cwd).parts[:-1]):
+                    continue
+                if dependency:
+                    dependencies.append(relative)
+                    if not include_dependencies:
+                        continue
+                entries.append((path.uri, relative, kind))
+            issues.extend(WorkspaceProjectIndexIssue(path=entry["path"], status_code=500, message=str(entry)) for entry in outcome["errors"])
+            if outcome["truncated"]:
+                issues.append(WorkspaceProjectIndexIssue(path=".", status_code=413, message="Executor walk was truncated."))
 
         async def read_entry(entry):
             path, relative, kind = entry
+            if incremental and relative not in dirty_paths:
+                cached = cached_files[relative]
+                if updated_files is not None:
+                    updated_files[relative] = cached
+                return cached.file
             try:
-                file = await self.read_file(path.uri)
+                file = await self.read_file(path)
             except HTTPException as error:
                 return WorkspaceProjectIndexIssue(path=relative, status_code=error.status_code, message=str(error.detail))
-            return WorkspaceProjectIndexFile(**file.model_dump(), kind=kind)
+            result = WorkspaceProjectIndexFile(**file.model_dump(), kind=kind)
+            if updated_files is not None:
+                # Source metadata has millisecond timestamps and no stable file
+                # identity. Only watcher-invalidated incremental scans reuse
+                # content; a new tree scan always reads the accepted executor.
+                updated_files[relative] = CachedProjectIndexFile(None, result)
+            return result
 
         async with aclosing(_ordered_reads(entries, read_entry)) as completed:
             async for _, result in completed:
@@ -340,9 +369,6 @@ class ExecutorEditorService(ExecutorWorkspaceService):
                     issues.append(result)
                 else:
                     files.append(result)
-        issues.extend(WorkspaceProjectIndexIssue(path=entry["path"], status_code=500, message=str(entry)) for entry in outcome["errors"])
-        if outcome["truncated"]:
-            issues.append(WorkspaceProjectIndexIssue(path=".", status_code=413, message="Executor walk was truncated."))
         return WorkspaceProjectIndexResponse(workspace_root=self.workspace_root_value, files=files,
             dependency_paths=sorted(dependencies) if include_dependency_paths or include_dependencies else None,
             complete=not issues, issues=issues, **self.identity())

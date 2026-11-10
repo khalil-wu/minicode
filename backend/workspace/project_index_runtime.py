@@ -4,6 +4,7 @@ import asyncio
 import os
 import threading
 import uuid
+from copy import copy
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ class _Scan:
     base_revision: int
     cached_files: dict[str, CachedProjectIndexFile]
     readers: set[asyncio.Task] = field(default_factory=set)
+    cancel_async: bool = False
 
 
 @dataclass
@@ -43,6 +45,8 @@ class _WorkspaceIndex:
     generation: int = 0
     instance_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     listeners: set[Callable[[str, int], None]] = field(default_factory=set)
+    parent: _WorkspaceIndex | None = field(default=None, repr=False)
+    scopes: dict[tuple, _WorkspaceIndex] = field(default_factory=dict, repr=False)
 
 
 def _root_key(root: Path) -> str:
@@ -74,8 +78,17 @@ class ProjectIndexRuntime:
             self._forget_idle(entry)
 
     def _forget_idle(self, entry: _WorkspaceIndex) -> None:
-        if entry.owners == 0 and entry.readers == 0 and entry.scan is None:
-            self._workspaces.pop(_root_key(entry.root), None)
+        mounted = entry.parent or entry
+        if mounted.owners == 0:
+            mounted.scopes = {key: scope for key, scope in mounted.scopes.items()
+                if scope.readers or scope.scan is not None}
+        if mounted.owners == 0 and mounted.readers == 0 and mounted.scan is None and not mounted.scopes:
+            self._workspaces.pop(_root_key(mounted.root), None)
+
+    def _entries(self):
+        for mounted in self._workspaces.values():
+            yield mounted
+            yield from mounted.scopes.values()
 
     def subscribe_invalidation(self, root: Path, listener: Callable[[str, int], None]) -> Callable[[], None]:
         with self._lock:
@@ -97,17 +110,18 @@ class ProjectIndexRuntime:
 
     def invalidate_path(self, root: Path, path: Path) -> None:
         with self._lock:
-            entry = self._workspaces.get(_root_key(root))
-            if entry is not None:
-                entry.revision += 1
+            mounted = self._workspaces.get(_root_key(root))
+            if mounted is not None:
                 relative = path.relative_to(root).as_posix()
-                entry.dirty.add(relative)
-                if _is_dependency(relative):
-                    self._notify_invalidated(entry)
+                for entry in (mounted, *mounted.scopes.values()):
+                    entry.revision += 1
+                    entry.dirty.add(relative)
+                    if _is_dependency(relative):
+                        self._notify_invalidated(entry)
 
     def invalidate_paths(self, paths: tuple[Path, ...]) -> None:
         with self._lock:
-            for entry in self._workspaces.values():
+            for entry in self._entries():
                 changed = [path.relative_to(entry.root).as_posix() for path in paths if path.is_relative_to(entry.root)]
                 if changed:
                     entry.revision += 1
@@ -118,7 +132,7 @@ class ProjectIndexRuntime:
     def invalidate_all(self, root: Path | None = None, *, mutation_policy: SandboxPolicy | None = None) -> None:
         authority = mutation_policy.resolve() if mutation_policy is not None else None
         with self._lock:
-            for entry in self._workspaces.values():
+            for entry in self._entries():
                 if authority is not None and not authority.full_disk_write:
                     writable = authority.writable_roots
                     if not any(grant.is_path_writable(entry.root) or
@@ -143,9 +157,20 @@ class ProjectIndexRuntime:
                     incremental: bool, dependency_paths: tuple[str, ...], base_revision: int) -> WorkspaceProjectIndexResponse:
         updated: dict[str, CachedProjectIndexFile] = {}
         try:
-            result = await asyncio.to_thread(build_project_index, service,
-                include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths, stop=stop, cached_files=cached,
-                updated_files=updated, dirty_paths=dirty, incremental=incremental, dependency_paths=dependency_paths)
+            from .executor_editor import ExecutorEditorService
+
+            options = dict(include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths,
+                cached_files=cached, updated_files=updated, dirty_paths=dirty,
+                incremental=incremental, dependency_paths=dependency_paths)
+            if isinstance(service, ExecutorEditorService):
+                # The shared scan owns its lease even when its first HTTP reader
+                # disconnects while another reader is still waiting for it.
+                scanner = copy(service)
+                scanner.lease = service.lease.clone()
+                async with scanner:
+                    result = await scanner.project_index(**options)
+            else:
+                result = await asyncio.to_thread(build_project_index, service, stop=stop, **options)
             with self._lock:
                 if entry.revision == revision:
                     entry.generation = base_revision + 1
@@ -167,10 +192,26 @@ class ProjectIndexRuntime:
                 self._forget_idle(entry)
 
     async def read(self, service: WorkspaceService, *, include_dependencies: bool = False, include_dependency_paths: bool = False, previous_revision: int | None = None, previous_instance_id: str | None = None) -> WorkspaceProjectIndexResponse:
-        root = service.workspace_root_path()
+        from .executor_editor import ExecutorEditorService
+
+        executor = isinstance(service, ExecutorEditorService)
+        if executor and service.context.turn_environment.is_remote:
+            # Source exposes no filesystem watch subscription. A remote request
+            # remains a fresh scan of its captured executor, without a local watcher.
+            return await service.project_index(include_dependencies=include_dependencies, include_dependency_paths=include_dependency_paths)
+        root = service.cwd.to_local_path() if executor else service.workspace_root_path()
         reader = asyncio.current_task()
         with self._lock:
-            entry = self._workspaces.setdefault(_root_key(root), _WorkspaceIndex(root))
+            mounted = self._workspaces.setdefault(_root_key(root), _WorkspaceIndex(root))
+            if executor:
+                key = (service.environment, service.scope, service.cwd)
+                # Authority changes retire inactive snapshots. An admitted scan
+                # keeps its original view until all of its readers release it.
+                mounted.scopes = {scope_key: scope for scope_key, scope in mounted.scopes.items()
+                    if scope_key == key or scope.readers or scope.scan is not None}
+                entry = mounted.scopes.setdefault(key, _WorkspaceIndex(root, parent=mounted))
+            else:
+                entry = mounted
             entry.readers += 1
             required_revision = entry.revision
         try:
@@ -185,7 +226,8 @@ class ProjectIndexRuntime:
                             entry.complete and bool(entry.dirty) and not include_dependency_paths and all(path in entry.files and not path.endswith(".gitignore")
                                 for path in entry.dirty) and (not include_dependencies or all(path in entry.files for path in entry.dependency_paths)),
                             entry.dependency_paths, entry.generation))
-                        scan = _Scan(task, stop, include_dependencies, include_dependency_paths, entry.revision, entry.generation, cached)
+                        scan = _Scan(task, stop, include_dependencies, include_dependency_paths, entry.revision, entry.generation, cached,
+                            cancel_async=executor)
                         entry.scan = scan
                     scan.readers.add(reader)
                 try:
@@ -201,7 +243,10 @@ class ProjectIndexRuntime:
                         scan.readers.remove(reader)
                         stop_scan = not scan.readers and not scan.task.done()
                         if stop_scan:
+                            already_stopping = scan.stop.is_set()
                             scan.stop.set()
+                            if scan.cancel_async and not already_stopping:
+                                scan.task.cancel()
                     if stop_scan:
                         # Cancellation is not complete until the bounded file
                         # workers observe it and their thread actually exits.
@@ -210,6 +255,11 @@ class ProjectIndexRuntime:
                                 await asyncio.shield(scan.task)
                             except asyncio.CancelledError:
                                 pass
+                    with self._lock:
+                        # A task cancelled before its first step never enters
+                        # _scan's finally block. Retire that exact scan here too.
+                        if scan.task.done() and entry.scan is scan:
+                            entry.scan = None
                 if (scan.revision < required_revision or (include_dependencies and not scan.include_dependencies)
                     or (include_dependency_paths and not (scan.include_dependencies or scan.include_dependency_paths))):
                     continue
@@ -221,11 +271,15 @@ class ProjectIndexRuntime:
                     changed = [file for file in source_files if scan.cached_files.get(file.path) is None
                         or scan.cached_files[file.path].file != file]
                     removed = sorted(path for path in scan.cached_files if not _is_dependency(path) and path not in present)
-                    return result.model_copy(update={"files": changed, "removed_paths": removed, "base_revision": scan.base_revision})
-                if not include_dependencies and scan.include_dependencies:
+                    result = result.model_copy(update={"files": changed, "removed_paths": removed, "base_revision": scan.base_revision})
+                elif not include_dependencies and scan.include_dependencies:
                     files = [file for file in result.files if not _is_dependency(file.path)]
                     issues = [issue for issue in result.issues if not _is_dependency(issue.path)]
-                    return result.model_copy(update={"files": files, "issues": issues, "complete": not issues})
+                    result = result.model_copy(update={"files": files, "issues": issues, "complete": not issues})
+                if executor:
+                    identity = {"session_id": service.context.session_id, "conversation_id": service.context.conversation_id}
+                    result = result.model_copy(update={**identity,
+                        "files": [file.model_copy(update=identity) for file in result.files]})
                 return result
         finally:
             with self._lock:
@@ -234,14 +288,16 @@ class ProjectIndexRuntime:
 
     async def shutdown(self) -> None:
         with self._lock:
-            scans = [entry.scan for entry in self._workspaces.values() if entry.scan is not None]
+            scans = [entry.scan for entry in self._entries() if entry.scan is not None]
             for scan in scans:
                 for reader in scan.readers:
                     reader.cancel()
                 scan.stop.set()
+                if scan.cancel_async:
+                    scan.task.cancel()
         results = await asyncio.gather(*(scan.task for scan in scans), return_exceptions=True)
         with self._lock:
-            for entry in list(self._workspaces.values()):
+            for entry in list(self._entries()):
                 entry.files.clear()
                 entry.dirty.clear()
                 self._forget_idle(entry)
