@@ -127,7 +127,12 @@ async def test_actual_updates_during_startup_survive_the_combined_admission(tmp_
 
 
 @pytest.mark.asyncio
-async def test_event_arriving_during_admission_write_is_not_cleared_by_its_older_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("clock", ["real", "same_tick", "backward"])
+async def test_event_arriving_during_admission_write_is_not_cleared_by_its_older_receipt(tmp_path, monkeypatch, clock):
+    if clock != "real":
+        from itertools import count
+        ticks = count(1_794_000_000_000_000_000, -1 if clock == "backward" else 0)
+        monkeypatch.setattr("backend.ws.agent_runner.time.time_ns", lambda: next(ticks))
     session, owner, adapter = session_for(tmp_path, monkeypatch)
     repo = session.conversation_repo
     repo.save_context_snapshot(owner.id, {"ui_agent_state": previous_ui()})
@@ -152,6 +157,7 @@ async def test_event_arriving_during_admission_write_is_not_cleared_by_its_older
         assert await asyncio.to_thread(entered.wait, 5)
         await publishers[0]("task.update", {"conversation_id": owner.id,
             "message_id": "current-answer", "id": "late-task", "content": "Actual concurrent event", "status": "in_progress"})
+        assert session.ui_agent_state_store.pending[owner.id][0] > snapshots[0]["_ui_agent_state_revision"]
         release.set()
         await task
         await complete(session)

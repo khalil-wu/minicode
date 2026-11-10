@@ -1730,7 +1730,7 @@ class SessionAgentRunnerMixin:
             field_name = {"turn.plan.updated": "plan", "task.update": "todos", "agent.progress": "agentProgress"}.get(event_type)
             if field_name is not None:
                 reset_fields.discard(field_name)
-        revision = max(revision + 1, time.time_ns())
+        revision = state_store.next_revision(conversation_id, revision)
         cache[conversation_id] = (revision, next_state)
         pending[conversation_id] = (revision, next_state)
         task = tasks.get(conversation_id)
@@ -1804,7 +1804,7 @@ class SessionAgentRunnerMixin:
                 return conversation
 
             revision = (
-                max(persisted_revision + 1, time.time_ns())
+                state_store.next_revision(owner, persisted_revision)
                 if changed
                 else persisted_revision
             )
@@ -5280,8 +5280,8 @@ class SessionAgentRunnerMixin:
                         for key in admission_ui_fields if current_ui[key] == admission_ui_base[key]}}
                     saved_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = admitted_ui
                     if admitted_ui != current_ui:
-                        saved_snapshot[UI_AGENT_STATE_REVISION_KEY] = max(
-                            int(saved_snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0) + 1, time.time_ns())
+                        saved_snapshot[UI_AGENT_STATE_REVISION_KEY] = state_store.next_revision(
+                            conversation.id, int(saved_snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0))
                 admissions = dict(saved_snapshot.get("turn_admissions") or {})
                 admissions[user_message_id] = {
                     "history_start": max(0, int(history_start)),
