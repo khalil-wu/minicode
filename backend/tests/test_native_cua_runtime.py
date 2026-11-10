@@ -418,7 +418,9 @@ async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_
     # Substitute only the native Windows boundary for protocol CI on other OSes.
     monkeypatch.setattr(module, "native_cua_config", lambda selected, attachment, access: native_config(selected,
         replace(attachment, peer_info={**attachment.peer_info, "platformOs": "windows"}), access))
-    selected = MCPServerConfig("cua_repl", command=shutil.which("node"), env={
+    # This model immediately calls the tool, so require its actual connection;
+    # optional startup may legitimately omit its catalog after the shared grace.
+    selected = MCPServerConfig("cua_repl", command=shutil.which("node"), required=True, env={
         "MINICODE_CUA_PROVIDER": PROVIDER, "CUA_REPL_ENABLED_SURFACES": "computer", "MINICODE_CUA_FIXTURE_LOG": str(log)})
     if origin == "plugin":
         from backend.plugins.manager import PluginManager, PluginSnapshot
@@ -427,7 +429,8 @@ async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_
         manifest = root / ".codex-plugin/plugin.json"
         manifest.parent.mkdir(parents=True)
         manifest.write_text(json.dumps({"name": "computer-use", "mcp_servers": {"cua_repl": {
-            "transport": selected.transport, "command": selected.command, "args": selected.args, "env": selected.env}}}), encoding="utf-8")
+                "transport": selected.transport, "command": selected.command, "args": selected.args, "env": selected.env,
+                "required": selected.required}}}), encoding="utf-8")
         plugin = {"id": "computer-use@fixture", "name": "computer-use", "path": str(root),
             "manifest_paths": [str(manifest)], "enabled": True}
         monkeypatch.setattr(PluginManager, "snapshot", lambda self, **kwargs: PluginSnapshot({

@@ -480,7 +480,8 @@ def test_run_command_tool_reads_large_stderr_without_deadlock(tmp_path: Path) ->
 
 def test_native_command_keeps_nonzero_process_exit_in_successful_tool_response(tmp_path: Path) -> None:
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / 'artifacts'))
-    result = asyncio.run(execute_command(tool, {'command': _python_command("import sys; sys.stderr.write('boom\\n'); sys.exit(7)"), 'timeout': 5}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy.bypass())))
+    # Exit-code projection must not include arbitrary user shell profile startup.
+    result = asyncio.run(execute_command(tool, {'command': _python_command("import sys; sys.stderr.write('boom\\n'); sys.exit(7)"), 'timeout': 5, 'login': False}, context=_native_command_context(tool, tmp_path, sandbox_policy=SandboxPolicy.bypass())))
     assert result.is_error is False
     assert result.status == 'success'
     assert 'Exit code: 7' in result.content
