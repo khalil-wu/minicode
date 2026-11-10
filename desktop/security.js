@@ -5,6 +5,7 @@ const path = require("node:path");
 const writeFileAtomic = require("write-file-atomic");
 
 const { normalizeWithTrailingSeparator, isSamePath } = require("./utils");
+const { worktreeTrustRoot } = require("./worktree-trust");
 
 // ---------------------------------------------------------------------------
 // State
@@ -12,6 +13,7 @@ const { normalizeWithTrailingSeparator, isSamePath } = require("./utils");
 
 let trustedWorkspaceRoots = new Set();
 let approvedWorkspaceRoots = new Set();
+let inheritedWorktreeRoots = new Set();
 let appReadOnlyRoots = new Set();
 let userOutputRoots = new Set();
 let appendDesktopLog = () => {};
@@ -37,6 +39,7 @@ function canonicalizeRootSet(roots) {
 
 function init({ initialRoots, readOnlyRoots, userOutputRoots: outputRoots, logger, trustedRootsFile: rootsFile }) {
   trustedWorkspaceRoots = canonicalizeRootSet(initialRoots);
+  inheritedWorktreeRoots = new Set();
   trustedRootsFile = typeof rootsFile === "string" ? rootsFile : "";
   approvedWorkspaceRoots = readApprovedWorkspaceRoots();
   appReadOnlyRoots = canonicalizeRootSet(readOnlyRoots);
@@ -47,7 +50,16 @@ function init({ initialRoots, readOnlyRoots, userOutputRoots: outputRoots, logge
 }
 
 function getTrustedWorkspaceRoots() {
-  return trustedWorkspaceRoots;
+  return new Set([...trustedWorkspaceRoots, ...currentWorktreeRoots()]);
+}
+
+function currentWorktreeRoots() {
+  if (!inheritedWorktreeRoots.size) return [];
+  const approved = readApprovedWorkspaceRoots();
+  return [...inheritedWorktreeRoots].filter(root => {
+    const primary = worktreeTrustRoot(root);
+    return primary && isWithinRootSet(primary, approved);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -186,14 +198,14 @@ function rememberTrustedWorkspaceRoot(targetPath) {
 function isTrustedWorkspaceRootPath(targetPath) {
   const resolved = tryCanonicalizePath(targetPath);
   if (!resolved) return false;
-  for (const root of trustedWorkspaceRoots) {
+  for (const root of getTrustedWorkspaceRoots()) {
     if (isSamePath(resolved, root)) return true;
   }
   return false;
 }
 
 function isWithinTrustedWorkspace(targetPath) {
-  return isWithinRootSet(targetPath, trustedWorkspaceRoots);
+  return isWithinRootSet(targetPath, trustedWorkspaceRoots) || isWithinRootSet(targetPath, currentWorktreeRoots());
 }
 
 function isWithinRootSet(targetPath, roots) {
@@ -250,6 +262,11 @@ function restoreTrustedWorkspaceRoot(targetPath) {
     const persistedRoots = readApprovedWorkspaceRoots();
     const approvedRoot = Array.from(persistedRoots).find((root) => isSamePath(root, requestedRoot));
     if (!approvedRoot) {
+      const primary = worktreeTrustRoot(requestedRoot);
+      if (primary && isWithinRootSet(primary, persistedRoots)) {
+        inheritedWorktreeRoots.add(requestedRoot);
+        return requestedRoot;
+      }
       appendDesktopLog(`[desktop] rejected non-authoritative restored workspace: ${requestedRoot}`);
       return "";
     }
@@ -268,7 +285,7 @@ function trustedPathCandidates(targetPath) {
     return canonical ? [canonical] : [];
   }
   return Array.from(
-    trustedWorkspaceRoots,
+    getTrustedWorkspaceRoots(),
     (root) => tryCanonicalizePath(path.resolve(root, rawPath)),
   ).filter(Boolean);
 }
@@ -406,7 +423,7 @@ function isProtectedWritePath(resolvedPath) {
     if (PROTECTED_WRITE_PATH_PARTS.has(part)) return true;
   }
   // Handle worktree: .git may be a file containing "gitdir: <real-path>"
-  for (const root of trustedWorkspaceRoots) {
+  for (const root of getTrustedWorkspaceRoots()) {
     const dotGit = path.join(root, ".git");
     try {
       const stat = fs.statSync(dotGit);
