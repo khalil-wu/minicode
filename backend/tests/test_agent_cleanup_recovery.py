@@ -152,9 +152,15 @@ def test_recovery_retains_cleanup_intents_beyond_default_history_limit(runtime_f
     assert not recovered._swarm_store.get_subagent(child.subagent_id)["cleanup_pending"]
 
 
-def test_hydration_caps_only_settled_history_and_accepts_legacy_flags(runtime_factory):
+def test_hydration_caps_only_settled_history_and_accepts_legacy_flags(runtime_factory, monkeypatch):
+    from itertools import count
+
     runtime = runtime_factory("original")
     parent, child = _mark_pending(runtime, *_start_records(runtime))
+    # Hydration orders by persisted update time. Consecutive SQLite writes
+    # can share a millisecond; this fixture needs four distinct revisions.
+    ticks = count(epoch_ms())
+    monkeypatch.setattr("backend.agent.swarm_store.epoch_ms", lambda: next(ticks))
     for kind, record, save, identity in (
         ("root", parent, runtime._swarm_store.upsert_agent_run, "run_id"),
         ("child", child, runtime._swarm_store.upsert_subagent, "subagent_id"),
